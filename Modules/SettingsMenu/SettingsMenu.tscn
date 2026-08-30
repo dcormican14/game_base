@@ -1,0 +1,169 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Modules/SettingsMenu/SettingsMenu.cs" id="1_script"]
+
+[node name="SettingsMenu" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_script")
+
+[node name="Background" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.08, 0.08, 0.1, 0.94)
+
+[node name="CenterContainer" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="PanelContainer" type="PanelContainer" parent="CenterContainer"]
+layout_mode = 2
+
+[node name="MarginContainer" type="MarginContainer" parent="CenterContainer/PanelContainer"]
+layout_mode = 2
+theme_override_constants/margin_left = 24
+theme_override_constants/margin_top = 20
+theme_override_constants/margin_right = 24
+theme_override_constants/margin_bottom = 20
+
+[node name="VBoxContainer" type="VBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="TitleLabel" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+text = "Settings"
+horizontal_alignment = 1
+
+[node name="Tabs" type="TabContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(600, 420)
+
+[node name="Video" type="MarginContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs"]
+layout_mode = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
+
+[node name="Content" type="VBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="FullscreenCheck" type="CheckButton" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Fullscreen"
+
+[node name="VSyncCheck" type="CheckButton" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "VSync"
+
+[node name="ThirdPersonCheck" type="CheckButton" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Third-Person Camera"
+
+[node name="Audio" type="MarginContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs"]
+visible = false
+layout_mode = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
+
+[node name="Content" type="VBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Audio"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="VolumeRow" type="HBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Audio/Content"]
+layout_mode = 2
+
+[node name="VolumeLabel" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Audio/Content/VolumeRow"]
+layout_mode = 2
+custom_minimum_size = Vector2(200, 0)
+size_flags_horizontal = 3
+text = "Master Volume"
+
+[node name="MasterVolumeSlider" type="HSlider" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Audio/Content/VolumeRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(240, 0)
+size_flags_vertical = 4
+max_value = 1.0
+step = 0.05
+value = 0.8
+
+[node name="Controls" type="MarginContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs"]
+visible = false
+layout_mode = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
+
+[node name="Content" type="VBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="SensitivityRow" type="HBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content"]
+layout_mode = 2
+
+[node name="SensitivityLabel" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content/SensitivityRow"]
+layout_mode = 2
+custom_minimum_size = Vector2(200, 0)
+size_flags_horizontal = 3
+text = "Mouse Sensitivity"
+
+[node name="MouseSensitivitySlider" type="HSlider" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content/SensitivityRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(240, 0)
+size_flags_vertical = 4
+min_value = 0.01
+max_value = 0.5
+step = 0.01
+value = 0.15
+
+[node name="KeybindHint" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 13
+modulate = Color(1, 1, 1, 0.6)
+text = "Click a binding, then press any key, mouse or gamepad button. Esc cancels."
+
+[node name="ScrollContainer" type="ScrollContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content"]
+layout_mode = 2
+size_flags_vertical = 3
+horizontal_scroll_mode = 0
+
+[node name="KeybindList" type="VBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content/ScrollContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 6
+
+[node name="ResetKeybindsButton" type="Button" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Reset Keybinds to Defaults"
+
+[node name="BackButton" type="Button" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(0, 40)
+text = "Back"

@@ -1,0 +1,8 @@
+# Godot
+.godot/
+*.translation
+
+# .NET
+bin/
+obj/
+*.user
