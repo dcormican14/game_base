@@ -19,6 +19,7 @@ another project by copying that folder.
 | `Modules/Crosshair/` | Centre-screen pixel-art crosshair — 0-4 dashes spread evenly around the centre, fading out toward the tips |
 | `Modules/BlockEditor/` | Place/destroy blocks on bismuth blobs by looking at them |
 | `Modules/Stats/` | Performance overlay (FPS, frame/physics time, draw calls, tris, VRAM/memory), toggled in Settings -> Video |
+| `Modules/Skybox/` | Deep-space skybox — procedural stars + nebulae placeholder, or your own panorama/sky shader |
 | `Modules/Terrain/` | `[Tool]` procedural "workshop" terrain: flat dark checker floor, box platforms, prism ramps |
 | `Game/World.tscn` | Example gameplay scene wiring the modules together |
 
@@ -32,6 +33,90 @@ another project by copying that folder.
 Default controls: WASD move, Space jump, Shift sprint, Ctrl crouch (press
 while sprinting to slide), mouse look, Esc pause. Left click places a block on
 a bismuth blob, right click destroys one.
+
+## Painting your own skybox
+
+`Modules/Skybox/` ships a **placeholder**: a procedural starfield and nebula
+(`SpaceSky.gdshader`). It exists so the scene is not empty while you make real
+art. Pick a `Source` on the `Skybox` node to replace it.
+
+### Option 1 — Panorama (simplest, best for hand-painted art)
+
+Set `Source = Panorama` and drop your image into `PanoramaTexture`.
+
+The image is **equirectangular**: one wide picture wrapped around the sphere,
+exactly like a world map.
+
+- **Aspect must be 2:1** (4096x2048 or 8192x4096 are good sizes). Anything else
+  is stretched.
+- **The horizontal edges wrap**, so the left and right edges must match
+  seamlessly or you get a visible vertical seam.
+- **The top and bottom rows squash to a point** — the poles. Keep detail away
+  from the very top and bottom, or it smears.
+- Paint it in any 2D tool. For a night sky the whole image is essentially
+  black with stars, gas and distant galaxies painted on.
+- **Import settings matter**: select the texture in Godot and, under Import,
+  enable **High Dynamic Range** if you want stars brighter than white to bloom.
+  Set **Repeat** to Enabled so the horizontal wrap is clean, and leave
+  **Filter** on for painted art (turn it off only for deliberate pixel art).
+
+To get a starting canvas, you can bake the current placeholder to an image and
+paint over it:
+
+```gdscript
+var env := $Skybox/SkyboxEnvironment.environment
+var img := RenderingServer.sky_bake_panorama(env.sky.get_rid(), 1.0, false, Vector2i(4096, 2048))
+img.save_png("res://Assets/Sky/space_panorama.png")
+```
+
+Note that bake is saved in linear space with no tonemapping, so it looks very
+dark opened straight in an image editor — that is expected, not a bug.
+
+### Option 2 — Cubemap (six faces)
+
+If your art is authored as six cube faces, import them as a single
+`Cubemap` and sample it from a small custom sky shader:
+
+```glsl
+shader_type sky;
+uniform samplerCube panorama;
+void sky() { COLOR = texture(panorama, EYEDIR).rgb; }
+```
+
+Assign that shader to `CustomSkyShader` with `Source = CustomShader`.
+
+### Option 3 — Your own sky shader
+
+Set `Source = CustomShader` and supply any `shader_type sky` shader. The one
+built-in you need is `EYEDIR`, the normalized view direction for the pixel
+being drawn — everything is computed from that, so there is no geometry and no
+seam to worry about. `SpaceSky.gdshader` is a worked example.
+
+### Tuning the placeholder
+
+With `Source = Procedural`, the `Placeholder Look` group on the node exposes
+space colour, star density/brightness, and the two nebula colours + intensity.
+More knobs (star size, colour variation, nebula scale and contrast) are
+uniforms in `SpaceSky.gdshader`.
+
+### Performance notes
+
+Sky shaders run per pixel over the whole background, so they are easy to make
+accidentally expensive:
+
+- The starfield searches a **3x3 grid on a cube face**, not a 3x3x3 grid in 3D.
+  The 3D version costs 27 cell lookups per pixel and dropped this scene from
+  60 to single-digit FPS on its own.
+- The nebula's domain warp runs at **2 octaves** while the main density field
+  runs at 5. Running the warp at full depth triples the cost of the most
+  expensive part of the shader for detail the warp then smears away.
+- The `AT_CUBEMAP_PASS` branch skips stars when baking the radiance cubemap.
+  Stars contribute almost nothing to ambient light, and the bake covers six
+  cube faces.
+- The `Sky` uses `ProcessMode.Realtime` (fast filtering, 256x256 radiance).
+  `Quality` uses importance sampling that costs far more and buys nothing for
+  a smooth nebula gradient. If you author a sky with sharp bright features that
+  should show up in reflections, `Quality` may be worth it — measure first.
 
 ## Porting a module to another project
 
