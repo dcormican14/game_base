@@ -120,7 +120,11 @@ public partial class BlockEditor : Node3D
     /// </summary>
     private bool PlaceIfClear(Vector3I cell)
     {
-        if (_playerBody != null && OverlapsPlayer(cell))
+        // In sandbox the player is intangible and free-flying, so the
+        // don't-entomb-yourself guard is just an obstacle: placing a block
+        // where you happen to be floating is a normal thing to want.
+        bool intangible = _playerBody is PlayerController { IsSandbox: true };
+        if (!intangible && _playerBody != null && OverlapsPlayer(cell))
             return false;
 
         return _world.AddBlock(cell);

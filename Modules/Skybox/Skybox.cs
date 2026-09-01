@@ -49,6 +49,19 @@ public partial class Skybox : Node
         set { _panoramaTexture = value; Rebuild(); }
     }
 
+    private bool _panoramaFilter = true;
+    /// <summary>
+    /// Smooth the panorama texture when it is magnified. Leave on for painted
+    /// or photographic art; turn OFF for pixel art, which filtering blurs into
+    /// mush. Only applies when Source is Panorama.
+    /// </summary>
+    [Export]
+    public bool PanoramaFilter
+    {
+        get => _panoramaFilter;
+        set { _panoramaFilter = value; Rebuild(); }
+    }
+
     private Shader _customSkyShader;
     /// <summary>A <c>shader_type sky</c> shader. Used when Source is CustomShader.</summary>
     [Export]
@@ -263,9 +276,7 @@ public partial class Skybox : Node
         return new PanoramaSkyMaterial
         {
             Panorama = PanoramaTexture,
-            // Nearest keeps hand-drawn pixel art crisp; switch to true for
-            // painted or photographic panoramas.
-            Filter = true,
+            Filter = PanoramaFilter,
         };
     }
 
@@ -300,7 +311,7 @@ public partial class Skybox : Node
 
         bool hide = name switch
         {
-            nameof(PanoramaTexture) => Source != SkySource.Panorama,
+            nameof(PanoramaTexture) or nameof(PanoramaFilter) => Source != SkySource.Panorama,
             nameof(CustomSkyShader) => Source != SkySource.CustomShader,
             nameof(SpaceColor) or nameof(StarDensity) or nameof(StarCoverage) or nameof(StarBrightness)
                 or nameof(NebulaEnabled) or nameof(NebulaColorA) or nameof(NebulaColorB)

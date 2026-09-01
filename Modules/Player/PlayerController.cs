@@ -73,11 +73,34 @@ public partial class PlayerController : CharacterBody3D
     [Export] public StringName SprintAction { get; set; } = "sprint";
     [Export] public StringName CrouchAction { get; set; } = "crouch";
 
+    [ExportGroup("Sandbox")]
+    /// <summary>Double-tap jump to toggle free-fly inspection mode: no
+    /// gravity, no collision, WASD plus jump/crouch for up and down.</summary>
+    [Export] public bool AllowSandboxToggle { get; set; } = true;
+
+    /// <summary>How quickly the second tap must follow the first, in seconds.
+    /// Long enough to be comfortable, short enough that two deliberate jumps
+    /// in a row do not trip it.</summary>
+    [Export(PropertyHint.Range, "0.1,1,0.05")] public float SandboxDoubleTapWindow { get; set; } = 0.3f;
+
+    [Export] public float SandboxSpeed { get; set; } = 8f;
+    [Export] public float SandboxSprintSpeed { get; set; } = 20f;
+    /// <summary>How fast free-fly reaches its target velocity. Higher is
+    /// snappier; the damping keeps it from feeling like ice.</summary>
+    [Export] public float SandboxAcceleration { get; set; } = 14f;
+
     /// <summary>True while crouched (including during a slide).</summary>
     public bool IsCrouching { get; private set; }
 
     /// <summary>True while sliding.</summary>
     public bool IsSliding { get; private set; }
+
+    /// <summary>True in free-fly inspection mode: no gravity, no collision.
+    /// Read by the perf overlay so the mode is always visible on screen.</summary>
+    public bool IsSandbox { get; private set; }
+
+    /// <summary>Raised when sandbox mode turns on or off.</summary>
+    public event System.Action<bool> SandboxChanged;
 
     private Node3D _cameraPivot;
     private SpringArm3D _springArm;
@@ -89,6 +112,7 @@ public partial class PlayerController : CharacterBody3D
     private float _standCameraHeight;
     private Vector3 _slideDirection;
     private float _slideSpeed;
+    private float _lastJumpPressTime = float.NegativeInfinity;
 
     public override void _Ready()
     {
@@ -125,12 +149,15 @@ public partial class PlayerController : CharacterBody3D
 
     private void ApplyCameraMode()
     {
-        bool thirdPerson = SettingsService.Instance?.ThirdPerson ?? ThirdPersonFallback;
+        // Sandbox forces first person for its duration: a third-person spring
+        // arm would shove the camera back out of any block you fly into, and
+        // the character model would fill the view from the inside.
+        bool thirdPerson = !IsSandbox && (SettingsService.Instance?.ThirdPerson ?? ThirdPersonFallback);
         _springArm.SpringLength = thirdPerson ? CameraDistance : 0f;
         _springArm.Position = thirdPerson
             ? new Vector3(ShoulderOffset, ShoulderHeight, 0f)
             : Vector3.Zero;
-        _characterRig.Visible = thirdPerson || !HideBodyInFirstPerson;
+        _characterRig.Visible = thirdPerson || (!IsSandbox && !HideBodyInFirstPerson);
     }
 
     public override void _UnhandledInput(InputEvent @event)
@@ -156,6 +183,18 @@ public partial class PlayerController : CharacterBody3D
         Vector2 input = Input.GetVector(MoveLeftAction, MoveRightAction, MoveForwardAction, MoveBackAction);
         Vector3 direction = Transform.Basis * new Vector3(input.X, 0, input.Y);
         float horizontalSpeed = new Vector2(velocity.X, velocity.Z).Length();
+
+        // The double-tap is read BEFORE the jump below consumes the press, but
+        // the first tap still jumps normally — only the second one within the
+        // window toggles, so ordinary jumping is untouched.
+        if (Input.IsActionJustPressed(JumpAction))
+            NoteJumpPress();
+
+        if (IsSandbox)
+        {
+            FreeFly(direction, dt);
+            return;
+        }
 
         if (!IsOnFloor())
         {
@@ -201,6 +240,101 @@ public partial class PlayerController : CharacterBody3D
 
         Velocity = velocity;
         MoveAndSlide();
+        UpdateCameraHeight(dt);
+    }
+
+    // -------------------------------------------------------------- sandbox
+
+    /// <summary>
+    /// Records a jump press and toggles sandbox mode when two land inside
+    /// <see cref="SandboxDoubleTapWindow"/>. The window is cleared on the
+    /// toggle so a third tap starts a fresh pair rather than immediately
+    /// flipping back.
+    /// </summary>
+    private void NoteJumpPress()
+    {
+        if (!AllowSandboxToggle)
+            return;
+
+        float now = (float)Time.GetTicksMsec() / 1000f;
+        if (now - _lastJumpPressTime <= SandboxDoubleTapWindow)
+        {
+            _lastJumpPressTime = float.NegativeInfinity;
+            SetSandbox(!IsSandbox);
+            return;
+        }
+
+        _lastJumpPressTime = now;
+    }
+
+    /// <summary>Enters or leaves free-fly inspection mode.</summary>
+    public void SetSandbox(bool sandbox)
+    {
+        if (sandbox == IsSandbox)
+            return;
+
+        IsSandbox = sandbox;
+
+        if (sandbox)
+        {
+            // Stand up first: the crouch capsule and slide state make no sense
+            // while flying, and leaving them set would resize the body oddly
+            // on the way back out.
+            IsSliding = false;
+            IsCrouching = false;
+            UpdateCapsule();
+            Velocity = Vector3.Zero;
+        }
+
+        // Collision is switched off wholesale rather than just skipping
+        // MoveAndSlide: other bodies (and the block editor's placement test)
+        // query this body, and they should all agree it is intangible while
+        // inspecting.
+        SetCollisionLayerValue(1, !sandbox);
+        if (_collisionShape != null)
+            _collisionShape.Disabled = sandbox;
+
+        // The spring arm pulls the third-person camera out of anything solid,
+        // which would shove the view around the moment you fly into a block,
+        // and the character model would fill the view from the inside. Going
+        // first person for the duration is what actually lets you sit inside
+        // the geometry and look at it; ApplyCameraMode restores the player's
+        // real preference on the way out.
+        ApplyCameraMode();
+
+        SandboxChanged?.Invoke(sandbox);
+    }
+
+    /// <summary>
+    /// Free-fly movement: horizontal from the look direction, vertical from
+    /// jump/crouch, with no gravity and no ground contact.
+    ///
+    /// Position is written directly rather than through MoveAndSlide, because
+    /// MoveAndSlide always resolves collisions — it is what would stop the
+    /// camera entering a block. Disabling the collision shape alone is not
+    /// enough to pass through geometry.
+    /// </summary>
+    private void FreeFly(Vector3 direction, float dt)
+    {
+        // Fly along where the camera looks, so pushing forward while looking
+        // up climbs — the natural way to inspect something overhead.
+        Vector2 input = Input.GetVector(MoveLeftAction, MoveRightAction, MoveForwardAction, MoveBackAction);
+        Basis look = GlobalTransform.Basis * new Basis(new Vector3(1, 0, 0), Mathf.DegToRad(_pitchDegrees));
+        Vector3 wish = look * new Vector3(input.X, 0, input.Y);
+
+        if (Input.IsActionPressed(JumpAction))
+            wish += Vector3.Up;
+        if (Input.IsActionPressed(CrouchAction))
+            wish += Vector3.Down;
+
+        if (wish.LengthSquared() > 1f)
+            wish = wish.Normalized();
+
+        float speed = Input.IsActionPressed(SprintAction) ? SandboxSprintSpeed : SandboxSpeed;
+        float weight = 1f - Mathf.Exp(-SandboxAcceleration * dt);
+        Velocity = Velocity.Lerp(wish * speed, weight);
+
+        GlobalPosition += Velocity * dt;
         UpdateCameraHeight(dt);
     }
 

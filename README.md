@@ -17,8 +17,9 @@ another project by copying that folder.
 | `Modules/Filters/` | Drop-in screen-space stylization: outlines, pixelation, dither |
 | `Modules/Bismuth/` | `[Tool]` bismuth hopper-crystal blobs — stepped terraces on a jittered tessellation (art-direction prototype for project-infinite-world WP05) |
 | `Modules/Crosshair/` | Centre-screen pixel-art crosshair — 0-4 dashes spread evenly around the centre, fading out toward the tips |
+| `Modules/Blocks/` | World-grid cube world, shaped as tiered bismuth crystal by a face-displacement field (`BismuthShape` / `BismuthField`) |
 | `Modules/BlockEditor/` | Place/destroy blocks on bismuth blobs by looking at them |
-| `Modules/Stats/` | Performance overlay (FPS, frame/physics time, draw calls, tris, VRAM/memory), toggled in Settings -> Video |
+| `Modules/Stats/` | Performance overlay (FPS, frame/physics time, draw calls, tris, VRAM/memory) plus the current movement mode, toggled in Settings -> Video |
 | `Modules/Skybox/` | Deep-space skybox — procedural stars + nebulae placeholder, or your own panorama/sky shader |
 | `Modules/Terrain/` | `[Tool]` procedural "workshop" terrain: flat dark checker floor, box platforms, prism ramps |
 | `Game/World.tscn` | Example gameplay scene wiring the modules together |
@@ -32,7 +33,9 @@ another project by copying that folder.
 
 Default controls: WASD move, Space jump, Shift sprint, Ctrl crouch (press
 while sprinting to slide), mouse look, Esc pause. Left click places a block on
-a bismuth blob, right click destroys one.
+a bismuth blob, right click destroys one. **Double-tap Space** to toggle
+sandbox mode — free flight with no collision, for inspecting geometry from
+inside.
 
 ## Painting your own skybox
 
@@ -56,9 +59,11 @@ exactly like a world map.
 - Paint it in any 2D tool. For a night sky the whole image is essentially
   black with stars, gas and distant galaxies painted on.
 - **Import settings matter**: select the texture in Godot and, under Import,
-  enable **High Dynamic Range** if you want stars brighter than white to bloom.
-  Set **Repeat** to Enabled so the horizontal wrap is clean, and leave
-  **Filter** on for painted art (turn it off only for deliberate pixel art).
+  set **Repeat** to Enabled so the horizontal wrap is clean. Enable **High
+  Dynamic Range** if you want stars brighter than white to bloom.
+- **For pixel art, turn `Panorama Filter` OFF** on the Skybox node. Filtering
+  smooths the texture when magnified, which blurs hand-placed pixels into mush.
+  Leave it on for painted or photographic art.
 
 To get a starting canvas, you can bake the current placeholder to an image and
 paint over it:
@@ -341,6 +346,207 @@ live in the editor.
 4. `Sphere` samples its profile at uniform *angle*, not uniform height. A
    sphere is nearly flat near its equator, so height-sampled tiers come out at
    almost identical widths and the result reads as a barrel.
+
+## Bismuth block shaping
+
+`Modules/Blocks/` renders the world grid as tiered bismuth crystal rather than
+plain cubes. `Bismuth = false` on the `BlockWorld` node returns it to cubes;
+everything else — the grid, picking, placing, mining — is unchanged either way.
+
+### What moves: EDGES and CORNERS, not faces
+
+Real bismuth grows fastest where the most free space meets — along edges and
+especially at corners — which is why a hopper crystal has raised rims around
+recessed faces. So the displacement lives on the **12 edges and 8 corners** of
+each block. Flat faces stay flat; the rim around them steps out or pulls back.
+A corner reaches **twice as far as an edge**, because three directions of free
+space meet there rather than two.
+
+### The interlock rule — why blocks fit like puzzle pieces
+
+A lattice edge is shared by 4 blocks; a lattice corner by 8. Rather than each
+block deciding independently how far to grow (which would collide or leave
+gaps), the contested region around each lattice feature is awarded **whole to a
+single owner**, chosen by hashing that feature's position. The winner fills it;
+the losers vacate it. Nothing is created and nothing is destroyed, so space
+stays exactly tiled — gaplessness is structural, not something the mesher
+checks for.
+
+Every block touching a feature computes the same hash from the same position
+and reaches the same verdict, so **a block never inspects its neighbours to
+find its shape.** That is what makes planet scale affordable: a cube placed
+mid-game gets exactly the shape it would have had if the planet had generated
+it, so placement never re-shapes anything around it, and generation works in
+any order, on any thread.
+
+The winner is not uniformly random. A flowing 3D vector field is sampled at the
+feature and whichever contender lies furthest **along that flow** takes it.
+Because the flow varies smoothly, neighbouring features favour the same
+direction, so growth reads as a current running through the rock rather than as
+per-block static.
+
+### The 4x4x4 subdivision
+
+Each cell is 4x4x4 quarter-cells, classified by how many coordinates sit on a
+border:
+
+| Border coords | Region | Cells | Behaviour |
+|---|---|---|---|
+| 0 | **core** 2x2x2 | 8 | always solid, never contested |
+| 1 | face | 24 | fixed — flat faces stay flat |
+| 2 | **edge** | 24 | awarded per lattice edge |
+| 3 | **corner** | 8 | awarded per lattice corner |
+
+A winner's territory extends **outside** its own cell, into the space the
+losers vacated: an edge win takes a 2x2 run straddling the lattice edge, a
+corner win takes a 2x2x2 straddling the lattice corner. That straddling is what
+gives corners their double reach.
+
+Two partition details the correctness depends on:
+
+1. **Edges own only their middle** (t = 1..2), and the cells at each end belong
+   to the corners that terminate them. A full-length edge run double-claims
+   those cells, which overlaps wherever a block wins an edge but loses the
+   corner beside it.
+2. **An uncontested feature still has an owner** — it falls to the block that
+   nominally contains it. Letting `Growth` simply skip a contest leaves the
+   region claimed by nobody, which is a hole.
+
+### Why it is cheap
+
+A block's shape is 12 edge bits plus 8 corner bits, so the occupancy is built
+straight from the bitmask and meshed with a greedy merge, cached per distinct
+shape. Winners are memoized per lattice feature — each corner is shared by 8
+blocks and each edge by 4, so meshing a region would otherwise re-ask the same
+question 4-8 times. Measured **0.7M shape lookups/sec** (~47 ms for a 32³
+chunk), averaging **73 quads per block**.
+
+Greedy merging keys on WHICH NEIGHBOUR owns the space in front of a quad, not
+on the exact quarter-cell. Keying on the cell makes every tag unique so nothing
+ever merges, which nearly doubles the triangle count; keying on the neighbour
+lets flat runs fuse, and the runtime then checks each quarter-cell of the
+merged rectangle individually.
+
+### Verified properties
+
+Checked against the shipped code, not a model of it:
+
+- **Watertight** — across six seed/scale/roughness/growth regimes: 0 overlaps,
+  0 gaps over 4096 interior quarter-cells, core never lost.
+- **Exactly one winner per contest** — 0/512 corners and 0/1536 edges wrong.
+- **Rims move, faces do not** — 0 face-centre cells lost; 1727/1728 blocks show
+  rim growth.
+- **Corner reach is double an edge's** — corner wins spread along 3 axes, edge
+  wins along 2.
+- **Encloses exactly the solid set** — by the divergence theorem, mesh volume
+  equals occupancy exactly (delta 0).
+- **Culling opens no holes** — across seven seed/scale/roughness/growth
+  regimes, every quarter-face ground truth calls visible is emitted (0
+  missing). Some buried faces are still drawn, which costs triangles and never
+  a hole.
+- **Deterministic** — same seed, same shapes, across instances.
+
+### Edit cost
+
+A block edit re-meshes the whole world, so that pass has to stay cheap. For the
+default world (896 blocks) it is ~8 ms of C#, emitting ~17.8k triangles.
+
+Three things keep it there, each of which was measured to matter:
+
+- **Occupancy is built once per rebuild**, as one set of global quarter-cells
+  every block stamps into, and culling is then a single hash lookup. Asking
+  per-quad which of the 27 surrounding blocks might reach into a quarter-cell
+  re-derives the same answer thousands of times and measured **15x slower**.
+- **Collision uses the block hull, not the rendered surface.** The physics
+  engine builds a BVH over every triangle it is given, and crystal rims
+  multiply that count for relief no player can feel through a collision
+  capsule. Colliding against plain cube faces is **9.8x fewer triangles**
+  (1,816 vs 17,756) and is the single largest saving on an edit.
+- **One shared material**, not a fresh `StandardMaterial3D` per rebuild, which
+  would mean a new shader instance and a cold pipeline cache every edit.
+
+`Batch(...)` wraps several edits into one rebuild — a rebuild costs the same
+whether one block changed or a hundred, so any multi-block operation should use
+it.
+
+### Culling is the subtle part
+
+Face culling is the ONE place a neighbour is consulted, and getting it wrong
+costs either holes or triangles.
+
+The question asked is **"is this space solid in the world"**, not "does one
+particular neighbour fill it". Two failure modes sit either side of that:
+
+- Culling on *presence* of a neighbouring block tears holes. Under
+  edge-and-corner growth a rim can retreat inward, so the shared boundary is
+  genuinely exposed even with a solid block next door.
+- Culling only against the *one* neighbour a bake-time tag names leaves buried
+  faces drawn. Rims reach diagonally, so the block that actually buries a quad
+  is frequently not the face neighbour. That left **67% of emitted faces
+  buried but still rendered** — 94k triangles where 18k would do.
+
+A quad is dropped only when every quarter-cell it covers is solid, checked
+against the world's real occupancy. Residual over-draw is ~11%, all of it
+geometry that genuinely borders air somewhere along the merged rectangle.
+
+Note the mesh has T-junctions where a merged quad meets several smaller ones.
+The surfaces coincide exactly, so there is no hole, but if hairline seams ever
+show up under a specific renderer setting, that is where to look.
+
+### Knobs
+
+On the `BlockWorld` node, under **Bismuth**:
+
+- `Seed` — same seed, same planet.
+- `FlowScale` — cells per lobe of the flow. Larger gives long, lazy currents;
+  smaller gives a busier, more granular crystal.
+- `Roughness` — 0 lets the flow decide every contest, so growth runs in long
+  directional currents; 1 makes contests essentially random and the crystal
+  chaotic.
+- `Growth` — how many contests are awarded at all. 0 leaves every rim flat
+  (plain cubes); 1 claims every one.
+
+Under **Starter Fill**: `StarterSize` / `StarterDepth` lay down a slab sitting
+**on** the ground (its underside at y=0 — the workshop floor is the plane y=0,
+so sinking it below that z-fights), and `DemoSphereSize` / `DemoSphereHeight`
+float a ball of blocks overhead for inspecting the shaping from every angle,
+undersides included. Set either size to 0 to omit it.
+
+The surface is intentionally bumpy at this stage.
+
+
+## Sandbox mode
+
+Double-tap the jump key to toggle free-fly inspection: no gravity, no
+collision, WASD to fly along the look direction, jump/crouch for straight up
+and down, sprint to move faster. Double-tap again to drop back into normal
+movement. Every value is exported on `PlayerController` under **Sandbox**, and
+`AllowSandboxToggle` turns the gesture off entirely.
+
+The mode is shown as the first line of the performance overlay, and **sandbox
+forces that overlay visible** even when it is switched off in Settings. It is a
+state reachable by an accidental double-tap, and without the readout a player
+would be flying through walls with nothing on screen explaining why.
+
+Four details the mode depends on:
+
+1. **The first tap still jumps.** The detector runs before the jump code and
+   `IsActionJustPressed` is idempotent within a frame, so ordinary jumping is
+   untouched — only the second tap inside the window toggles.
+2. **The window resets on toggle**, so a third fast tap starts a fresh pair
+   instead of immediately flipping back.
+3. **Position is written directly**, not through `MoveAndSlide`, which always
+   resolves collisions and is exactly what would stop the camera entering a
+   block. Disabling the collision shape alone is not enough.
+4. **Sandbox forces first person.** A third-person spring arm pushes the camera
+   out of anything solid, so it would shove the view around the moment you fly
+   into a block, and the character model would fill the view from inside. The
+   player's real camera preference is restored on the way out.
+
+The block editor's don't-place-inside-yourself guard is skipped while in
+sandbox, since an intangible free-flying player has no reason to be blocked
+from building where they float.
+
 
 ## Block editing
 
