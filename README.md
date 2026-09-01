@@ -14,6 +14,11 @@ another project by copying that folder.
 | `Modules/SettingsMenu/` | Settings screen with a keybind list generated from the InputMap |
 | `Modules/Player/` | `CharacterBody3D` player rig — first- or third-person, toggled from settings; animated humanoid model |
 | `Assets/Characters/` | Character models, one folder per character (Mixamo XBot & YBot dummies) |
+| `Modules/Filters/` | Drop-in screen-space stylization: outlines, pixelation, dither |
+| `Modules/Bismuth/` | `[Tool]` bismuth hopper-crystal blobs — stepped terraces on a jittered tessellation (art-direction prototype for project-infinite-world WP05) |
+| `Modules/Crosshair/` | Centre-screen pixel-art crosshair — 0-4 dashes spread evenly around the centre, fading out toward the tips |
+| `Modules/BlockEditor/` | Place/destroy blocks on bismuth blobs by looking at them |
+| `Modules/Stats/` | Performance overlay (FPS, frame/physics time, draw calls, tris, VRAM/memory), toggled in Settings -> Video |
 | `Modules/Terrain/` | `[Tool]` procedural "workshop" terrain: flat dark checker floor, box platforms, prism ramps |
 | `Game/World.tscn` | Example gameplay scene wiring the modules together |
 
@@ -25,7 +30,8 @@ another project by copying that folder.
 3. Run. Main menu → Play loads `Game/World.tscn`.
 
 Default controls: WASD move, Space jump, Shift sprint, Ctrl crouch (press
-while sprinting to slide), mouse look, Esc pause.
+while sprinting to slide), mouse look, Esc pause. Left click places a block on
+a bismuth blob, right click destroys one.
 
 ## Porting a module to another project
 
@@ -48,10 +54,10 @@ while sprinting to slide), mouse look, Esc pause.
 - **Everything tunable is exported.** Speeds, gravity, camera distance, terrain
   size/seed/colors, scene paths, action names, settings defaults — all editable
   in the inspector without touching code.
-- **Settings screen is tabbed** (Video / Audio / Controls, a default Godot
-  `TabContainer`). Video holds fullscreen, vsync and the first/third-person
-  camera toggle; Audio holds master volume; Controls holds sensitivity and the
-  keybind list.
+- **Settings screen is tabbed** (Video / Audio / HUD / Controls, a default
+  Godot `TabContainer`). Video holds fullscreen, vsync and the first/third-person
+  camera toggle; Audio holds master volume; HUD holds the crosshair line count;
+  Controls holds sensitivity and the keybind list.
 - **Dynamic keybinds:** the settings screen lists every InputMap action that
   doesn't start with a `NonRebindablePrefixes` entry (default: `ui_`). Add a new
   action in Project Settings → Input Map and it shows up automatically.
@@ -65,7 +71,14 @@ while sprinting to slide), mouse look, Esc pause.
   `SettingsService.ThirdPerson` (persisted; the rig reacts live via the
   `SettingsChanged` signal, falling back to its `ThirdPersonFallback` export
   when the autoload is absent). `CameraDistance` sets the third-person
-  spring-arm length; the character model auto-hides in first person. Input
+  spring-arm length, with `ShoulderOffset`/`ShoulderHeight` placing the
+  character left of the crosshair so the model never covers the aim point;
+  the character model auto-hides in first person. Camera pitch spans a full
+  vertical sweep (`MinPitchDegrees` -89 to `MaxPitchDegrees` +89, stopping
+  just short of the poles to avoid gimbal flip). The **head** is what stays
+  limited — `PlayerAnimator`'s `MaxHeadPitchUp/DownDegrees` clamp how far the
+  neck turns, so at extreme angles the head stops at a natural limit while
+  the view keeps going. Input
   action names are exports, so the rig works with whatever action names a
   project already uses.
 - **Crouch & slide:** hold crouch to crouch (capsule shrinks, camera lowers,
@@ -151,3 +164,133 @@ while sprinting to slide), mouse look, Esc pause.
 - **Pause menu** can be instanced into any gameplay scene; it runs with
   `ProcessMode.Always` so it works while the tree is paused, and closes/opens
   the shared `SettingsMenu` scene internally.
+
+## Scene lighting
+
+`Game/World.tscn` enables sky-based ambient light on its `Environment`
+(`ambient_light_source = 3`, sky contribution 1.0). Without an ambient source a
+`DirectionalLight3D` is the only light in the scene, so every surface facing
+away from it receives zero light and renders black. Flat blocky terrain mostly
+hides this; rounded meshes such as the character do not - their shadowed side
+goes solid black. Any new scene wanting the same look needs the same ambient
+setup.
+
+## Stylized filter
+
+`Modules/Filters/StylizedFilter.tscn` is a drop-in post-process — instance it
+anywhere in a 3D scene and it renders a full-screen pass after everything else.
+Depth and normal buffers are only readable from `spatial` shaders, so it is a
+`MeshInstance3D` whose shader forces its quad over the viewport (not a
+ColorRect), with a large `extra_cull_margin` so it is never frustum-culled.
+
+Three independent effects, each toggleable in **Settings -> Video** and
+persisted like any other setting:
+
+- **Outlines** (on by default) - Roberts-cross edge detection over the depth
+  and normal buffers. Needs no per-mesh setup, so it works on the procedural
+  terrain automatically. The depth threshold scales with distance so far
+  geometry does not smear into solid lines, and outlines fade out approaching
+  `OutlineMaxDistance`.
+- **Pixelation** (off by default) - snaps sampling UVs to a virtual grid of
+  `PixelResolution` rows, width following the screen aspect so pixels stay
+  square. Every buffer is sampled through the snapped UV, so outlines land on
+  the same grid as the colour rather than drawing crisp lines over blocky
+  pixels.
+- **Dither** (off by default) - 4x4 ordered Bayer dither, applied in real
+  screen pixels so the pattern stays fine even while pixelating.
+
+Colour quantization is deliberately not included yet.
+
+Note that screen-space pixelation is prone to *pixel crawl* with a free-look
+camera - the pixel grid is fixed to the screen while the world moves, so
+surfaces shimmer as you turn. It is exposed as an option rather than the
+default for that reason; low-res textures with nearest-neighbour filtering are
+the more stable route to a chunky look.
+
+## Bismuth blobs
+
+`Modules/Bismuth/BismuthBlob.tscn` prototypes the terrain art direction from
+`project-infinite-world/.docs` (WP05 — the bismuth gate). Attach to any
+`StaticBody3D`; it is a `[Tool]` script, so every export regenerates the mesh
+live in the editor.
+
+**What it implements from the spec**
+
+- **Hopper-crystal stepping** — concentric terraces stepping inward as they
+  rise, each tier twisted (`TierTwistDegrees`) and drifted (`TierDrift`) from
+  the one below, so tiers form a square spiral rather than flat contour rings.
+  This is the doc's stated distinction: rice terraces vs. crystal. Set
+  `Squareness` to 0 to see the rice-terrace failure mode for comparison.
+- **The recessed cavity** — `HopperTiers` reverses the innermost tiers back
+  downward, giving the skeletal rim-grows-faster-than-face signature. 0 gives
+  a solid stepped pyramid.
+- **Terrace quantizer mapping** — the tier solve corresponds to the doc's
+  `ITerraceQuantizer`: `TerraceLevel` = tier index, `QuantizeAltitude` =
+  tier x `StepHeight`, `LateralInset` = `InsetPerStep`, plus `StepJitter`.
+- **Determinism doctrine** — a jittered quad grid (never free-floating nodes),
+  all jitter from a pure position+seed hash, and every vertex snapped to
+  quarter-node increments, per the spec's fixed-jitter rule.
+- **Tessellation** — cells are the dual of the jittered node grid, so terrace
+  faces are irregular quads rather than a visible square lattice, while
+  remaining watertight.
+- **Checkerboard** — cells alternate between `ColorA` and `ColorB` by grid
+  parity, matching the world floor, so the tessellation is legible as colour
+  as well as silhouette (the doc's "material banding falls out for free").
+- **`Shape`** — `Mound` is the default stepped cone. `Sphere` switches the tier
+  profile to a full sphere sampled at uniform angle, with its lower half sunk
+  below ground, giving a terraced ball. Its radius and step height derive from
+  `TierCount` and `InsetPerStep` so the proportions stay round regardless of
+  the mound dials.
+
+**Three non-obvious details that the look depends on**
+
+1. Tier membership is classified at each cell's *unjittered lattice*
+   position. Jitter shapes the cell outline, but if it also moves the sample
+   point, boundaries fragment and the silhouette combs into gaps.
+2. Terrace-edge wobble uses smoothed patch noise at `EdgePatchSize`, which
+   must stay several times `NodeSpacing`. Per-cell noise produces sawtooth
+   rubble instead of clean ledges.
+3. The cavity floor sits one step above the base, and the outermost tier takes
+   no edge jitter — otherwise the pit vanishes into the surrounding plate and
+   the silhouette breaks up.
+4. `Sphere` samples its profile at uniform *angle*, not uniform height. A
+   sphere is nearly flat near its equator, so height-sampled tiers come out at
+   almost identical widths and the result reads as a barrel.
+
+## Block editing
+
+`Modules/BlockEditor` raycasts from the camera centre (matching the crosshair)
+and edits whichever `BismuthBlob` it hits — left click places, right click
+destroys, both as rebindable input actions. It is instanced under the player
+and finds the active camera itself.
+
+The ray is cast from the **camera**, so the crosshair always edits what it
+covers and the character model is never in the way; `Reach` is measured from
+the *player* rather than the camera, or the camera's set-back distance would
+silently shorten it when standing away from a ledge. A placement is refused
+only when the cube would genuinely overlap the player capsule (a real
+box-vs-capsule test — a keep-out box around the body origin rejected valid
+placements near the feet, which is what made ledge edges refuse to build).
+
+Picking hands the blob the **ray**, not the contact point, and the blob marches
+along it to the first solid cell. A raycast hit lands exactly on a block face —
+a cell boundary — so mapping that single point to a cell rounds ambiguously
+between neighbours and can target an empty cell, which is why some clicks
+appeared to do nothing. Marching resolves faces, edges and corners
+consistently; measured 38/38 removals across angles and heights on a full blob.
+
+Edits are stored as **sparse per-block deltas on the blob** — keyed by
+(cell x, cell z, tier), not by column — applied on top of the generated field
+rather than baked into it. Per-block is what makes single-cube editing
+possible: a per-column "top tier" can only raise or clear a whole stack, so
+removing carved out the entire column and placing always landed on top of it.
+The mesher works from an explicit block set and emits only faces whose
+neighbour is absent, so a cube can be carved from the middle of a stack or
+stuck onto any one face. That is the
+diff-against-seed model from the terrain design: the blob still regenerates
+from its seed, and changing `Seed` or any terrace dial keeps player edits
+intact. `ClearEdits()` discards them.
+
+Note that each edit triggers a full blob rebuild (mesh plus trimesh collision),
+which is fine at these blob sizes but is the thing to replace with a dirty-chunk
+rebuild if blobs get much larger.

@@ -1,8 +1,12 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=11 format=3]
 
 [ext_resource type="Script" path="res://Modules/Terrain/WorkshopTerrain.cs" id="1_terrain"]
 [ext_resource type="PackedScene" path="res://Modules/Player/Player.tscn" id="2_player"]
 [ext_resource type="PackedScene" path="res://Modules/PauseMenu/PauseMenu.tscn" id="3_pause"]
+[ext_resource type="PackedScene" path="res://Modules/Filters/StylizedFilter.tscn" id="4_filter"]
+[ext_resource type="PackedScene" path="res://Modules/Stats/PerfStats.tscn" id="5_stats"]
+[ext_resource type="PackedScene" path="res://Modules/Crosshair/Crosshair.tscn" id="7_crosshair"]
+[ext_resource type="PackedScene" path="res://Modules/Blocks/BlockWorld.tscn" id="8_blocks"]
 
 [sub_resource type="ProceduralSkyMaterial" id="sky_material"]
 sky_top_color = Color(0.35, 0.46, 0.65, 1)
@@ -16,6 +20,9 @@ sky_material = SubResource("sky_material")
 [sub_resource type="Environment" id="environment"]
 background_mode = 2
 sky = SubResource("sky")
+ambient_light_source = 3
+ambient_light_sky_contribution = 1.0
+ambient_light_energy = 1.0
 tonemap_mode = 2
 
 [node name="World" type="Node3D"]
@@ -34,3 +41,11 @@ script = ExtResource("1_terrain")
 position = Vector3(0, 2, 0)
 
 [node name="PauseMenu" parent="." instance=ExtResource("3_pause")]
+
+[node name="StylizedFilter" parent="." instance=ExtResource("4_filter")]
+
+[node name="PerfStats" parent="." instance=ExtResource("5_stats")]
+
+[node name="Crosshair" parent="." instance=ExtResource("7_crosshair")]
+
+[node name="BlockWorld" parent="." instance=ExtResource("8_blocks")]

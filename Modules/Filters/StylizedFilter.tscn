@@ -1,0 +1,20 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://Modules/Filters/StylizedFilter.cs" id="1_script"]
+[ext_resource type="Shader" path="res://Modules/Filters/StylizedFilter.gdshader" id="2_shader"]
+
+[sub_resource type="QuadMesh" id="quad"]
+size = Vector2(2, 2)
+flip_faces = true
+
+[sub_resource type="ShaderMaterial" id="material"]
+render_priority = 100
+shader = ExtResource("2_shader")
+
+[node name="StylizedFilter" type="MeshInstance3D"]
+mesh = SubResource("quad")
+material_override = SubResource("material")
+extra_cull_margin = 16384.0
+cast_shadow = 0
+gi_mode = 0
+script = ExtResource("1_script")

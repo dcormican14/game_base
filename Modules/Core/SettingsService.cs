@@ -33,6 +33,11 @@ public partial class SettingsService : Node
     [Export] public bool DefaultFullscreen { get; set; }
     [Export] public bool DefaultVSync { get; set; } = true;
     [Export] public bool DefaultThirdPerson { get; set; } = true;
+    [Export] public bool DefaultOutlineFilter { get; set; } = true;
+    [Export] public bool DefaultPixelateFilter { get; set; } = true;
+    [Export] public bool DefaultDitherFilter { get; set; }
+    [Export] public bool DefaultShowPerfStats { get; set; }
+    [Export(PropertyHint.Range, "0,4,1")] public int DefaultCrosshairLines { get; set; } = 2;
 
     private readonly ConfigFile _config = new();
     private readonly Dictionary<StringName, InputEvent[]> _defaultBindings = new();
@@ -42,6 +47,11 @@ public partial class SettingsService : Node
     private bool _fullscreen;
     private bool _vsync;
     private bool _thirdPerson;
+    private bool _outlineFilter;
+    private bool _pixelateFilter;
+    private bool _ditherFilter;
+    private bool _showPerfStats;
+    private int _crosshairLines;
 
     /// <summary>Degrees of camera rotation per pixel of mouse movement.</summary>
     public float MouseSensitivity
@@ -75,6 +85,41 @@ public partial class SettingsService : Node
     {
         get => _thirdPerson;
         set { _thirdPerson = value; SaveAndNotify(); }
+    }
+
+    /// <summary>Stylized edge outlines. Consumed by StylizedFilter.</summary>
+    public bool OutlineFilter
+    {
+        get => _outlineFilter;
+        set { _outlineFilter = value; SaveAndNotify(); }
+    }
+
+    /// <summary>Low-resolution pixelation of the 3D view.</summary>
+    public bool PixelateFilter
+    {
+        get => _pixelateFilter;
+        set { _pixelateFilter = value; SaveAndNotify(); }
+    }
+
+    /// <summary>Ordered dithering, for a retro banded look.</summary>
+    public bool DitherFilter
+    {
+        get => _ditherFilter;
+        set { _ditherFilter = value; SaveAndNotify(); }
+    }
+
+    /// <summary>Top-left performance overlay. Consumed by PerfStats.</summary>
+    public bool ShowPerfStats
+    {
+        get => _showPerfStats;
+        set { _showPerfStats = value; SaveAndNotify(); }
+    }
+
+    /// <summary>Number of crosshair lines, 0-4. Consumed by Crosshair.</summary>
+    public int CrosshairLines
+    {
+        get => _crosshairLines;
+        set { _crosshairLines = Mathf.Clamp(value, 0, 4); SaveAndNotify(); }
     }
 
     public override void _EnterTree() => Instance = this;
@@ -177,8 +222,14 @@ public partial class SettingsService : Node
             case InputEventKey key:
             {
                 Key keycode = key.Keycode;
+                // Headless/dedicated-server display servers cannot map physical
+                // keys; fall back to the raw code rather than erroring per row.
                 if (key.PhysicalKeycode != Key.None)
-                    keycode = DisplayServer.KeyboardGetKeycodeFromPhysical(key.PhysicalKeycode);
+                {
+                    keycode = DisplayServer.GetName() == "headless"
+                        ? key.PhysicalKeycode
+                        : DisplayServer.KeyboardGetKeycodeFromPhysical(key.PhysicalKeycode);
+                }
                 string text = OS.GetKeycodeString(keycode);
                 return string.IsNullOrEmpty(text) ? key.AsText() : text;
             }
@@ -238,6 +289,11 @@ public partial class SettingsService : Node
         _fullscreen = DefaultFullscreen;
         _vsync = DefaultVSync;
         _thirdPerson = DefaultThirdPerson;
+        _outlineFilter = DefaultOutlineFilter;
+        _pixelateFilter = DefaultPixelateFilter;
+        _ditherFilter = DefaultDitherFilter;
+        _showPerfStats = DefaultShowPerfStats;
+        _crosshairLines = Mathf.Clamp(DefaultCrosshairLines, 0, 4);
 
         if (_config.Load(SettingsFilePath) != Error.Ok)
             return;
@@ -247,6 +303,11 @@ public partial class SettingsService : Node
         _fullscreen = _config.GetValue("video", "fullscreen", DefaultFullscreen).AsBool();
         _vsync = _config.GetValue("video", "vsync", DefaultVSync).AsBool();
         _thirdPerson = _config.GetValue("video", "third_person", DefaultThirdPerson).AsBool();
+        _outlineFilter = _config.GetValue("video", "outline_filter", DefaultOutlineFilter).AsBool();
+        _pixelateFilter = _config.GetValue("video", "pixelate_filter", DefaultPixelateFilter).AsBool();
+        _ditherFilter = _config.GetValue("video", "dither_filter", DefaultDitherFilter).AsBool();
+        _showPerfStats = _config.GetValue("video", "show_perf_stats", DefaultShowPerfStats).AsBool();
+        _crosshairLines = Mathf.Clamp(_config.GetValue("hud", "crosshair_lines", DefaultCrosshairLines).AsInt32(), 0, 4);
 
         if (!_config.HasSection("keybinds"))
             return;
@@ -275,6 +336,11 @@ public partial class SettingsService : Node
         _config.SetValue("video", "fullscreen", _fullscreen);
         _config.SetValue("video", "vsync", _vsync);
         _config.SetValue("video", "third_person", _thirdPerson);
+        _config.SetValue("video", "outline_filter", _outlineFilter);
+        _config.SetValue("video", "pixelate_filter", _pixelateFilter);
+        _config.SetValue("video", "dither_filter", _ditherFilter);
+        _config.SetValue("video", "show_perf_stats", _showPerfStats);
+        _config.SetValue("hud", "crosshair_lines", _crosshairLines);
 
         foreach (StringName action in GetRebindableActions())
         {

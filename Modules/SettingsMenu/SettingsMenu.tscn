@@ -79,6 +79,37 @@ unique_name_in_owner = true
 layout_mode = 2
 text = "Third-Person Camera"
 
+[node name="FilterSeparator" type="HSeparator" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+layout_mode = 2
+
+[node name="FilterLabel" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Stylized Filter"
+
+[node name="OutlineCheck" type="CheckButton" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Outlines"
+
+[node name="PixelateCheck" type="CheckButton" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Pixelation"
+
+[node name="DitherCheck" type="CheckButton" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Dither"
+
+[node name="StatsSeparator" type="HSeparator" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+layout_mode = 2
+
+[node name="PerfStatsCheck" type="CheckButton" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Video/Content"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Performance Stats"
+
 [node name="Audio" type="MarginContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs"]
 visible = false
 layout_mode = 2
@@ -108,6 +139,54 @@ size_flags_vertical = 4
 max_value = 1.0
 step = 0.05
 value = 0.8
+
+[node name="HUD" type="MarginContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs"]
+visible = false
+layout_mode = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 16
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 16
+
+[node name="Content" type="VBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/HUD"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="CrosshairLabel" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/HUD/Content"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Crosshair"
+
+[node name="CrosshairLinesRow" type="HBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/HUD/Content"]
+layout_mode = 2
+
+[node name="CrosshairLinesLabel" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/HUD/Content/CrosshairLinesRow"]
+layout_mode = 2
+custom_minimum_size = Vector2(200, 0)
+size_flags_horizontal = 3
+text = "Lines"
+
+[node name="CrosshairLinesSlider" type="HSlider" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/HUD/Content/CrosshairLinesRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(200, 0)
+size_flags_vertical = 4
+max_value = 4.0
+step = 1.0
+value = 2.0
+
+[node name="CrosshairLinesValue" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/HUD/Content/CrosshairLinesRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(32, 0)
+horizontal_alignment = 1
+text = "2"
+
+[node name="CrosshairHint" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/HUD/Content"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 13
+modulate = Color(1, 1, 1, 0.6)
+text = "Number of crosshair lines, spread evenly around the centre. 0 hides it."
 
 [node name="Controls" type="MarginContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs"]
 visible = false

@@ -1,8 +1,9 @@
-[gd_scene load_steps=5 format=3]
+[gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://Modules/Player/PlayerController.cs" id="1_script"]
 [ext_resource type="Script" path="res://Modules/Player/PlayerAnimator.cs" id="2_animator"]
 [ext_resource type="PackedScene" path="res://Assets/Characters/XBot/XBot.fbx" id="3_model"]
+[ext_resource type="PackedScene" path="res://Modules/BlockEditor/BlockEditor.tscn" id="4_editor"]
 
 [sub_resource type="CapsuleShape3D" id="capsule_shape"]
 radius = 0.35
@@ -34,3 +35,5 @@ margin = 0.25
 
 [node name="Camera3D" type="Camera3D" parent="CameraPivot/SpringArm"]
 current = true
+
+[node name="BlockEditor" parent="." instance=ExtResource("4_editor")]

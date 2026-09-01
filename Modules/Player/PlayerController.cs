@@ -46,10 +46,20 @@ public partial class PlayerController : CharacterBody3D
     /// <summary>Camera distance used in third-person mode. The first/third-person
     /// choice itself comes from SettingsService.ThirdPerson when the autoload is
     /// present, otherwise from ThirdPersonFallback.</summary>
-    [Export(PropertyHint.Range, "0,10,0.1")] public float CameraDistance { get; set; } = 4f;
+    [Export(PropertyHint.Range, "0,10,0.1")] public float CameraDistance { get; set; } = 1.5f;
     [Export] public bool ThirdPersonFallback { get; set; } = true;
-    [Export] public float MinPitchDegrees { get; set; } = -80f;
-    [Export] public float MaxPitchDegrees { get; set; } = 80f;
+    /// <summary>Over-the-shoulder offset in third person. Moving the camera
+    /// RIGHT (+X) puts the character on the LEFT of frame; a small value keeps
+    /// the framing tight, with the crosshair just past the shoulder rather
+    /// than far out in open space. Negative mirrors to the other shoulder.</summary>
+    [Export(PropertyHint.Range, "-2,2,0.05")] public float ShoulderOffset { get; set; } = 0.2f;
+    /// <summary>Camera height offset applied with the shoulder offset.</summary>
+    [Export(PropertyHint.Range, "-1,1,0.05")] public float ShoulderHeight { get; set; } = 0.15f;
+    /// <summary>Look limits, in degrees: -89 is straight down and +89 is
+    /// straight up, a full vertical sweep. Stopping just short of the poles
+    /// avoids the gimbal flip that happens exactly at +/-90.</summary>
+    [Export(PropertyHint.Range, "-89,0,0.5")] public float MinPitchDegrees { get; set; } = -89f;
+    [Export(PropertyHint.Range, "0,89,0.5")] public float MaxPitchDegrees { get; set; } = 89f;
     [Export] public float FallbackMouseSensitivity { get; set; } = 0.15f;
     [Export] public bool HideBodyInFirstPerson { get; set; } = true;
     [Export] public bool CaptureMouseOnReady { get; set; } = true;
@@ -117,6 +127,9 @@ public partial class PlayerController : CharacterBody3D
     {
         bool thirdPerson = SettingsService.Instance?.ThirdPerson ?? ThirdPersonFallback;
         _springArm.SpringLength = thirdPerson ? CameraDistance : 0f;
+        _springArm.Position = thirdPerson
+            ? new Vector3(ShoulderOffset, ShoulderHeight, 0f)
+            : Vector3.Zero;
         _characterRig.Visible = thirdPerson || !HideBodyInFirstPerson;
     }
 

@@ -23,8 +23,14 @@ public partial class SettingsMenu : Control
     private CheckButton _fullscreenCheck;
     private CheckButton _vsyncCheck;
     private CheckButton _thirdPersonCheck;
+    private CheckButton _outlineCheck;
+    private CheckButton _pixelateCheck;
+    private CheckButton _ditherCheck;
+    private CheckButton _perfStatsCheck;
     private HSlider _volumeSlider;
     private HSlider _sensitivitySlider;
+    private HSlider _crosshairLinesSlider;
+    private Label _crosshairLinesValue;
     private VBoxContainer _keybindList;
 
     private readonly Dictionary<StringName, Button> _bindButtons = new();
@@ -37,15 +43,31 @@ public partial class SettingsMenu : Control
         _fullscreenCheck = GetNode<CheckButton>("%FullscreenCheck");
         _vsyncCheck = GetNode<CheckButton>("%VSyncCheck");
         _thirdPersonCheck = GetNode<CheckButton>("%ThirdPersonCheck");
+        _outlineCheck = GetNode<CheckButton>("%OutlineCheck");
+        _pixelateCheck = GetNode<CheckButton>("%PixelateCheck");
+        _ditherCheck = GetNode<CheckButton>("%DitherCheck");
+        _perfStatsCheck = GetNode<CheckButton>("%PerfStatsCheck");
         _volumeSlider = GetNode<HSlider>("%MasterVolumeSlider");
         _sensitivitySlider = GetNode<HSlider>("%MouseSensitivitySlider");
+        _crosshairLinesSlider = GetNode<HSlider>("%CrosshairLinesSlider");
+        _crosshairLinesValue = GetNode<Label>("%CrosshairLinesValue");
         _keybindList = GetNode<VBoxContainer>("%KeybindList");
 
         _fullscreenCheck.Toggled += on => { if (Svc != null) Svc.Fullscreen = on; };
         _vsyncCheck.Toggled += on => { if (Svc != null) Svc.VSync = on; };
         _thirdPersonCheck.Toggled += on => { if (Svc != null) Svc.ThirdPerson = on; };
+        _outlineCheck.Toggled += on => { if (Svc != null) Svc.OutlineFilter = on; };
+        _pixelateCheck.Toggled += on => { if (Svc != null) Svc.PixelateFilter = on; };
+        _ditherCheck.Toggled += on => { if (Svc != null) Svc.DitherFilter = on; };
+        _perfStatsCheck.Toggled += on => { if (Svc != null) Svc.ShowPerfStats = on; };
         _volumeSlider.ValueChanged += v => { if (Svc != null) Svc.MasterVolume = (float)v; };
         _sensitivitySlider.ValueChanged += v => { if (Svc != null) Svc.MouseSensitivity = (float)v; };
+        _crosshairLinesSlider.ValueChanged += v =>
+        {
+            if (Svc != null)
+                Svc.CrosshairLines = (int)v;
+            _crosshairLinesValue.Text = ((int)v).ToString();
+        };
         GetNode<Button>("%ResetKeybindsButton").Pressed += OnResetKeybinds;
         GetNode<Button>("%BackButton").Pressed += () => EmitSignal(SignalName.BackPressed);
         VisibilityChanged += () => { if (Visible) RefreshAll(); };
@@ -174,8 +196,14 @@ public partial class SettingsMenu : Control
             _fullscreenCheck.SetPressedNoSignal(Svc.Fullscreen);
             _vsyncCheck.SetPressedNoSignal(Svc.VSync);
             _thirdPersonCheck.SetPressedNoSignal(Svc.ThirdPerson);
+            _outlineCheck.SetPressedNoSignal(Svc.OutlineFilter);
+            _pixelateCheck.SetPressedNoSignal(Svc.PixelateFilter);
+            _ditherCheck.SetPressedNoSignal(Svc.DitherFilter);
+            _perfStatsCheck.SetPressedNoSignal(Svc.ShowPerfStats);
             _volumeSlider.SetValueNoSignal(Svc.MasterVolume);
             _sensitivitySlider.SetValueNoSignal(Svc.MouseSensitivity);
+            _crosshairLinesSlider.SetValueNoSignal(Svc.CrosshairLines);
+            _crosshairLinesValue.Text = Svc.CrosshairLines.ToString();
         }
 
         RebuildKeybindList();
