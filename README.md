@@ -17,12 +17,15 @@ another project by copying that folder.
 | `Modules/Filters/` | Drop-in screen-space stylization: outlines, pixelation, dither |
 | `Modules/Bismuth/` | `[Tool]` bismuth hopper-crystal blobs — stepped terraces on a jittered tessellation (art-direction prototype for project-infinite-world WP05) |
 | `Modules/Crosshair/` | Centre-screen pixel-art crosshair — 0-4 dashes spread evenly around the centre, fading out toward the tips |
-| `Modules/Blocks/` | World-grid cube world, shaped as tiered bismuth crystal by a face-displacement field (`BismuthShape` / `BismuthField`) |
+| `Modules/Blocks/` | World-grid cube world, shaped as tiered bismuth crystal by an edge/corner growth field (`BismuthShape` / `BismuthField`); chunked meshing |
+| `Modules/BlockLevel/` | `[Tool]` level generator — a rounded pillar of rock with primitive solids scattered on and above its flat top |
+| `Modules/LoadingScreen/` | Progress bar shown while the block world meshes; holds the player until collision exists |
 | `Modules/BlockEditor/` | Place/destroy blocks on bismuth blobs by looking at them |
 | `Modules/Stats/` | Performance overlay (FPS, frame/physics time, draw calls, tris, VRAM/memory) plus the current movement mode, toggled in Settings -> Video |
 | `Modules/Skybox/` | Deep-space skybox — procedural stars + nebulae placeholder, or your own panorama/sky shader |
 | `Modules/Terrain/` | `[Tool]` procedural "workshop" terrain: flat dark checker floor, box platforms, prism ramps |
-| `Game/World.tscn` | Example gameplay scene wiring the modules together |
+| `Game/PillarLevel.tscn` | The block level: a rounded pillar built entirely from blocks (the scene the menu launches) |
+| `Game/World.tscn` | Training level — the workshop terrain with no blocks, kept for testing the rig in isolation |
 
 ## First run
 
@@ -448,10 +451,37 @@ Checked against the shipped code, not a model of it:
 
 ### Edit cost
 
-A block edit re-meshes the whole world, so that pass has to stay cheap. For the
-default world (896 blocks) it is ~8 ms of C#, emitting ~17.8k triangles.
+The world is split into **8x8x8 chunks**, each with its own mesh and collision
+shape, and an edit re-meshes only the chunks it touches. On the 42k-block
+pillar level a full rebuild is ~560 ms — a visible freeze — while a one-block
+edit re-meshes 512 blocks in **~3.4 ms**, 162x quicker.
 
-Three things keep it there, each of which was measured to matter:
+**The occupancy map is maintained incrementally**, and this matters more than
+the chunking. Culling asks "is this quarter-cell solid in the world", answered
+from a map of every occupied quarter-cell. Rebuilding that map wholesale meant
+re-inserting ~2.7 million entries for a one-block change: **228 ms, 98% of the
+cost of an edit**, and enough to make placing a block feel broken even with
+chunked meshing in place. Adding or removing a block now stamps only its own
+~50 quarter-cells in and out (0.002 ms), which took an edit from 192 ms to
+**3.4 ms** — a fifth of a 60 fps frame.
+
+The map counts owners per quarter-cell rather than storing a plain set. The
+interlock guarantees exactly one owner (verified: max refcount is 1 across
+every configuration tried), so a set would in fact work — but the count makes
+removal correct by construction instead of dependent on an invariant proved
+elsewhere. Incremental stamping is verified to match a from-scratch rebuild
+exactly across 400 random adds and removes.
+
+Chunk size is not "smaller is better": an edit dirties the 3x3x3 of chunks
+around it, so at size 6 that region spans 8 chunks instead of 2 and the cost
+climbs back to ~7 ms. 16/12/8/6 were measured; 8 won.
+
+A block's rim reaches one block outward and its neighbours' culling depends on
+it, so the dirty region is the 3x3x3 around the edit, not just the one chunk.
+Chunked output is verified bit-identical to a whole-world rebuild (84,946
+quads, 0 missing, 0 extra) — anything less would leave seams at chunk borders.
+
+Three more things keep the per-chunk pass cheap, each measured:
 
 - **Occupancy is built once per rebuild**, as one set of global quarter-cells
   every block stamps into, and culling is then a single hash lookup. Asking
@@ -515,6 +545,99 @@ undersides included. Set either size to 0 to omit it.
 The surface is intentionally bumpy at this stage.
 
 
+## The pillar level
+
+`Game/PillarLevel.tscn` is the block level, and it is made **entirely of
+blocks** — there is no mesh terrain in it at all. `Modules/BlockLevel/`
+generates it into a single `BlockWorld`, so every part of it is editable and
+minable exactly like something the player built.
+
+- A **rounded pillar** falling away into the void, ~42k blocks, tapering with
+  depth and perturbed by smooth angular noise so the silhouette reads as
+  weathered rock. The noise fades out toward the top, so the rim under the
+  surface stays clean.
+- Its **top is cut flat** at y = -1 as a plain disc with no wobble, so the
+  walkable surface has a crisp edge and no bites taken out of it. The player
+  spawns standing on it at the origin.
+- **Primitive solids** scattered across the surface — cubes, rectangular
+  prisms, triangular prisms, pyramids and spheres — with roughly a quarter left
+  floating overhead. They are rasterised into the block grid (a pyramid is a
+  stack of shrinking squares, a sphere a distance test), not instanced meshes,
+  which is what lets the bismuth shaping treat them as ordinary rock.
+
+Everything is exported on the `Generator` node: pillar radius/depth/taper, rim
+noise, prop count, floating fraction, and seed. It is a `[Tool]` script, so
+changes regenerate live in the editor. `AutoBuild` off lets you hand-edit a
+level without it being regenerated underneath you.
+
+Three placement details worth knowing:
+
+1. **Prop dimensions are rolled before placement**, not after, so the footprint
+   test bounds the actual solid. Estimating from a single "size" let long
+   prisms overhang the rim.
+2. **Triangular prisms are centred on their origin** along the run rather than
+   growing out from it, for the same reason.
+3. **Floating props only clear other floating props.** A ball ten blocks up and
+   a cube below it do not collide, and forcing them apart in plan view starved
+   the level of props — it built 12 of 26 before this was separated.
+
+`Game/World.tscn` is kept as the training level: the workshop terrain with no
+blocks in it, for testing the player rig on its own.
+
+
+## Loading
+
+A 42k-block level takes ~0.5 s to mesh, and the player is a live physics body
+the moment the scene loads. Without a gate it spawns into a world that has no
+collision yet and **falls straight through the floor** — which is exactly what
+happened. Freezing the game for the duration instead would read as a hang.
+
+So `Modules/LoadingScreen/` covers the screen with a progress bar while
+`BlockWorld` meshes a few chunks per frame (`ChunksPerFrame`, default 6 —
+about 23 frames for the pillar level), then drops the player in and fades out.
+
+Four things this depends on:
+
+1. **The player is held by disabling its processing**, not by delaying its
+   instantiation. The scene tree stays exactly as authored and the camera is
+   live, so the level is already drawn behind the fade. Physics is the part
+   that must stop; `SetProcessUnhandledInput(false)` also stops mouse-look
+   swinging the camera while the bar is up.
+2. **`BlockWorld._Ready` must not rebuild when an incremental build is already
+   running.** Godot readies children first, so the generator starts the
+   incremental build and then the world's own `_Ready` would throw it away and
+   mesh everything synchronously — reintroducing the freeze. There is a guard,
+   and a test that fails without it.
+3. **The screen checks `IsWorldReady` as well as subscribing to `WorldReady`.**
+   A world that finished before the screen readied would otherwise never fire
+   the event the screen is waiting on, and the player would stay frozen.
+4. **The player is placed by searching down for the highest solid block** over
+   its spawn column, rather than at a fixed height, so it lands on the surface
+   whatever the level generator produced.
+
+### The first edit
+
+Everything the first edit would otherwise pay for is done during loading:
+
+- **`deferMesh` clears the full-rebuild flag.** `Batch(wholesale: true)` sets a
+  flag meaning "re-mesh everything at the end"; handing meshing to the
+  incremental loader dropped the queued rebuild but left that flag set, so the
+  player's very first mined block took the whole-world path — a ~520 ms stall
+  on the first edit and only the first. This was the bug.
+- **A warm-up edit runs behind the loading bar.** One block is removed and put
+  straight back, through the ordinary edit path, before the world reports
+  ready. That forces the engine's one-time work for a *modified* (rather than
+  newly created) mesh — pipeline recompiles, physics buffer growth, JIT over
+  the dirty-rebuild path — into the loading screen. It is verified lossless:
+  block count, occupancy map, and all 84,946 quads are identical afterwards.
+- **Collision shapes are assigned once.** Writing `Data` updates a shape in
+  place; re-assigning `Shape` re-registers it with the physics server.
+
+Level generation also passes `wholesale: true` to `Batch`, which skips
+per-block dirty marking — marking the 3x3x3 around each of 42k blocks is about
+a million wasted hash operations when a full rebuild follows anyway.
+
+
 ## Sandbox mode
 
 Double-tap the jump key to toggle free-fly inspection: no gravity, no
@@ -549,6 +672,30 @@ from building where they float.
 
 
 ## Block editing
+
+**Hold to repeat.** Holding a button carves or builds continuously at ~12.5
+blocks/sec, for stress-testing the block world. The repeat is keyboard-style:
+one edit on press, nothing until `RepeatDelay`, then one every
+`RepeatInterval`.
+
+`RepeatDelay` defaults to **0.35 s**, and that number is load-bearing: the
+window in which a click stays a single block is the delay minus about one
+frame, and a deliberate click commonly runs 100-300 ms. At 0.25 s a slow click
+placed two blocks — exactly the failure the delay exists to prevent. Verified
+single-edit for clicks up to 300 ms.
+
+Repeats are capped at **one edit per frame**, with any backlog dropped rather
+than carried. A single edit can reach ~22 ms once carving exposes interior
+faces, so letting a slow frame catch up several at once stacks them into one
+frame and turns a smooth hold into a stutter. Falling behind the nominal rate
+is the better trade — the repeat just tracks the frame rate.
+
+Sustained holding costs about 7% of one core. Per-edit cost is not constant: it
+starts near 1.5 ms and rises to ~19 ms as a tunnel deepens. That is not a leak
+— the same 488 blocks are re-meshed either way, but carving exposes interior
+faces that were previously culled, so they go from emitting almost nothing to
+~1,300 quads. Revealing new surface is inherently more work than not revealing
+it.
 
 `Modules/BlockEditor` raycasts from the camera centre (matching the crosshair)
 and edits whichever `BismuthBlob` it hits — left click places, right click

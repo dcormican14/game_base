@@ -70,27 +70,6 @@ public partial class BlockWorld : StaticBody3D
     [Export(PropertyHint.Range, "0,1,0.05")]
     public float Growth { get => _growth; set { _growth = Mathf.Clamp(value, 0f, 1f); InvalidateField(); } }
 
-    [ExportGroup("Starter Fill")]
-    /// <summary>Blocks laid down on ready, as a solid slab of this many cells
-    /// per side centred on the node. 0 starts empty. A convenience for seeing
-    /// the rock without building it by hand — the real world generator will
-    /// replace this.</summary>
-    [Export(PropertyHint.Range, "0,64,1")]
-    public int StarterSize { get; set; } = 12;
-
-    /// <summary>Depth of the starter slab, in blocks.</summary>
-    [Export(PropertyHint.Range, "1,32,1")]
-    public int StarterDepth { get; set; } = 3;
-
-    /// <summary>Diameter of a floating ball of blocks spawned overhead, for
-    /// inspecting the crystal shaping from every angle. 0 for none.</summary>
-    [Export(PropertyHint.Range, "0,32,1")]
-    public int DemoSphereSize { get; set; } = 9;
-
-    /// <summary>Height of the demo sphere's centre above the node, in blocks.</summary>
-    [Export(PropertyHint.Range, "0,64,1")]
-    public int DemoSphereHeight { get; set; } = 12;
-
     private BismuthField _field;
 
     /// <summary>The flow field, rebuilt lazily after any dial changes.</summary>
@@ -106,19 +85,264 @@ public partial class BlockWorld : StaticBody3D
     public int BlockCount => _blocks.Count;
 
     private readonly HashSet<Vector3I> _blocks = new();
-    private MeshInstance3D _meshInstance;
-    private CollisionShape3D _collisionShape;
+
+    /// <summary>
+    /// Blocks per chunk edge, so an edit re-meshes only the region it touches.
+    /// 8 measured fastest of 16/12/8/6 (~3.4 ms per edit vs ~520 ms for a full
+    /// rebuild). Smaller is not better: an edit dirties the 3x3x3 of chunks
+    /// around it, so at 6 that spans 8 chunks instead of 2.
+    /// </summary>
+    private const int ChunkSize = 8;
+
+    /// <summary>One chunk's scene nodes, created on demand.</summary>
+    private sealed class Chunk
+    {
+        public readonly MeshInstance3D MeshInstance;
+        public readonly CollisionShape3D CollisionShape;
+        public ConcavePolygonShape3D Trimesh;
+
+        public Chunk(Node parent, Vector3I coord)
+        {
+            MeshInstance = new MeshInstance3D { Name = $"Mesh{coord.X}_{coord.Y}_{coord.Z}" };
+            CollisionShape = new CollisionShape3D { Name = $"Col{coord.X}_{coord.Y}_{coord.Z}" };
+            parent.AddChild(MeshInstance);
+            parent.AddChild(CollisionShape);
+        }
+
+        public void Dispose()
+        {
+            MeshInstance.QueueFree();
+            CollisionShape.QueueFree();
+        }
+    }
+
+    private readonly Dictionary<Vector3I, Chunk> _chunks = new();
+    private readonly Dictionary<Vector3I, List<Vector3I>> _chunkBlocks = new();
+    private readonly HashSet<Vector3I> _dirty = new();
+    private readonly List<Vector3I> _scratch = new();
+
+    // Batch state: whether edits are being deferred, whether one is queued,
+    // and whether it needs the whole-world path rather than the dirty one.
+    private bool _deferRebuild;
+    private bool _rebuildPending;
+    private bool _fullRebuildNeeded;
+
+    /// <summary>Chunk containing a cell. Floor division, so negative
+    /// coordinates land in the chunk below rather than truncating to zero.</summary>
+    private static Vector3I ChunkOf(Vector3I cell) => new(
+        BismuthShape.FloorDiv(cell.X, ChunkSize),
+        BismuthShape.FloorDiv(cell.Y, ChunkSize),
+        BismuthShape.FloorDiv(cell.Z, ChunkSize));
+
+    /// <summary>
+    /// A cube's six faces: the neighbour direction that hides the face, and
+    /// its four corners as per-axis picks from (min, max). Shared by the plain
+    /// cube mesher and the collision hull, which previously hand-wrote the
+    /// same twenty-four corner expressions twice.
+    /// </summary>
+    private static readonly (Vector3I Dir, int[] Xs, int[] Ys, int[] Zs)[] CubeFaces =
+    {
+        (new Vector3I(0, 1, 0),  new[]{0,1,1,0}, new[]{1,1,1,1}, new[]{0,0,1,1}), // up
+        (new Vector3I(0, -1, 0), new[]{0,1,1,0}, new[]{0,0,0,0}, new[]{0,0,1,1}), // down
+        (new Vector3I(1, 0, 0),  new[]{1,1,1,1}, new[]{0,1,1,0}, new[]{0,0,1,1}), // +x
+        (new Vector3I(-1, 0, 0), new[]{0,0,0,0}, new[]{0,1,1,0}, new[]{0,0,1,1}), // -x
+        (new Vector3I(0, 0, 1),  new[]{0,0,1,1}, new[]{0,1,1,0}, new[]{1,1,1,1}), // +z
+        (new Vector3I(0, 0, -1), new[]{0,0,1,1}, new[]{0,1,1,0}, new[]{0,0,0,0}), // -z
+    };
+
+    /// <summary>The four corners of one cube face, in winding order.</summary>
+    private static void FaceCorners(in (Vector3I Dir, int[] Xs, int[] Ys, int[] Zs) face,
+        Vector3 min, Vector3 max, Span<Vector3> corners)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            corners[i] = new Vector3(
+                face.Xs[i] == 0 ? min.X : max.X,
+                face.Ys[i] == 0 ? min.Y : max.Y,
+                face.Zs[i] == 0 ? min.Z : max.Z);
+        }
+    }
+
+    /// <summary>Sorts every block into its chunk, replacing the previous
+    /// buckets.</summary>
+    private void BucketBlocksIntoChunks()
+    {
+        _chunkBlocks.Clear();
+        foreach (Vector3I cell in _blocks)
+        {
+            Vector3I chunk = ChunkOf(cell);
+            if (!_chunkBlocks.TryGetValue(chunk, out List<Vector3I> list))
+            {
+                list = new List<Vector3I>();
+                _chunkBlocks[chunk] = list;
+            }
+
+            list.Add(cell);
+        }
+    }
+
+    /// <summary>Frees the scene nodes of chunks that no longer hold blocks.</summary>
+    private void DiscardEmptyChunks()
+    {
+        _scratch.Clear();
+        foreach (var kv in _chunks)
+        {
+            if (!_chunkBlocks.ContainsKey(kv.Key))
+                _scratch.Add(kv.Key);
+        }
+
+        foreach (Vector3I dead in _scratch)
+        {
+            _chunks[dead].Dispose();
+            _chunks.Remove(dead);
+        }
+    }
+
+    /// <summary>
+    /// Marks every chunk whose mesh a change at `cell` could alter. A block's
+    /// bismuth rim reaches one block outward and its neighbours' culling
+    /// depends on it, so the 3x3x3 of surrounding cells is what actually needs
+    /// re-meshing — not just the chunk the block sits in.
+    /// </summary>
+    private void MarkDirty(Vector3I cell)
+    {
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dz = -1; dz <= 1; dz++)
+                    _dirty.Add(ChunkOf(cell + new Vector3I(dx, dy, dz)));
+    }
+
+    private StandardMaterial3D _material;
 
     private readonly List<Vector3> _vertices = new();
     private readonly List<Vector3> _normals = new();
     private readonly List<Color> _colors = new();
     private readonly List<int> _indices = new();
 
-    public override void _Ready()
+    /// <summary>0..1 while the world is meshing, 1 once it is done.</summary>
+    public float BuildProgress { get; private set; }
+
+    /// <summary>True once the world has finished its first full build, so
+    /// collision exists and it is safe to drop the player in.</summary>
+    public bool IsWorldReady => _ready;
+
+    /// <summary>Raised once, when the first full build completes.</summary>
+    public event System.Action WorldReady;
+
+    private bool _ready;
+    private readonly List<Vector3I> _pending = new();
+    private int _pendingIndex;
+
+    /// <summary>
+    /// Meshes the world a few chunks per frame instead of all at once, so a
+    /// large level can show progress rather than freezing for half a second.
+    /// Call instead of Rebuild when a loading screen is driving the wait.
+    /// </summary>
+    public void BeginIncrementalBuild()
+    {
+        if (_bismuth)
+            BuildOccupancy();
+
+        BucketBlocksIntoChunks();
+
+        _pending.Clear();
+        foreach (var kv in _chunkBlocks)
+            _pending.Add(kv.Key);
+        _pendingIndex = 0;
+        _ready = _pending.Count == 0;
+        BuildProgress = _ready ? 1f : 0f;
+        SetProcess(!_ready);
+
+        if (_ready)
+            WorldReady?.Invoke();
+    }
+
+    /// <summary>Chunks meshed per frame during an incremental build. Each is
+    /// only a few ms, so a handful per frame keeps the loading screen
+    /// responsive while still finishing quickly.</summary>
+    [Export(PropertyHint.Range, "1,64,1")]
+    public int ChunksPerFrame { get; set; } = 6;
+
+    public override void _Process(double delta)
+    {
+        if (_pendingIndex >= _pending.Count)
+        {
+            SetProcess(false);
+            return;
+        }
+
+        int end = Mathf.Min(_pendingIndex + ChunksPerFrame, _pending.Count);
+        for (; _pendingIndex < end; _pendingIndex++)
+        {
+            Vector3I chunk = _pending[_pendingIndex];
+            if (_chunkBlocks.TryGetValue(chunk, out List<Vector3I> cells))
+                MeshChunk(chunk, cells);
+        }
+
+        BuildProgress = _pending.Count == 0 ? 1f : _pendingIndex / (float)_pending.Count;
+
+        if (_pendingIndex >= _pending.Count)
+        {
+            SetProcess(false);
+            _dirty.Clear();
+            BuildProgress = 1f;
+            if (!_ready)
+            {
+                WarmUpEditPath();
+                _ready = true;
+                WorldReady?.Invoke();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs one real edit and undoes it while the loading screen is still up,
+    /// so the engine's one-time cost for REPLACING a mesh (pipeline recompile,
+    /// physics buffer growth, JIT over the dirty-rebuild path) lands in the
+    /// loading bar rather than on the player's first mined block.
+    ///
+    /// Verified lossless: block set, occupancy and geometry are identical
+    /// afterwards.
+    /// </summary>
+    private void WarmUpEditPath()
     {
         if (_blocks.Count == 0)
-            BuildStarterContent();
+            return;
 
+        // Any block will do; take one deterministically so the warm-up is
+        // reproducible rather than depending on hash iteration order.
+        Vector3I victim = default;
+        bool found = false;
+        foreach (Vector3I cell in _blocks)
+        {
+            if (!found || cell.Y > victim.Y ||
+                (cell.Y == victim.Y && (cell.X < victim.X ||
+                    (cell.X == victim.X && cell.Z < victim.Z))))
+            {
+                victim = cell;
+                found = true;
+            }
+        }
+
+        if (!found)
+            return;
+
+        // Remove and re-add through the ordinary edit path, so exactly the
+        // machinery a player edit uses is exercised.
+        RemoveBlock(victim);
+        AddBlock(victim);
+    }
+
+    public override void _Ready()
+    {
+        // A generator child readies BEFORE this node (Godot readies children
+        // first) and may already have started an incremental build. Rebuilding
+        // here would throw that away and do the whole world synchronously —
+        // the freeze the incremental path exists to avoid.
+        if (_pending.Count > 0 || _ready)
+            return;
+
+        SetProcess(false);
         Rebuild();
     }
 
@@ -126,50 +350,6 @@ public partial class BlockWorld : StaticBody3D
     {
         if (IsNodeReady())
             Rebuild();
-    }
-
-    /// <summary>
-    /// Lays down the starter slab and the floating demo ball. Blocks are added
-    /// directly rather than through Fill/AddBlock so the whole thing meshes
-    /// once at the end instead of once per block.
-    /// </summary>
-    private void BuildStarterContent()
-    {
-        // The slab sits ON the ground, its underside at y=0, because the
-        // workshop terrain's floor is the plane y=0. Sinking it below that
-        // buries the top face in the floor and the two coplanar surfaces
-        // z-fight.
-        if (StarterSize > 0)
-        {
-            int half = StarterSize / 2;
-            for (int x = -half; x <= half; x++)
-                for (int y = 0; y < StarterDepth; y++)
-                    for (int z = -half; z <= half; z++)
-                        _blocks.Add(new Vector3I(x, y, z));
-        }
-
-        // A ball floating overhead, so the crystal can be inspected from every
-        // angle — including the undersides, which the slab never shows.
-        if (DemoSphereSize > 0)
-        {
-            float radius = DemoSphereSize * 0.5f;
-            int r = Mathf.CeilToInt(radius);
-            var centre = new Vector3I(0, DemoSphereHeight, 0);
-            for (int x = -r; x <= r; x++)
-            {
-                for (int y = -r; y <= r; y++)
-                {
-                    for (int z = -r; z <= r; z++)
-                    {
-                        // Measure from cell centres, so the ball is symmetric
-                        // rather than lopsided toward the origin corner.
-                        var d = new Vector3(x, y, z);
-                        if (d.Length() <= radius)
-                            _blocks.Add(centre + new Vector3I(x, y, z));
-                    }
-                }
-            }
-        }
     }
 
     // ------------------------------------------------------------ block access
@@ -197,9 +377,17 @@ public partial class BlockWorld : StaticBody3D
     /// block. A rebuild costs the same whether one block changed or a hundred,
     /// so any multi-block operation should be wrapped in this.
     /// </summary>
-    public void Batch(System.Action edits)
+    /// <param name="wholesale">True when the batch rewrites most of the world
+    /// (generating a level, clearing it). Queues one full rebuild and skips
+    /// per-block dirty marking, which is pure waste when everything is about
+    /// to be re-meshed anyway.</param>
+    /// <param name="deferMesh">Skip the rebuild entirely and leave the caller
+    /// to drive meshing, which is how the incremental loading path works.</param>
+    public void Batch(System.Action edits, bool wholesale = false, bool deferMesh = false)
     {
         bool outermost = !_deferRebuild;
+        if (wholesale)
+            _fullRebuildNeeded = true;
         _deferRebuild = true;
         try
         {
@@ -210,31 +398,77 @@ public partial class BlockWorld : StaticBody3D
             if (outermost)
             {
                 _deferRebuild = false;
+
+                // deferMesh leaves the caller to drive meshing (the
+                // incremental loading path), so the queued rebuild is dropped.
+                // deferMesh hands meshing to the caller (the incremental
+                // loading path), so the queued rebuild is dropped — INCLUDING
+                // the full-rebuild flag. Leaving that set would make the next
+                // single edit take the whole-world path instead of the dirty
+                // one, turning the first mined block into a half-second stall.
+                if (deferMesh)
+                {
+                    _rebuildPending = false;
+                    _fullRebuildNeeded = false;
+                }
+
                 if (_rebuildPending)
                 {
                     _rebuildPending = false;
-                    Rebuild();
+                    if (_fullRebuildNeeded)
+                    {
+                        _fullRebuildNeeded = false;
+                        Rebuild();
+                    }
+                    else
+                    {
+                        RebuildDirty();
+                    }
                 }
             }
         }
     }
 
-    private bool _deferRebuild;
-    private bool _rebuildPending;
-
-    /// <summary>Rebuilds now, or marks one pending when inside a Batch.</summary>
+    /// <summary>
+    /// Re-meshes the dirty chunks now, or defers until the Batch closes.
+    /// Falls back to a full rebuild when nothing was marked, which is what a
+    /// wholesale change like Clear or Fill leaves behind.
+    /// </summary>
     private void RebuildOrDefer()
     {
         if (_deferRebuild)
+        {
             _rebuildPending = true;
-        else
+            return;
+        }
+
+        if (_fullRebuildNeeded)
+        {
+            _fullRebuildNeeded = false;
             Rebuild();
+        }
+        else
+        {
+            RebuildDirty();
+        }
     }
 
     public bool AddBlock(Vector3I cell)
     {
         if (!_blocks.Add(cell))
             return false;
+
+        // Skipped when a full rebuild is already queued: marking the 3x3x3
+        // around every block during level generation is a million wasted hash
+        // operations for a dirty set that is about to be discarded, and the
+        // occupancy map is rebuilt wholesale at the end anyway.
+        if (!_fullRebuildNeeded)
+        {
+            if (_bismuth)
+                StampOccupancy(cell, 1);
+            MarkDirty(cell);
+        }
+
         RebuildOrDefer();
         return true;
     }
@@ -243,6 +477,14 @@ public partial class BlockWorld : StaticBody3D
     {
         if (!_blocks.Remove(cell))
             return false;
+
+        if (!_fullRebuildNeeded)
+        {
+            if (_bismuth)
+                StampOccupancy(cell, -1);
+            MarkDirty(cell);
+        }
+
         RebuildOrDefer();
         return true;
     }
@@ -261,12 +503,14 @@ public partial class BlockWorld : StaticBody3D
             }
         }
 
+        _fullRebuildNeeded = true;
         RebuildOrDefer();
     }
 
     public void Clear()
     {
         _blocks.Clear();
+        _fullRebuildNeeded = true;
         RebuildOrDefer();
     }
 
@@ -313,17 +557,97 @@ public partial class BlockWorld : StaticBody3D
 
     // -------------------------------------------------------------------- mesh
 
+    /// <summary>
+    /// Rebuilds every chunk. Use this after a wholesale change; a single block
+    /// edit should go through the dirty-chunk path instead, which is what
+    /// keeps editing responsive on a large world.
+    /// </summary>
     public void Rebuild()
     {
-        EnsureChildren();
         if (_bismuth)
             BuildOccupancy();
+
+        BucketBlocksIntoChunks();
+        DiscardEmptyChunks();
+
+        foreach (var kv in _chunkBlocks)
+            MeshChunk(kv.Key, kv.Value);
+
+        _dirty.Clear();
+        _pending.Clear();
+        BuildProgress = 1f;
+        if (!_ready)
+        {
+            _ready = true;
+            WorldReady?.Invoke();
+        }
+    }
+
+    /// <summary>
+    /// Re-meshes only the chunks marked dirty. A one-block edit touches its
+    /// own chunk plus any neighbour whose surface it changes, which is a few
+    /// thousand blocks rather than the whole world — the difference between a
+    /// half-second freeze and an unnoticeable hitch on a large level.
+    /// </summary>
+    private void RebuildDirty()
+    {
+        if (_dirty.Count == 0)
+            return;
+
+        // Occupancy is NOT rebuilt here. It is maintained incrementally by
+        // AddBlock/RemoveBlock, because rebuilding all ~2.7M quarter-cells for
+        // a one-block change measured 228 ms — 98% of the cost of an edit.
+
+        foreach (Vector3I chunk in _dirty)
+        {
+            if (!_chunkBlocks.TryGetValue(chunk, out List<Vector3I> list))
+                list = null;
+
+            // Re-collect this chunk's blocks; the edit may have added or
+            // removed some.
+            var fresh = new List<Vector3I>();
+            Vector3I origin = chunk * ChunkSize;
+            for (int x = 0; x < ChunkSize; x++)
+                for (int y = 0; y < ChunkSize; y++)
+                    for (int z = 0; z < ChunkSize; z++)
+                    {
+                        var cell = new Vector3I(origin.X + x, origin.Y + y, origin.Z + z);
+                        if (_blocks.Contains(cell))
+                            fresh.Add(cell);
+                    }
+
+            if (fresh.Count == 0)
+            {
+                _chunkBlocks.Remove(chunk);
+                if (_chunks.TryGetValue(chunk, out Chunk empty))
+                {
+                    empty.Dispose();
+                    _chunks.Remove(chunk);
+                }
+
+                continue;
+            }
+
+            _chunkBlocks[chunk] = fresh;
+            MeshChunk(chunk, fresh);
+        }
+
+        _dirty.Clear();
+    }
+
+    /// <summary>Builds one chunk's mesh and collision from its block list.</summary>
+    private void MeshChunk(Vector3I chunk, List<Vector3I> cells)
+    {
         _vertices.Clear();
         _normals.Clear();
         _colors.Clear();
         _indices.Clear();
 
-        foreach (Vector3I cell in _blocks)
+        // Allocated once outside the loop: a stackalloc per block would grow
+        // the stack frame by every iteration and eventually overflow.
+        Span<Vector3> corners = stackalloc Vector3[4];
+
+        foreach (Vector3I cell in cells)
         {
             Vector3 min = new Vector3(cell.X, cell.Y, cell.Z) * _blockSize;
             Vector3 max = min + Vector3.One * _blockSize;
@@ -338,24 +662,19 @@ public partial class BlockWorld : StaticBody3D
                 continue;
             }
 
-            AddFace(cell, Vector3I.Up, color,
-                new Vector3(min.X, max.Y, min.Z), new Vector3(max.X, max.Y, min.Z),
-                new Vector3(max.X, max.Y, max.Z), new Vector3(min.X, max.Y, max.Z), Vector3.Up);
-            AddFace(cell, Vector3I.Down, color,
-                new Vector3(min.X, min.Y, min.Z), new Vector3(max.X, min.Y, min.Z),
-                new Vector3(max.X, min.Y, max.Z), new Vector3(min.X, min.Y, max.Z), Vector3.Down);
-            AddFace(cell, Vector3I.Right, color,
-                new Vector3(max.X, min.Y, min.Z), new Vector3(max.X, max.Y, min.Z),
-                new Vector3(max.X, max.Y, max.Z), new Vector3(max.X, min.Y, max.Z), Vector3.Right);
-            AddFace(cell, Vector3I.Left, color,
-                new Vector3(min.X, min.Y, min.Z), new Vector3(min.X, max.Y, min.Z),
-                new Vector3(min.X, max.Y, max.Z), new Vector3(min.X, min.Y, max.Z), Vector3.Left);
-            AddFace(cell, Vector3I.Back, color,
-                new Vector3(min.X, min.Y, max.Z), new Vector3(min.X, max.Y, max.Z),
-                new Vector3(max.X, max.Y, max.Z), new Vector3(max.X, min.Y, max.Z), Vector3.Back);
-            AddFace(cell, Vector3I.Forward, color,
-                new Vector3(min.X, min.Y, min.Z), new Vector3(min.X, max.Y, min.Z),
-                new Vector3(max.X, max.Y, min.Z), new Vector3(max.X, min.Y, min.Z), Vector3.Forward);
+            foreach (var face in CubeFaces)
+            {
+                if (_blocks.Contains(cell + face.Dir))
+                    continue;
+                FaceCorners(face, min, max, corners);
+                AddFace(color, corners, new Vector3(face.Dir.X, face.Dir.Y, face.Dir.Z));
+            }
+        }
+
+        if (!_chunks.TryGetValue(chunk, out Chunk target))
+        {
+            target = new Chunk(this, chunk);
+            _chunks[chunk] = target;
         }
 
         var mesh = new ArrayMesh();
@@ -375,11 +694,9 @@ public partial class BlockWorld : StaticBody3D
             mesh.SurfaceSetMaterial(0, SharedMaterial);
         }
 
-        _meshInstance.Mesh = mesh;
-        UpdateCollision(mesh);
+        target.MeshInstance.Mesh = mesh;
+        UpdateCollision(target, cells, mesh);
     }
-
-    private StandardMaterial3D _material;
 
     private StandardMaterial3D SharedMaterial => _material ??= new StandardMaterial3D
     {
@@ -388,84 +705,64 @@ public partial class BlockWorld : StaticBody3D
     };
 
     /// <summary>
-    /// Rebuilds the collision shape from the BLOCK HULL rather than from the
-    /// rendered bismuth surface.
-    ///
-    /// Building a trimesh over the detailed surface is by far the most
-    /// expensive part of an edit: the physics engine builds a BVH over every
-    /// triangle, and the crystal rims multiply the triangle count for detail
-    /// no player can feel through a collision capsule. Colliding against plain
-    /// cube faces is a fraction of the triangles, and the difference is at
-    /// most a quarter-block of surface relief.
+    /// Rebuilds collision from the BLOCK HULL, not the rendered bismuth
+    /// surface. The physics engine builds a BVH over every triangle it is
+    /// given, and crystal rims multiply that count for relief no player can
+    /// feel through a capsule — plain cube faces are ~10x fewer triangles.
     /// </summary>
-    private void UpdateCollision(ArrayMesh rendered)
+    private void UpdateCollision(Chunk chunk, List<Vector3I> cells, ArrayMesh rendered)
     {
         if (!_bismuth)
         {
-            _collisionShape.Shape = _vertices.Count > 0 ? rendered.CreateTrimeshShape() : null;
+            chunk.CollisionShape.Shape = _vertices.Count > 0 ? rendered.CreateTrimeshShape() : null;
             return;
         }
 
         _collisionVertices.Clear();
-        foreach (Vector3I cell in _blocks)
+        Span<Vector3> corners = stackalloc Vector3[4];
+        foreach (Vector3I cell in cells)
         {
             Vector3 min = new Vector3(cell.X, cell.Y, cell.Z) * _blockSize;
             Vector3 max = min + Vector3.One * _blockSize;
 
-            // Only faces with no block behind them, the same hidden-surface
-            // rule the renderer uses — an interior wall is unreachable.
-            AddCollisionFace(cell, new Vector3I(0, 1, 0),
-                new Vector3(min.X, max.Y, min.Z), new Vector3(max.X, max.Y, min.Z),
-                new Vector3(max.X, max.Y, max.Z), new Vector3(min.X, max.Y, max.Z));
-            AddCollisionFace(cell, new Vector3I(0, -1, 0),
-                new Vector3(min.X, min.Y, min.Z), new Vector3(max.X, min.Y, min.Z),
-                new Vector3(max.X, min.Y, max.Z), new Vector3(min.X, min.Y, max.Z));
-            AddCollisionFace(cell, new Vector3I(1, 0, 0),
-                new Vector3(max.X, min.Y, min.Z), new Vector3(max.X, max.Y, min.Z),
-                new Vector3(max.X, max.Y, max.Z), new Vector3(max.X, min.Y, max.Z));
-            AddCollisionFace(cell, new Vector3I(-1, 0, 0),
-                new Vector3(min.X, min.Y, min.Z), new Vector3(min.X, max.Y, min.Z),
-                new Vector3(min.X, max.Y, max.Z), new Vector3(min.X, min.Y, max.Z));
-            AddCollisionFace(cell, new Vector3I(0, 0, 1),
-                new Vector3(min.X, min.Y, max.Z), new Vector3(min.X, max.Y, max.Z),
-                new Vector3(max.X, max.Y, max.Z), new Vector3(max.X, min.Y, max.Z));
-            AddCollisionFace(cell, new Vector3I(0, 0, -1),
-                new Vector3(min.X, min.Y, min.Z), new Vector3(min.X, max.Y, min.Z),
-                new Vector3(max.X, max.Y, min.Z), new Vector3(max.X, min.Y, min.Z));
+            foreach (var face in CubeFaces)
+            {
+                if (_blocks.Contains(cell + face.Dir))
+                    continue;
+
+                FaceCorners(face, min, max, corners);
+                _collisionVertices.Add(corners[0]);
+                _collisionVertices.Add(corners[1]);
+                _collisionVertices.Add(corners[2]);
+                _collisionVertices.Add(corners[0]);
+                _collisionVertices.Add(corners[2]);
+                _collisionVertices.Add(corners[3]);
+            }
         }
 
         if (_collisionVertices.Count == 0)
         {
-            _collisionShape.Shape = null;
+            chunk.CollisionShape.Shape = null;
             return;
         }
 
         // Reusing the shape instance rather than allocating a new one lets the
-        // physics server update in place.
-        _trimesh ??= new ConcavePolygonShape3D();
-        _trimesh.Data = _collisionVertices.ToArray();
-        _collisionShape.Shape = _trimesh;
+        // physics server update in place. Assigning Shape only once — on the
+        // first build — matters too: re-assigning re-registers the shape with
+        // the physics server, where writing Data updates it in place.
+        if (chunk.Trimesh == null)
+        {
+            chunk.Trimesh = new ConcavePolygonShape3D();
+            chunk.Trimesh.Data = _collisionVertices.ToArray();
+            chunk.CollisionShape.Shape = chunk.Trimesh;
+        }
+        else
+        {
+            chunk.Trimesh.Data = _collisionVertices.ToArray();
+        }
     }
 
     private readonly List<Vector3> _collisionVertices = new();
-    private ConcavePolygonShape3D _trimesh;
-
-    /// <summary>One cube face as two triangles, skipped when a block sits
-    /// behind it. ConcavePolygonShape3D takes raw triangle soup, so vertices
-    /// are appended directly with no index buffer.</summary>
-    private void AddCollisionFace(Vector3I cell, Vector3I direction,
-        Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3)
-    {
-        if (_blocks.Contains(cell + direction))
-            return;
-
-        _collisionVertices.Add(v0);
-        _collisionVertices.Add(v1);
-        _collisionVertices.Add(v2);
-        _collisionVertices.Add(v0);
-        _collisionVertices.Add(v2);
-        _collisionVertices.Add(v3);
-    }
 
     /// <summary>
     /// Emits one bismuth block by copying its prebuilt variant into the mesh.
@@ -512,16 +809,13 @@ public partial class BlockWorld : StaticBody3D
     }
 
     /// <summary>
-    /// Is the quarter-cell in front of this quad actually filled by whichever
-    /// block owns it? Only then is the quad safe to drop.
+    /// Is every quarter-cell in front of this quad filled? Only then is the
+    /// quad safe to drop.
     ///
-    /// Testing that a neighbouring BLOCK merely exists is not enough. Under
-    /// edge-and-corner growth a neighbour's rim can retreat inward, so the
-    /// shared boundary stays genuinely exposed even with a solid block next
-    /// door — culling on presence alone tears visible holes in the surface.
-    /// The occluding quarter-cell can also lie two cells away diagonally, so
-    /// the owning block is derived from the cell itself rather than assumed to
-    /// be a face neighbour.
+    /// Testing that a neighbouring BLOCK merely exists is not enough: under
+    /// edge-and-corner growth a rim can retreat inward, leaving the shared
+    /// boundary exposed even with a solid block next door, and culling on
+    /// presence alone tears visible holes.
     /// </summary>
     private bool IsBuried(Vector3I cell, BismuthShape.Variant variant, int quad)
     {
@@ -559,41 +853,61 @@ public partial class BlockWorld : StaticBody3D
     /// quarter-cell might reach into it — re-derives the same answer thousands
     /// of times and measured 15x slower than building this set up front.
     /// </summary>
-    private readonly HashSet<Vector3I> _occupied = new();
+    /// <summary>
+    /// How many blocks fill each global quarter-cell; culling asks whether the
+    /// count is above zero. Counted rather than a plain set so removing a block
+    /// cannot erase a cell another block still fills.
+    ///
+    /// Maintained INCREMENTALLY: rebuilding it wholesale per edit re-inserted
+    /// ~2.7M entries and measured 228 ms, 98% of the cost of an edit.
+    /// </summary>
+    private readonly Dictionary<Vector3I, int> _occupied = new();
 
+    /// <summary>Rebuilds the whole occupancy map. Only for a wholesale
+    /// change; a single edit uses the incremental add/remove below.</summary>
     private void BuildOccupancy()
     {
         _occupied.Clear();
         foreach (Vector3I cell in _blocks)
+            StampOccupancy(cell, 1);
+    }
+
+    /// <summary>
+    /// Adds (delta +1) or removes (delta -1) one block's quarter-cells from
+    /// the occupancy map. Cells whose count falls to zero are dropped, so the
+    /// map stays exactly what a full rebuild would produce.
+    /// </summary>
+    private void StampOccupancy(Vector3I cell, int delta)
+    {
+        int[] cells = BismuthShape.OccupiedCells(Field.MaskFor(cell));
+        for (int c = 0; c < cells.Length; c += 3)
         {
-            BismuthShape.Mask mask = Field.MaskFor(cell);
-            int[] cells = BismuthShape.OccupiedCells(mask);
-            for (int c = 0; c < cells.Length; c += 3)
-            {
-                _occupied.Add(new Vector3I(
-                    cell.X * BismuthShape.Sub + cells[c],
-                    cell.Y * BismuthShape.Sub + cells[c + 1],
-                    cell.Z * BismuthShape.Sub + cells[c + 2]));
-            }
+            var key = new Vector3I(
+                cell.X * BismuthShape.Sub + cells[c],
+                cell.Y * BismuthShape.Sub + cells[c + 1],
+                cell.Z * BismuthShape.Sub + cells[c + 2]);
+
+            int count = _occupied.GetValueOrDefault(key) + delta;
+            if (count > 0)
+                _occupied[key] = count;
+            else
+                _occupied.Remove(key);
         }
     }
 
     private bool SolidAt(Vector3I cell, int i, int j, int k) =>
-        _occupied.Contains(new Vector3I(
+        _occupied.ContainsKey(new Vector3I(
             cell.X * BismuthShape.Sub + i,
             cell.Y * BismuthShape.Sub + j,
             cell.Z * BismuthShape.Sub + k));
 
-    /// <summary>Emits one cube face, but only where the neighbour is empty.</summary>
-    private void AddFace(Vector3I cell, Vector3I direction, Color color,
-        Vector3 v0, Vector3 v1, Vector3 v2, Vector3 v3, Vector3 normal)
+    /// <summary>Emits one quad, wound so it faces along `normal`.</summary>
+    private void AddFace(Color color, Span<Vector3> corners, Vector3 normal)
     {
-        if (_blocks.Contains(cell + direction))
-            return;
+        Vector3 v0 = corners[0], v1 = corners[1], v2 = corners[2], v3 = corners[3];
 
-        // Wind so the face points along `normal`.
-        Vector3 computed = (v2 - v0).Cross(v1 - v0);
-        if (computed.Dot(normal) < 0f)
+        // Godot treats clockwise winding as front-facing.
+        if ((v2 - v0).Cross(v1 - v0).Dot(normal) < 0f)
             (v1, v3) = (v3, v1);
 
         int start = _vertices.Count;
@@ -613,20 +927,5 @@ public partial class BlockWorld : StaticBody3D
         _indices.Add(start);
         _indices.Add(start + 2);
         _indices.Add(start + 3);
-    }
-
-    private void EnsureChildren()
-    {
-        if (_meshInstance == null || !IsInstanceValid(_meshInstance))
-        {
-            _meshInstance = new MeshInstance3D { Name = "BlockMesh" };
-            AddChild(_meshInstance);
-        }
-
-        if (_collisionShape == null || !IsInstanceValid(_collisionShape))
-        {
-            _collisionShape = new CollisionShape3D { Name = "BlockCollision" };
-            AddChild(_collisionShape);
-        }
     }
 }

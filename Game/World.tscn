@@ -1,4 +1,4 @@
-[gd_scene load_steps=9 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="Script" path="res://Modules/Terrain/WorkshopTerrain.cs" id="1_terrain"]
 [ext_resource type="PackedScene" path="res://Modules/Player/Player.tscn" id="2_player"]
@@ -6,7 +6,6 @@
 [ext_resource type="PackedScene" path="res://Modules/Filters/StylizedFilter.tscn" id="4_filter"]
 [ext_resource type="PackedScene" path="res://Modules/Stats/PerfStats.tscn" id="5_stats"]
 [ext_resource type="PackedScene" path="res://Modules/Crosshair/Crosshair.tscn" id="7_crosshair"]
-[ext_resource type="PackedScene" path="res://Modules/Blocks/BlockWorld.tscn" id="8_blocks"]
 [ext_resource type="PackedScene" path="res://Modules/Skybox/Skybox.tscn" id="9_skybox"]
 
 [node name="World" type="Node3D"]
@@ -33,5 +32,3 @@ position = Vector3(0, 2, 0)
 [node name="PerfStats" parent="." instance=ExtResource("5_stats")]
 
 [node name="Crosshair" parent="." instance=ExtResource("7_crosshair")]
-
-[node name="BlockWorld" parent="." instance=ExtResource("8_blocks")]

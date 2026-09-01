@@ -1,5 +1,6 @@
 using Godot;
 using GameBase.Blocks;
+using GameBase.Core;
 
 namespace GameBase.Player;
 
@@ -12,6 +13,10 @@ namespace GameBase.Player;
 /// aim at the terrain and the new cube snaps to the world grid cell in front
 /// of the surface. Both buttons are exported input actions, so they appear in
 /// the rebind list like any other binding.
+///
+/// Holding a button repeats the edit, keyboard-style: one edit on press, then
+/// nothing until RepeatDelay, then one every RepeatInterval. That delay is what
+/// keeps a normal click to exactly one block.
 ///
 /// Instance BlockEditor.tscn under the player; it finds the scene's camera and
 /// BlockWorld itself unless the paths are set.
@@ -26,6 +31,24 @@ public partial class BlockEditor : Node3D
     [Export(PropertyHint.Range, "1,100,0.5")] public float Reach { get; set; } = 6f;
     [Export(PropertyHint.Layers3DPhysics)] public uint CollisionMask { get; set; } = 1;
 
+    [ExportGroup("Hold To Repeat")]
+    /// <summary>Repeat edits while a button is held.</summary>
+    [Export] public bool HoldToRepeat { get; set; } = true;
+
+    /// <summary>
+    /// How long a button must be held before it starts repeating — anything
+    /// shorter edits exactly once, so a click never places two blocks.
+    ///
+    /// The safe click window is this minus about one frame, and deliberate
+    /// clicks run 100-300 ms; 0.25 s measurably let a slow click place two.
+    /// </summary>
+    [Export(PropertyHint.Range, "0.05,1,0.01")]
+    public float RepeatDelay { get; set; } = 0.35f;
+
+    /// <summary>Seconds between repeats once repeating has started.</summary>
+    [Export(PropertyHint.Range, "0.01,0.5,0.01")]
+    public float RepeatInterval { get; set; } = 0.08f;
+
     [ExportGroup("Player Clearance")]
     /// <summary>Radius of the player capsule, for the do-not-place-inside-me test.</summary>
     [Export] public float PlayerRadius { get; set; } = 0.35f;
@@ -35,13 +58,21 @@ public partial class BlockEditor : Node3D
     private BlockWorld _world;
     private CollisionObject3D _playerBody;
 
+    // Held-button state. Actions are polled in _Process rather than driven by
+    // input events, because an event only fires on a state CHANGE — a button
+    // simply being down produces nothing to react to.
+    private bool _repeatIsMine;
+    private float _heldFor;
+    private float _sinceRepeat;
+    private bool _repeating;
+
     public override void _Ready()
     {
         _camera = !CameraPath.IsEmpty ? GetNodeOrNull<Camera3D>(CameraPath) : null;
-        _camera ??= FindNode<Camera3D>(GetTree().CurrentScene ?? GetParent());
+        _camera ??= NodeSearch.FindByType<Camera3D>(GetTree().CurrentScene ?? GetParent());
 
         _world = !BlockWorldPath.IsEmpty ? GetNodeOrNull<BlockWorld>(BlockWorldPath) : null;
-        _world ??= FindNode<BlockWorld>(GetTree().CurrentScene ?? GetParent());
+        _world ??= NodeSearch.FindByType<BlockWorld>(GetTree().CurrentScene ?? GetParent());
 
         if (_camera == null || _world == null)
             GD.PushWarning("BlockEditor: needs a Camera3D and a BlockWorld — editing disabled.");
@@ -58,7 +89,7 @@ public partial class BlockEditor : Node3D
 
     public override void _UnhandledInput(InputEvent @event)
     {
-        if (_camera == null || _world == null || Input.MouseMode != Input.MouseModeEnum.Captured)
+        if (!CanEdit())
             return;
 
         bool place = @event.IsActionPressed(PlaceAction);
@@ -66,6 +97,70 @@ public partial class BlockEditor : Node3D
         if (!place && !mine)
             return;
 
+        // The press edits immediately, so a click always acts on the frame it
+        // happened rather than waiting for the next _Process tick.
+        bool changed = Edit(mine);
+
+        // Mine wins a simultaneous press, matching the order tested above.
+        _repeatIsMine = mine;
+        _heldFor = 0f;
+        _sinceRepeat = 0f;
+        _repeating = false;
+
+        if (changed)
+            GetViewport().SetInputAsHandled();
+    }
+
+    public override void _Process(double delta)
+    {
+        if (!HoldToRepeat)
+            return;
+
+        // Poll rather than react to events: a held button generates no events,
+        // only the press and the release.
+        bool held = CanEdit()
+            && Input.IsActionPressed(_repeatIsMine ? MineAction : PlaceAction);
+
+        if (!held)
+        {
+            _heldFor = 0f;
+            _repeating = false;
+            return;
+        }
+
+        float dt = (float)delta;
+        _heldFor += dt;
+
+        // Nothing happens until the button has been down longer than a click.
+        if (!_repeating)
+        {
+            if (_heldFor < RepeatDelay)
+                return;
+            _repeating = true;
+            _sinceRepeat = RepeatInterval; // fire the first repeat at once
+        }
+
+        _sinceRepeat += dt;
+        if (_sinceRepeat < RepeatInterval)
+            return;
+
+        // ONE edit per frame, backlog dropped. An edit can reach ~22 ms once
+        // carving exposes interior faces, so letting a slow frame catch up
+        // several at once stacks them into one frame and stutters.
+        _sinceRepeat = 0f;
+        Edit(_repeatIsMine);
+    }
+
+    private bool CanEdit() =>
+        _camera != null && _world != null && Input.MouseMode == Input.MouseModeEnum.Captured;
+
+    /// <summary>
+    /// Casts from the crosshair and performs one edit. Shared by the press and
+    /// every repeat, so holding behaves exactly like clicking repeatedly,
+    /// including re-aiming as the player turns.
+    /// </summary>
+    private bool Edit(bool mine)
+    {
         // Ray comes from the CAMERA (the player's view), so what the crosshair
         // covers is what gets edited — the model is never in the way. Reach is
         // measured from the player though, or standing back from a ledge would
@@ -78,9 +173,7 @@ public partial class BlockEditor : Node3D
         if (_playerBody != null)
             reach += from.DistanceTo(_playerBody.GlobalPosition);
 
-        bool changed = mine ? Mine(from, dir, reach) : Place(from, dir, reach);
-        if (changed)
-            GetViewport().SetInputAsHandled();
+        return mine ? Mine(from, dir, reach) : Place(from, dir, reach);
     }
 
     private bool Mine(Vector3 from, Vector3 dir, float reach)
@@ -112,11 +205,9 @@ public partial class BlockEditor : Node3D
     }
 
     /// <summary>
-    /// Places a block unless the cube would actually overlap the player's
-    /// capsule. Tested as a real box-vs-capsule overlap rather than a keep-out
-    /// box around the body origin: the crude version rejected anything near
-    /// the feet, so standing on a ledge and aiming at its face refused to
-    /// place even with a clear line of sight.
+    /// Places a block unless it would overlap the player's capsule. A real
+    /// box-vs-capsule test, not a keep-out box around the body origin — that
+    /// rejected valid placements near the feet.
     /// </summary>
     private bool PlaceIfClear(Vector3I cell)
     {
@@ -158,21 +249,5 @@ public partial class BlockEditor : Node3D
             Mathf.Clamp(closestOnAxis.Z, min.Z, max.Z));
 
         return closestOnBox.DistanceTo(closestOnAxis) < PlayerRadius;
-    }
-
-    private static T FindNode<T>(Node root) where T : Node
-    {
-        if (root == null)
-            return null;
-        if (root is T match)
-            return match;
-        foreach (Node child in root.GetChildren())
-        {
-            T found = FindNode<T>(child);
-            if (found != null)
-                return found;
-        }
-
-        return null;
     }
 }

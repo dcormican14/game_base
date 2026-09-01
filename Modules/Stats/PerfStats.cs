@@ -34,7 +34,7 @@ public partial class PerfStats : CanvasLayer
         _label = GetNode<Label>("%StatsLabel");
 
         _player = !PlayerPath.IsEmpty ? GetNodeOrNull<PlayerController>(PlayerPath) : null;
-        _player ??= FindPlayer(GetTree().CurrentScene ?? GetParent());
+        _player ??= NodeSearch.FindByType<PlayerController>(GetTree().CurrentScene ?? GetParent());
 
         if (_player != null)
             _player.SandboxChanged += OnSandboxChanged;
@@ -45,22 +45,6 @@ public partial class PerfStats : CanvasLayer
     }
 
     private void OnSandboxChanged(bool sandbox) => Apply();
-
-    private static PlayerController FindPlayer(Node root)
-    {
-        if (root == null)
-            return null;
-        if (root is PlayerController match)
-            return match;
-        foreach (Node child in root.GetChildren())
-        {
-            PlayerController found = FindPlayer(child);
-            if (found != null)
-                return found;
-        }
-
-        return null;
-    }
 
     public override void _ExitTree()
     {

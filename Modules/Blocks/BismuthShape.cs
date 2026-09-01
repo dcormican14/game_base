@@ -61,14 +61,6 @@ public static class BismuthShape
     /// <summary>Quarter-cells per block edge. The 4x4x4 subdivision.</summary>
     public const int Sub = 4;
 
-    /// <summary>Face slots, in the order the mesher tags hidden quads.</summary>
-    public const int FaceNegX = 0;
-    public const int FacePosX = 1;
-    public const int FaceNegY = 2;
-    public const int FacePosY = 3;
-    public const int FaceNegZ = 4;
-    public const int FacePosZ = 5;
-
     /// <summary>A block's shape: which contests it won.</summary>
     public readonly struct Mask
     {
