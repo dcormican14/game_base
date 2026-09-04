@@ -4,61 +4,54 @@ using System.Collections.Generic;
 namespace GameBase.Nodes;
 
 /// <summary>
-/// The geometry of a TOPSOIL node: raw crystal below, a rounded contour above.
+/// The geometry of a TOPSOIL node: crystal where it meets rock, a rolling
+/// surface where it meets air.
 ///
-/// Topsoil is the skin between rock and sky, and it is built to read as a
-/// transition rather than as a separate material laid on top. That means it
-/// has to do two different things in the same cell:
+/// Topsoil is the skin between rock and sky, and it is shaped by one idea: a
+/// FIELD LINE that always points INTO the surface. On a flat top it points
+/// straight down; on a slope it points down and into the hill; on the side of
+/// a mountain it points horizontally into the rock. Everything else follows
+/// from which way that vector faces.
 ///
-/// THE LOWER HALF — INTERLOCK
+/// THE CORE
 ///
-/// The bottom two quarter-cell layers use exactly the raw node's rule, via the
-/// same <see cref="RawNodeGeometry.Occupies"/> the rock below consults. Its
-/// edge and corner contests are decided by the same field, so a topsoil node
-/// and the raw node beneath it interlock like the puzzle pieces they are —
-/// every rim that grows out of the rock is met by the matching recess in the
-/// soil, with no seam and no z-fighting. This half is not an approximation of
-/// the raw shape; it IS the raw shape, evaluated for this cell.
+/// The central 2x2x2 is never touched. It is the node's guarantee that it
+/// exists at all — whatever the field line says, a topsoil node can never be
+/// carved away to nothing, and the surface can never open a hole where one
+/// node happened to lose every contest. Exactly the role the core plays in
+/// <see cref="RawNodeGeometry"/>, and for the same reason.
 ///
-/// THE UPPER HALF — CONTOUR
+/// THE TWO HALVES, SPLIT BY THE FIELD LINE
 ///
-/// The top two layers follow a smooth field instead, so the surface rounds
-/// over the way soil settles rather than continuing the crystal's facets. The
-/// field is sampled once per node and its GRADIENT quantised into a direction:
-/// the soil is thickest where the field is high and thins toward where it is
-/// low, which puts a one-sub-cell step running across the node perpendicular
-/// to the gradient. Because the field is smooth and shared, that step lines up
-/// with the step on the next node along, and a slope reads as a band of
-/// contours marching across it — a topographic map drawn in quarter-cells.
+/// The field line divides the node, rather than a fixed horizontal plane. The
+/// half it points TOWARD faces into the rock, so that half is grown by the raw
+/// rule — the same contests and the same rims, driven by the RAW field rather
+/// than this one — and interlocks with the crystal it meets like a puzzle
+/// piece.
 ///
-/// WHY THIS NEEDS NO NEIGHBOUR QUERIES
+/// The half it points AWAY from faces open air, and that is where the surface
+/// is shaped. A sub-cell there is omitted once it lies far enough opposite the
+/// field line: project its offset from the node's centre onto the reversed
+/// field line and drop it past a threshold. A field line pointing straight
+/// down removes the whole top layer; one pointing down and to the left removes
+/// the top layer and a further step off the opposite corner. The cut is a
+/// plane perpendicular to the field line, so what it leaves is a facet lying
+/// across the slope.
 ///
-/// Both halves are pure functions of the cell and the seed, which is the
-/// <see cref="INodeType"/> contract and the thing that makes planet-scale
-/// generation possible. The interlock half agrees with its neighbours because
-/// every node touching a lattice feature runs the same contest and reaches the
-/// same verdict. The contour half agrees because the field is continuous —
-/// adjacent nodes sample points a cell apart and get almost the same gradient,
-/// so their contours meet without either node having looked at the other.
+/// WHY THIS ROLLS RATHER THAN STEPS
 ///
-/// THE SEAM WITH THE NODE ABOVE
+/// The field line comes from a smooth field, so it turns gradually across the
+/// terrain. Neighbouring nodes cut at almost the same angle, and their facets
+/// line up into a continuous surface following the hill — rather than the
+/// staircase of independent per-node heights a per-column height rule gives.
 ///
-/// One layer is genuinely shared: the top quarter-cell row of this node is
-/// where the rims of the node above reach down. Both filling it is an overlap
-/// that z-fights, and neither filling it is a hole.
+/// NO NEIGHBOUR QUERIES
 ///
-/// It is arbitrated by computing what the cells above WOULD be shaped like —
-/// the raw mask is a pure function of position, so that costs nothing but
-/// arithmetic and requires no lookup of whether anything is actually there —
-/// and ceding exactly the sub-cells they would claim. NINE cells, not one: a
-/// corner win straddles a lattice corner, so the diagonal neighbours at y+1
-/// reach into this layer too. This still satisfies the no-neighbour-queries
-/// contract: nothing is read, only re-derived.
-///
-/// That is what makes stacking work. Soil under soil has the upper node's
-/// rims reaching down to fill the seam, so the pair reads as continuous
-/// ground; soil under air has nothing reaching down, so the contour is the
-/// surface.
+/// Every part of this is a pure function of the cell and the seed, which is
+/// the <see cref="INodeType"/> contract. The rock-facing half agrees with its
+/// neighbours because all of them run the same raw contest on the same lattice
+/// features. The air-facing half agrees because the field is continuous and
+/// shared. Nothing is ever read from the world.
 /// </summary>
 public static class TopsoilGeometry
 {
@@ -66,95 +59,56 @@ public static class TopsoilGeometry
     public const int Sub = RawNodeGeometry.Sub;
 
     /// <summary>
-    /// How many quarter-cell layers at the bottom follow the raw interlock.
-    /// Half the node, so the transition is genuinely half rock and half soil.
+    /// How far a sub-cell must lie opposite the field line before it is
+    /// omitted, in quarter-cells along the reversed field line.
+    ///
+    /// 0.9 puts the cut just inside the layer of sub-cells whose centres sit
+    /// 1.5 quarter-cells off the node's middle, so a field line pointing
+    /// straight down removes exactly the top layer and no more. Lower carves
+    /// the node away aggressively; higher leaves it nearly a full cube.
     /// </summary>
-    public const int InterlockLayers = Sub / 2;
+    public const float CutThreshold = 0.9f;
+
+    /// <summary>How finely each axis of the field line is quantised.</summary>
+    public const int FlowSteps = 2;
 
     /// <summary>
-    /// One topsoil node's shape: the raw mask it interlocks with, plus which
-    /// way its contour falls.
+    /// One topsoil node's shape: the raw mask its rock-facing half wears, and
+    /// the quantised field line that decides the rest.
     /// </summary>
     public readonly struct Mask
     {
-        /// <summary>The raw shape this node's lower half wears, so it meets
-        /// the rock below with the same rims and recesses.</summary>
+        /// <summary>The raw shape the rock-facing half wears, so it meets the
+        /// crystal with the same rims and recesses.</summary>
         public readonly RawNodeGeometry.Mask Raw;
 
         /// <summary>
-        /// Which columns of the TOP quarter-cell layer are already claimed
-        /// from above, as a 16-bit mask indexed i * Sub + k.
+        /// The field line, quantised to small integer components.
         ///
-        /// The top layer is where the rims of the cells above reach down, and
-        /// it is not only the cell directly above that reaches: a raw corner
-        /// win takes the 2x2x2 straddling a lattice corner, so the nine cells
-        /// at y+1 spanning dx,dz in -1..1 can all extend into it. Measured,
-        /// arbitrating against only the cell directly above still collided on
-        /// 272 sub-cells, every one of them with a DIAGONAL neighbour.
-        ///
-        /// Precomputed by the node type, which evaluates all nine raw masks as
-        /// pure functions of position — no neighbour is looked up, only
-        /// re-derived — and folded to a bitmask so the geometry cache stays
-        /// keyed on something small.
+        /// Quantised rather than kept as a float vector so shapes repeat: a
+        /// hillside uses a handful of distinct directions, each meshed once
+        /// and reused for every node wearing it. Components run
+        /// -FlowSteps..FlowSteps, fine enough that facets turn smoothly and
+        /// coarse enough that the cache stays small.
         /// </summary>
-        public readonly int CededTop;
+        public readonly Vector3I Flow;
 
-        /// <summary>
-        /// Which way the ground falls, as one of 8 compass directions, or -1
-        /// where the field is flat enough that the top stays level.
-        ///
-        /// Quantised rather than kept as an angle so that shapes repeat: a
-        /// handful of distinct contours covers a whole hillside, and each is
-        /// meshed once and reused for every node wearing it.
-        /// </summary>
-        public readonly int Fall;
-
-        /// <summary>
-        /// How far through the contour band this node sits, 0 or 1.
-        ///
-        /// The step has to land somewhere, and putting it at the same height
-        /// on every node of a slope would draw one long terrace. This is the
-        /// field's own value quantised to the two sub-cell heights the top
-        /// half can take, so the step walks up the hill as the field rises —
-        /// which is what turns a set of steps into contour lines.
-        /// </summary>
-        public readonly int Band;
-
-        public Mask(RawNodeGeometry.Mask raw, int cededTop, int fall, int band)
+        public Mask(RawNodeGeometry.Mask raw, Vector3I flow)
         {
             Raw = raw;
-            CededTop = cededTop;
-            Fall = fall;
-            Band = band;
+            Flow = flow;
         }
     }
 
-    /// <summary>The eight compass directions a slope can fall in, as
-    /// quarter-cell steps across the node.</summary>
-    private static readonly (int X, int Z)[] Compass =
-    {
-        (1, 0), (1, 1), (0, 1), (-1, 1),
-        (-1, 0), (-1, -1), (0, -1), (1, -1),
-    };
-
-    // Shapes are cached per distinct mask, exactly as the raw type does: a
-    // hillside uses a few contours over and over, so the mesh for each is
-    // built once and reused for every node on it.
-    private static readonly Dictionary<(int, int, int), NodeMesh> _cache = new();
-    private static readonly Dictionary<(int, int, int), int[]> _occupancyCache = new();
+    // Shapes are cached per distinct mask, exactly as the raw type does.
+    private static readonly Dictionary<(int, int), NodeMesh> _cache = new();
+    private static readonly Dictionary<(int, int), int[]> _occupancyCache = new();
     private static readonly object _lock = new();
 
-    /// <summary>
-    /// A cache key covering everything the shape depends on.
-    ///
-    /// Both raw masks are 20 bits, so the pair plus the contour needs more
-    /// than an int; the two are hashed together instead. Collisions would
-    /// hand back the wrong mesh, so the full masks are compared on lookup.
-    /// </summary>
-    private static (int Self, int Ceded, int Contour) KeyOf(in Mask mask) => (
+    private static (int Raw, int Flow) KeyOf(in Mask mask) => (
         mask.Raw.Corners << 12 | mask.Raw.Edges,
-        mask.CededTop,
-        (mask.Fall + 1) << 1 | mask.Band);
+        (mask.Flow.X + FlowSteps) * 25 + (mask.Flow.Y + FlowSteps) * 5
+            + mask.Flow.Z + FlowSteps);
 
     /// <summary>The meshed shape for a mask, built once and cached.</summary>
     public static NodeMesh Get(in Mask mask)
@@ -202,7 +156,7 @@ public static class TopsoilGeometry
     /// Does this shape fill the quarter-cell at node-local (i,j,k)?
     ///
     /// The authority both the mesher and the world's culling consult, and the
-    /// place the two halves are actually joined.
+    /// single place the field line's two consequences are applied.
     /// </summary>
     public static bool Occupies(in Mask mask, int i, int j, int k)
     {
@@ -211,106 +165,91 @@ public static class TopsoilGeometry
             || k < RawNodeGeometry.Lo || k >= RawNodeGeometry.Hi)
             return false;
 
-        // LOWER HALF — defer entirely to the raw rule, including the rims it
-        // grows into neighbouring cells. Anything at or below the interlock
-        // line is rock as far as shape is concerned.
-        if (j < InterlockLayers)
+        // THE CORE — the central 2x2x2, never contested and never carved. The
+        // node's guarantee that it exists whatever the field line says.
+        if (IsCore(i, j, k))
+            return true;
+
+        // Which side of the node this sub-cell is on, relative to the field
+        // line. Positive lies along it, toward the rock.
+        float along = Along(mask.Flow, i, j, k);
+
+        // THE ROCK-FACING HALF — grown by the raw rule, including the rims it
+        // pushes into neighbouring cells. Not an approximation of the crystal
+        // it meets but the same shape function, so the two interlock exactly.
+        if (along >= 0f)
             return RawNodeGeometry.Occupies(mask.Raw, i, j, k);
 
-        // UPPER HALF — the contour. Only this node's own footprint: soil does
-        // not grow rims, so it never reaches outside its cell here.
-        if (i < 0 || i >= Sub || k < 0 || k >= Sub)
+        // THE AIR-FACING HALF — the surface. Soil grows no rims, so it never
+        // reaches outside its own cell here.
+        if (i < 0 || i >= Sub || j < 0 || j >= Sub || k < 0 || k >= Sub)
             return false;
 
-        // THE TOP LAYER IS CONTESTED, AND THE CONTOUR CEDES IT.
+        // Space this node LOST is not its to keep, even on the surface side.
         //
-        // A node's raw interlock half reaches one quarter-cell BELOW its own
-        // cell — that is what a corner or edge win straddling a lattice
-        // feature means. So this node's top layer is exactly where the node
-        // ABOVE reaches down into. Measured, letting both fill it collided on
-        // 470 sub-cells in a two-deep stack, every one of them in this layer.
+        // A neighbouring raw node that wins an edge or corner grows its rim
+        // into this cell, and it does so on the strength of this node having
+        // vacated exactly that space. The raw rule encodes both halves of that
+        // bargain: it fills what a node won and leaves empty what it lost.
         //
-        // The arbitration has to be decidable by each node alone, so it is the
-        // raw contest again, asked about the lattice plane between the two
-        // cells: whatever the node above would claim there, this node leaves
-        // alone. Both nodes hash the same feature position and reach the same
-        // verdict, so the layer is filled exactly once without either having
-        // looked at the other.
+        // Applying only the cut here would honour the first half and ignore
+        // the second — the soil would fill its whole footprint regardless of
+        // contests, colliding with every rim that reaches in. Measured at 457
+        // doubly-claimed sub-cells against plain rock, and 958 in a stack.
         //
-        // The result is what stacking should look like. Where soil sits under
-        // soil, the upper node's rims reach down and fill the seam, so the
-        // pair reads as continuous ground; where soil sits under air, nothing
-        // reaches down and the contour is the surface, as it should be.
-        if (j == Sub - 1 && CededToAbove(mask, i, k))
+        // So the surface half is the INTERSECTION of two rules: the space the
+        // raw contests leave to this node, minus what the field line cuts
+        // away. Tiling is preserved because the first rule is the same one
+        // every neighbour runs.
+        if (!RawNodeGeometry.Occupies(mask.Raw, i, j, k))
             return false;
 
-        return j < TopHeight(mask, i, k);
+        // Omit what lies far enough opposite the field line. `along` is the
+        // signed projection already, so this is a plane cut perpendicular to
+        // the field line — which is what makes the surface a facet lying
+        // across the slope rather than a per-column staircase.
+        return -along <= CutThreshold;
+    }
+
+    /// <summary>Is this the untouchable central 2x2x2?</summary>
+    private static bool IsCore(int i, int j, int k)
+    {
+        const int lo = Sub / 2 - 1;
+        const int hi = Sub / 2;
+        return i >= lo && i <= hi && j >= lo && j <= hi && k >= lo && k <= hi;
     }
 
     /// <summary>
-    /// Would the node directly above claim this node's top quarter-cell at
-    /// column (i,k)?
+    /// How far a sub-cell lies along the field line, from the node's centre in
+    /// quarter-cells.
     ///
-    /// The node above wears its own raw mask, whose downward reach into this
-    /// cell is decided by the four lattice edges and four lattice corners on
-    /// the plane between them. This node cannot see that mask — it may not
-    /// look at neighbours — but it does not need to: the reach only ever
-    /// happens at the OUTER columns of the cell, since an edge or corner win
-    /// straddles a boundary, and whether it happens at all is decided by a
-    /// contest both nodes can evaluate.
-    ///
-    /// Rather than re-derive the neighbour's contest here (which would need
-    /// the field, not just the mask), this yields the boundary columns
-    /// unconditionally. That is the conservative direction: ceding a sub-cell
-    /// the node above turns out not to claim leaves a one-quarter-cell notch
-    /// that the node above's own flat underside covers anyway, whereas filling
-    /// one it does claim is an overlap that z-fights.
+    /// Positive is toward the rock the field line points into; negative toward
+    /// the open air it points away from, which is the magnitude the cut
+    /// threshold is compared against.
     /// </summary>
-    private static bool CededToAbove(in Mask mask, int i, int k) =>
-        (mask.CededTop & 1 << (i * Sub + k)) != 0;
-
-    /// <summary>
-    /// How many quarter-cell layers of soil stand over column (i,k) of this
-    /// node.
-    ///
-    /// Between InterlockLayers and Sub: the soil always covers the interlock
-    /// half, and never exceeds the cell. The contour is the one-layer step
-    /// between those two, placed by how far along the fall direction the
-    /// column sits.
-    /// </summary>
-    private static int TopHeight(in Mask mask, int i, int k)
+    private static float Along(Vector3I flow, int i, int j, int k)
     {
-        // Flat ground: the whole node is filled to the top, so a plateau reads
-        // as a plateau rather than as noise.
-        if (mask.Fall < 0)
-            return Sub;
+        // The node's centre sits BETWEEN sub-cells, so offsets are
+        // half-integers and no sub-cell ever projects to exactly zero — there
+        // is no cell sitting on the dividing plane whose side would have to be
+        // broken arbitrarily.
+        const float centre = (Sub - 1) * 0.5f;
 
-        (int fx, int fz) = Compass[mask.Fall];
+        float fx = flow.X;
+        float fy = flow.Y;
+        float fz = flow.Z;
 
-        // How far this column lies down-slope, in quarter-cells from the
-        // node's centre. Positive means downhill, where the soil thins.
-        //
-        // Measured from the centre rather than from an edge so the step falls
-        // INSIDE the node: a step measured from the edge would put the whole
-        // node at one height and turn the contour into a staircase of whole
-        // cells rather than a line running through them.
-        float centre = (Sub - 1) * 0.5f;
-        float along = (i - centre) * fx + (k - centre) * fz;
+        float length = Mathf.Sqrt(fx * fx + fy * fy + fz * fz);
+        if (length < 0.0001f)
+        {
+            // No direction at all. Treated as pointing straight down, which is
+            // what flat ground means and what a node with no gradient should
+            // look like.
+            fy = -1f;
+            length = 1f;
+        }
 
-        // Diagonal falls cover more ground per step, so their along-slope
-        // distance is normalised — otherwise a diagonal contour would be
-        // roughly 1.4x steeper than an axis-aligned one and the banding would
-        // visibly change character with direction.
-        if (fx != 0 && fz != 0)
-            along *= 0.7071f;
-
-        // The band offsets where the step sits, so successive nodes up a slope
-        // put it at different heights and the steps join into a continuous
-        // contour rather than repeating identically in every cell.
-        float threshold = mask.Band == 0 ? 0f : -1f;
-
-        // One sub-cell of relief: full height up-slope, one layer less down.
-        return along > threshold ? Sub - 1 : Sub;
+        return ((i - centre) * fx + (j - centre) * fy + (k - centre) * fz) / length;
     }
 
     /// <summary>Builds the mesh for one shape.</summary>
