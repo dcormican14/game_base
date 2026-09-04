@@ -83,11 +83,10 @@ public static class NodeTypes
         // spend them on.
         ["plain"] = (_, _, _, _) => new PlainNode(),
 
-        // Topsoil takes the same growth dials as raw, because the half of it
-        // that meets the rock IS shaped by the same contests and has to
-        // interlock with what it meets.
-        ["topsoil"] = (seed, scale, roughness, growth) =>
-            new TopsoilNode(seed, scale, roughness, growth, TerrainFor(seed)),
+        // Topsoil ignores every growth dial. Its shape comes from which of
+        // its neighbours hold ground, not from the crystal contests — soil is
+        // a surface, not a mineral.
+        ["topsoil"] = (seed, _, _, _) => new TopsoilNode(seed),
     };
 
     /// <summary>

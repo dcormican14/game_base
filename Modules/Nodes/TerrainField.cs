@@ -13,17 +13,16 @@ namespace GameBase.Nodes;
 /// anything that influences a contest has to be a property of the WORLD rather
 /// than of the material asking.
 ///
-/// TWO CONSUMERS
+/// WHAT IT IS FOR
 ///
-/// <see cref="TopsoilNode"/> reads the field line to decide which way to cut a
-/// soil node's surface — the line points into the ground, so the half it
-/// points away from is the half facing the sky.
+/// <see cref="RawNodeField"/> reads the field line to bend its growth flow.
+/// Left to noise alone the contests run in crystal currents that pay no
+/// attention to the shape of the land; bending them toward it makes the rims
+/// march along the slope, the way strata do.
 ///
-/// <see cref="RawNodeField"/> reads the same line to bend its growth flow.
-/// Left to noise alone the contests run in crystal currents, and any material
-/// shaped by them reads as bismuth however its surface is finished. Bending
-/// them toward the land makes the rims march along the slope instead, which is
-/// what lets soil look like soil while still interlocking with the rock.
+/// It does NOT shape topsoil. That was tried and removed: soil follows the
+/// ground the generator actually placed, which no independently-evaluated
+/// field can know — see <see cref="TopsoilGeometry"/>.
 ///
 /// WHAT MAKES THE LINE POINT INWARD
 ///
@@ -93,51 +92,6 @@ public sealed class TerrainField : ITerrainFlow
         float terrain = DensityNoise.Fbm(at, _seed + 9187, 3);
 
         return burial + terrain * _weight;
-    }
-
-    /// <summary>
-    /// Is this point inside the ground? The surface is where burial crosses
-    /// zero, so anything above that value is solid.
-    ///
-    /// Continuous in position, deliberately. This is what lets a node decide a
-    /// sub-cell by asking about the WORLD surface rather than about a copy of
-    /// it re-centred on itself. Every node asking the same question of the same
-    /// point gets the same answer, so the solid region is one connected sheet
-    /// rather than a per-cube carving — which is what stops the boundaries
-    /// between nodes opening into voids.
-    /// </summary>
-    public bool Solid(float x, float y, float z) => Buried(x, y, z) >= 0f;
-
-    /// <summary>
-    /// How far this cell sits from the surface sheet, in cells, measured along
-    /// the field line. Positive is below the surface, negative above.
-    ///
-    /// The surface is a level set of the burial field — the place where it
-    /// crosses zero — and this is the signed distance to it. Burial is not a
-    /// true distance function, so it is divided by the gradient's magnitude,
-    /// which is the standard first-order correction and is accurate enough
-    /// within the cell or two that matter here.
-    ///
-    /// Topsoil uses this to place its cut plane. Without it every node cuts at
-    /// a plane fixed to its own centre and the surface restarts in each cell;
-    /// with it, adjacent nodes put their facets at the same world height and
-    /// the surface becomes one sheet.
-    /// </summary>
-    public float SurfaceOffset(Vector3I cell)
-    {
-        float here = Buried(cell.X, cell.Y, cell.Z);
-
-        // The gradient magnitude, from the same central differences the field
-        // line uses. Halved because those span two cells.
-        float dx = Buried(cell.X + 1, cell.Y, cell.Z) - Buried(cell.X - 1, cell.Y, cell.Z);
-        float dy = Buried(cell.X, cell.Y + 1, cell.Z) - Buried(cell.X, cell.Y - 1, cell.Z);
-        float dz = Buried(cell.X, cell.Y, cell.Z + 1) - Buried(cell.X, cell.Y, cell.Z - 1);
-
-        float grad = Mathf.Sqrt(dx * dx + dy * dy + dz * dz) * 0.5f;
-        if (grad < 0.0001f)
-            return 0f;
-
-        return here / grad;
     }
 
     /// <summary>

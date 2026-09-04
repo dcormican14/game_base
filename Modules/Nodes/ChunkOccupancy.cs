@@ -95,14 +95,24 @@ public sealed class ChunkOccupancy
                     if (material == NodeChunkStore.Air)
                         continue;
 
-                    Stamp(cell, typeOf((NodeMaterial)material));
+                    Stamp(store, cell, typeOf((NodeMaterial)material));
                 }
     }
 
     /// <summary>Marks one node's sub-cells filled.</summary>
-    private void Stamp(Vector3I cell, INodeType type)
+    private void Stamp(NodeChunkStore store, Vector3I cell, INodeType type)
     {
-        int[] cells = type.OccupiedCells(type.ShapeAt(cell));
+        // The neighbour mask must match what the MESHER will use, or culling
+        // and geometry disagree: a face would be tested against occupancy that
+        // describes a different shape than the one actually drawn.
+        int neighbours = 0;
+        for (int face = 0; face < NodeFace.Offsets.Length; face++)
+        {
+            if (store.Has(cell + NodeFace.Offsets[face]))
+                neighbours |= 1 << face;
+        }
+
+        int[] cells = type.OccupiedCells(type.ShapeAt(cell, neighbours));
 
         // The node's min sub-cell, relative to the window.
         int baseX = (cell.X - _origin.X) * RawNodeGeometry.Sub;

@@ -182,7 +182,7 @@ public partial class NodeWorld : StaticBody3D
     public int[] NodeSubCells(Vector3I cell)
     {
         INodeType type = TypeOf(MaterialAt(cell));
-        return type.OccupiedCells(type.ShapeAt(cell));
+        return type.OccupiedCells(type.ShapeAt(cell, NeighbourMask(cell)));
     }
 
     /// <summary>Nodes across every loaded chunk. Walks the chunk list rather
@@ -1105,7 +1105,7 @@ public partial class NodeWorld : StaticBody3D
     private void AddShapedNode(Vector3I cell, NodeMaterial material, Vector3 min, Color color)
     {
         INodeType type = TypeOf(material);
-        NodeMesh variant = type.MeshFor(type.ShapeAt(cell));
+        NodeMesh variant = type.MeshFor(type.ShapeAt(cell, NeighbourMask(cell)));
         if (variant.Vertices.Length == 0)
             return;
 
@@ -1135,6 +1135,33 @@ public partial class NodeWorld : StaticBody3D
             _indices.Add(start + 2);
             _indices.Add(start + 3);
         }
+    }
+
+    /// <summary>
+    /// Which of a cell's six face neighbours hold something solid, as a bitmask
+    /// indexed by <see cref="NodeFace"/>.
+    ///
+    /// For node types whose shape follows the SURFACE rather than the rock —
+    /// soil rounding off where it meets air and stepping up where it meets more
+    /// soil. Such a type cannot answer from position alone: where the ground
+    /// ends is what the generator decided, not something a node can evaluate
+    /// for itself.
+    ///
+    /// Six store reads, each a cached chunk lookup and an array index, and the
+    /// mesher is already reading these same cells to cull buried faces. The
+    /// shape stays a pure function of its inputs, so it remains cacheable and
+    /// safe on any thread.
+    /// </summary>
+    private int NeighbourMask(Vector3I cell)
+    {
+        int mask = 0;
+        for (int face = 0; face < NodeFace.Offsets.Length; face++)
+        {
+            if (_store.Has(cell + NodeFace.Offsets[face]))
+                mask |= 1 << face;
+        }
+
+        return mask;
     }
 
     /// <summary>

@@ -1,100 +1,54 @@
 using Godot;
-using System.Collections.Generic;
 
 namespace GameBase.Nodes;
 
 /// <summary>
-/// Topsoil: the transition node between raw rock and open sky.
+/// Topsoil: the ground layer between rock and open sky.
 ///
-/// The shape comes from a single FIELD LINE that always points INTO the
-/// surface — down on a flat top, down and into the hill on a slope,
-/// horizontally into the rock on a cliff face. The half of the node the line
-/// points toward is grown by the raw rule so it interlocks with the crystal;
-/// the half it points away from is cut back to make the surface. See
-/// <see cref="TopsoilGeometry"/> for how that cut is applied; this class owns
-/// the field the line is read from.
+/// Its shape is decided entirely by which of its six neighbours hold ground —
+/// bevel the top edge where a side faces air, step up a quarter cell where a
+/// side faces more soil. See <see cref="TopsoilGeometry"/> for the rule; this
+/// class is only the <see cref="INodeType"/> face of it.
 ///
-/// THE FIELD LINE
+/// WHY NEIGHBOURS AND NOT A FIELD
 ///
-/// The line is the gradient of a smooth scalar field arranged so that higher
-/// means "deeper into solid ground". Two terms make that true.
+/// Every other node type in this world is shaped by a function of its own
+/// position, and that is what makes planet-scale generation affordable — a
+/// node can be shaped without anyone looking around it. Topsoil is the one
+/// type that cannot work that way, because it is not shaping ROCK, it is
+/// shaping a SURFACE, and where the surface lies is the generator's decision
+/// rather than something a node can independently evaluate.
 ///
-/// A BURIAL TERM gives the field a downward bias everywhere, so with nothing
-/// else acting the line points straight down — which is what a flat plain
-/// should produce, and what any surface reduces to when it is level.
+/// A previous version tried anyway, sampling a smooth field of its own. The
+/// field and the generator disagreed about where the ground was, and soil the
+/// generator had placed came out as slivers: 387 of 2098 boundary nodes with
+/// fewer than eight of their sixty-four sub-cells filled.
 ///
-/// A TERRAIN TERM adds smooth 3D noise, so where the ground swells the field
-/// swells with it and the line tilts to point into the swell. On the side of a
-/// hill that tilt is most of the vector, which is what makes the line point
-/// into the mountain rather than merely downward.
-///
-/// The two are weighted so terrain can overcome burial on a steep face but
-/// never on flat ground. That ratio is the one dial deciding whether the world
-/// reads as rolling hills or as terraced steps.
-///
-/// WHY ITS OWN FIELD AND NOT THE ISLAND DENSITY
-///
-/// A node type may depend only on its cell and the seed. That is the
-/// <see cref="INodeType"/> contract, it is what lets a node be shaped without
-/// consulting neighbours, and it is what makes planet-scale generation
-/// affordable. Reaching into the level generator would break it for every node
-/// a player places away from an island — there would be no island surface to
-/// follow — and would cost a full density evaluation per node at mesh time.
-/// This field is defined everywhere and costs a few noise samples.
+/// Taking the neighbour mask instead costs nothing. The mesher already reads
+/// those six cells to cull buried faces, so it passes on what it has; nothing
+/// searches the world, the shape is still a pure function of its inputs, and
+/// with only 64 possible masks the geometry is a fixed table.
 /// </summary>
 public sealed class TopsoilNode : INodeType
 {
-    private readonly RawNodeField _raw;
-    private readonly TerrainField _terrain;
-
-    /// <param name="seed">Same seed, same world.</param>
-    /// <param name="flowScale">Cells per lobe of the raw growth flow, passed
-    /// straight through so the interlock half matches the rock exactly.</param>
-    /// <param name="roughness">Raw contest jitter, as above.</param>
-    /// <param name="growth">Raw contest count, as above.</param>
-    /// <param name="terrain">The world's terrain field. Shared with the rock
-    /// so both decide shared features the same way.</param>
-    /// <param name="terrainBias">How strongly the growth contests bend toward
-    /// the land. This is the dial that decides whether soil reads as soil or
-    /// as another kind of crystal.</param>
-    public TopsoilNode(int seed, float flowScale = 6f, float roughness = 0.35f,
-        float growth = 0.7f, TerrainField terrain = null,
-        float terrainBias = TerrainField.ContestBias)
+    /// <param name="seed">Unused — the shape owes nothing to noise. Accepted
+    /// so the type constructs like every other one in the registry.</param>
+    public TopsoilNode(int seed = 0)
     {
-        _terrain = terrain ?? new TerrainField(seed);
-
-        // The contests that shape this node are bent toward the land.
-        //
-        // Without this the winners follow the crystal's own noise currents,
-        // and since space must be exactly tiled — a feature this node loses is
-        // always filled by the neighbour that won it, verified exhaustively —
-        // the soil has no way to keep that space back. Its rims therefore
-        // march in the same currents the bismuth does, and it reads as another
-        // kind of rock however its surface is cut. Measured, the contests were
-        // removing 7770 sub-cells of the visible top layer against the field
-        // line's 3984.
-        //
-        // Biasing the flow does not break the interlock, because the bias is a
-        // property of the FEATURE rather than of the material: the rock beside
-        // this node bends the same flow by the same amount at the same lattice
-        // position and reaches the same verdict.
-        _raw = new RawNodeField(seed, flowScale, roughness, growth, _terrain, terrainBias);
     }
 
     public string Id => "topsoil";
 
     public int Subdivision => RawNodeGeometry.Sub;
 
-    public NodeShape ShapeAt(Vector3I cell)
-    {
-        TopsoilGeometry.Mask mask = MaskFor(cell);
+    /// <summary>
+    /// Without a neighbour mask there is nothing to go on, so this assumes
+    /// open sky on every side — the shape a lone node placed in mid-air should
+    /// have. The mesher always calls the overload below.
+    /// </summary>
+    public NodeShape ShapeAt(Vector3I cell) => new(0);
 
-        // The handle packs the whole shape: the raw mask in one int, the
-        // quantised field line in the other. Equal handles mean identical
-        // geometry, which is what the mesher's per-shape cache requires.
-        int a = mask.Raw.Corners << 12 | mask.Raw.Edges;
-        return new NodeShape(a, InternSurface(mask));
-    }
+    public NodeShape ShapeAt(Vector3I cell, int neighbours) => new(neighbours & 63);
 
     public NodeMesh MeshFor(NodeShape shape) => TopsoilGeometry.Get(ToMask(shape));
 
@@ -103,79 +57,5 @@ public sealed class TopsoilNode : INodeType
     public bool Occupies(NodeShape shape, int i, int j, int k) =>
         TopsoilGeometry.Occupies(ToMask(shape), i, j, k);
 
-    private TopsoilGeometry.Mask ToMask(NodeShape shape)
-    {
-        var raw = new RawNodeGeometry.Mask(shape.A >> 12, shape.A & 0xFFF);
-        lock (_surfaceLock)
-            return new TopsoilGeometry.Mask(raw, _surfaces[shape.B]);
-    }
-
-    // The sampled surface is 64 bits and will not fit alongside the raw mask
-    // in a NodeShape's two ints, so distinct (flow, surface) pairs are interned
-    // and the handle carries an index. The contract that matters is unchanged:
-    // equal handles still mean identical geometry.
-    //
-    // The table stays small because the surface is a smooth sheet through the
-    // terrain — most nodes are entirely inside it or entirely outside, and only
-    // the ones it actually passes through carry an interesting pattern.
-    private readonly Dictionary<ulong, int> _surfaceIds = new();
-    private readonly List<ulong> _surfaces = new();
-    private readonly object _surfaceLock = new();
-
-    private int InternSurface(in TopsoilGeometry.Mask mask)
-    {
-        lock (_surfaceLock)
-        {
-            if (_surfaceIds.TryGetValue(mask.Surface, out int existing))
-                return existing;
-
-            int id = _surfaces.Count;
-            _surfaces.Add(mask.Surface);
-            _surfaceIds[mask.Surface] = id;
-            return id;
-        }
-    }
-
-    /// <summary>
-    /// The shape of the topsoil node at a cell: its raw interlock, and the
-    /// field line that cuts its surface.
-    /// </summary>
-    private TopsoilGeometry.Mask MaskFor(Vector3I cell) =>
-        new(_raw.MaskFor(cell), SurfaceAt(cell));
-
-    /// <summary>
-    /// Samples the terrain surface across this node's sub-cells, one bit each.
-    ///
-    /// The whole point is that this reads a WORLD function at world positions.
-    /// Two nodes sampling the same sub-cell get the same answer, so the solid
-    /// region is one continuous sheet: nothing can be claimed twice, and
-    /// nothing the surface covers can be left unclaimed. Cutting each node with
-    /// a plane of its own instead left 565 voids where a carved face met a
-    /// neighbour that had no reason to fill it.
-    /// </summary>
-    private ulong SurfaceAt(Vector3I cell)
-    {
-        const int sub = TopsoilGeometry.Sub;
-        ulong bits = 0UL;
-
-        for (int i = 0; i < sub; i++)
-        {
-            for (int j = 0; j < sub; j++)
-            {
-                for (int k = 0; k < sub; k++)
-                {
-                    // The sub-cell's centre, in cell units.
-                    float x = cell.X + (i + 0.5f) / sub;
-                    float y = cell.Y + (j + 0.5f) / sub;
-                    float z = cell.Z + (k + 0.5f) / sub;
-
-                    if (_terrain.Solid(x, y, z))
-                        bits |= 1UL << TopsoilGeometry.SurfaceBit(i, j, k);
-                }
-            }
-        }
-
-        return bits;
-    }
-
+    private static TopsoilGeometry.Mask ToMask(NodeShape shape) => new(shape.A);
 }

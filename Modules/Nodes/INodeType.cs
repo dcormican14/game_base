@@ -28,6 +28,33 @@ namespace GameBase.Nodes;
 /// occupied by anything, and it re-meshes only the cells near an edit — both
 /// of which are wrong if shape is order-dependent or if space is not tiled.
 /// </summary>
+/// <summary>
+/// The six face directions, as bit positions in a neighbour mask.
+///
+/// Ordered so the opposite of a face is its index XOR 1, which is what lets a
+/// shape mirror itself without a lookup table.
+/// </summary>
+public static class NodeFace
+{
+    public const int NegX = 0;
+    public const int PosX = 1;
+    public const int NegY = 2;
+    public const int PosY = 3;
+    public const int NegZ = 4;
+    public const int PosZ = 5;
+
+    /// <summary>The six directions, indexed by the constants above.</summary>
+    public static readonly Vector3I[] Offsets =
+    {
+        new(-1, 0, 0), new(1, 0, 0),
+        new(0, -1, 0), new(0, 1, 0),
+        new(0, 0, -1), new(0, 0, 1),
+    };
+
+    /// <summary>Is the neighbour on this face solid?</summary>
+    public static bool Has(int mask, int face) => (mask & 1 << face) != 0;
+}
+
 public interface INodeType
 {
     /// <summary>Name shown in the editor and used in save data.</summary>
@@ -48,6 +75,29 @@ public interface INodeType
     /// Must be a pure function of `cell` and the type's own seed.
     /// </summary>
     NodeShape ShapeAt(Vector3I cell);
+
+    /// <summary>
+    /// The shape of the node at `cell`, told which of its six face neighbours
+    /// hold something solid.
+    ///
+    /// For types whose shape is a property of the SURFACE rather than of the
+    /// rock itself — soil rounding over where it meets air, and stepping up
+    /// where it meets more soil. Such a type cannot answer from position alone,
+    /// because where the ground ends is the generator's decision, not a
+    /// function anyone can evaluate independently.
+    ///
+    /// This does not weaken the no-neighbour-queries contract that makes
+    /// planet-scale generation work. The mesher already reads the six
+    /// neighbours of every node it draws, to cull buried faces; it simply
+    /// passes on what it found. Nothing here searches the world, and the
+    /// shape stays a pure function of its inputs, so it remains cacheable and
+    /// safe to evaluate on any thread in any order.
+    ///
+    /// `neighbours` is a bitmask indexed by <see cref="NodeFace"/>. The default
+    /// implementation ignores it, so a type whose shape owes nothing to its
+    /// surroundings needs no changes.
+    /// </summary>
+    NodeShape ShapeAt(Vector3I cell, int neighbours) => ShapeAt(cell);
 
     /// <summary>
     /// The meshed geometry for a shape, in sub-cell units relative to the

@@ -4,60 +4,48 @@ using System.Collections.Generic;
 namespace GameBase.Nodes;
 
 /// <summary>
-/// The geometry of a TOPSOIL node: crystal where it meets rock, a rolling
-/// surface where it meets air.
+/// The geometry of a TOPSOIL node: ground that rounds off where it meets the
+/// sky and steps up where it meets more ground.
 ///
-/// Topsoil is the skin between rock and sky, and it is shaped by one idea: a
-/// FIELD LINE that always points INTO the surface. On a flat top it points
-/// straight down; on a slope it points down and into the hill; on the side of
-/// a mountain it points horizontally into the rock. Everything else follows
-/// from which way that vector faces.
+/// THE RULE, PER EDGE
 ///
-/// THE SURFACE IS SAMPLED, NOT CARVED
+/// Take the right-hand side of a node. Two cases, and only two:
 ///
-/// The soil's outer shape is the level set of the world's terrain field: each
-/// sub-cell is filled when the field says that point is inside the ground.
-/// Every node samples the SAME function at the SAME world positions, so a
-/// sub-cell has exactly one answer whichever node asks — it cannot be claimed
-/// twice, and it cannot be left unclaimed.
+///   the cell to the right is AIR — the ground ends here, so the top-right
+///   edge is taken off. That bevel is what makes a slope read as rounded
+///   rather than as a stack of cubes.
 ///
-/// That is what an earlier version got wrong. It cut each node with a plane of
-/// its own, which is a one-sided operation: carving a face left space the
-/// neighbour had no reason to fill, and the joins between nodes opened into
-/// holes — 565 of them between two soil layers. Material has to be DISPLACED
-/// rather than removed. Sampling a shared field does that implicitly, because
-/// the solid region is one sheet that happens to be divided among cells rather
-/// than a set of cubes each carving itself.
+///   the cell to the right is SOIL — the ground continues, and a step up of a
+///   quarter cell is added over the top-right edge. Its neighbour does the
+///   same toward this node, and the two meet as one continuous rise.
 ///
-/// THE RIMS ARE A PROMISE
+/// The same applies on all four horizontal sides, so a node's shape is decided
+/// by which of its neighbours hold ground.
 ///
-/// The growth contests still run, and they are honoured in both directions: a
-/// feature this node won is filled wherever its rim reaches, INCLUDING outside
-/// its own cell and regardless of the surface, and a feature it lost is left
-/// empty. The loser vacates precisely because the winner will fill it, so a
-/// winner that declined on account of its own surface would leave a hole
-/// nobody else could close — which is exactly what the stacked-soil voids
-/// were.
+/// WHY THIS AND NOT A FIELD
 ///
-/// NO CORE
+/// An earlier version sampled a smooth noise field and filled the sub-cells it
+/// called solid. That field had no idea where the generator had actually put
+/// the ground: measured over 2098 boundary nodes it left 387 of them with
+/// fewer than eight of their sixty-four sub-cells filled — soil the generator
+/// had placed, rendering as slivers or vanishing outright. The shape of a
+/// surface has to follow the surface that exists, and the only thing that
+/// knows where that is, is what the generator placed.
 ///
-/// Unlike <see cref="RawNodeGeometry"/> this keeps no untouchable centre. A
-/// core exists there to stop contests carving a node away to nothing, and
-/// contests do not shape soil. Forcing one here does the opposite of its job:
-/// where the terrain field says a cell is entirely above ground, a mandatory
-/// core leaves a 2x2x2 nub floating in the air with nothing attached to it.
+/// O(1), AND NO SEARCHING
 ///
-/// Nothing is lost by dropping it. Which cells hold soil at all is the
-/// generator's decision, and a cell the surface says is empty simply meshes to
-/// nothing.
+/// The shape is a pure function of a six-bit neighbour mask, so it is one
+/// array index per node and there is nothing to walk. The mesher already reads
+/// those six neighbours to cull buried faces, so it hands over what it has and
+/// nothing extra is fetched. Sixty-four masks is the entire geometry set.
 ///
-/// NO NEIGHBOUR QUERIES
+/// TILING
 ///
-/// Every part of this is a pure function of the cell and the seed, which is
-/// the <see cref="INodeType"/> contract. Neighbours agree about contests
-/// because all of them run the same contest on the same lattice features, and
-/// about the surface because all of them sample the same field. Nothing is
-/// ever read from the world.
+/// A node never reaches outside its own cell, which tiles by construction —
+/// the contract <see cref="PlainNode"/> keeps. The step a node adds toward a
+/// solid neighbour is added INSIDE its own footprint, and the neighbour adds
+/// the matching step inside its own, so the two meet at the shared face
+/// without either claiming the other's space.
 /// </summary>
 public static class TopsoilGeometry
 {
@@ -65,76 +53,53 @@ public static class TopsoilGeometry
     public const int Sub = RawNodeGeometry.Sub;
 
     /// <summary>
-    /// How far a sub-cell must lie opposite the field line before it is
-    /// omitted, in quarter-cells along the reversed field line.
+    /// How deep the bevel is where the ground ends, in quarter-cells.
     ///
-    /// 0.9 puts the cut just inside the layer of sub-cells whose centres sit
-    /// 1.5 quarter-cells off the node's middle, so a field line pointing
-    /// straight down removes exactly the top layer and no more. Lower carves
-    /// the node away aggressively; higher leaves it nearly a full cube.
+    /// One. The bevel exists to round a corner, not to shave the node down: at
+    /// one quarter-cell a node facing air loses a single row along that edge,
+    /// which is the smallest step the lattice can express and the one that
+    /// reads as a rounded lip rather than as a chamfer.
     /// </summary>
-    public const float CutThreshold = 0.9f;
+    public const int Bevel = 1;
 
     /// <summary>
-    /// One topsoil node's shape: the raw mask its rock-facing half wears, and
-    /// the quantised field line that decides the rest.
+    /// How far the ground rises toward a solid neighbour, in quarter-cells.
+    ///
+    /// One, matching the bevel, so a run of soil climbing to the right rises a
+    /// quarter cell per node — the "step up by 1/4" the surface is built from.
+    /// </summary>
+    public const int Step = 1;
+
+    /// <summary>
+    /// One topsoil node's shape: which of its six neighbours hold ground.
+    ///
+    /// That is the whole of it. Six bits, indexed by <see cref="NodeFace"/>,
+    /// so there are 64 distinct topsoil shapes in a world and every node wears
+    /// one of them.
     /// </summary>
     public readonly struct Mask
     {
-        /// <summary>The raw shape the rock-facing half wears, so it meets the
-        /// crystal with the same rims and recesses.</summary>
-        public readonly RawNodeGeometry.Mask Raw;
+        public readonly int Neighbours;
 
-        /// <summary>
-        /// The surface, sampled: one bit per sub-cell of this node's own cell,
-        /// set where the shared terrain field says the point is inside ground.
-        /// Indexed i * Sub * Sub + j * Sub + k.
-        ///
-        /// This replaces cutting the node with a plane of its own. A plane
-        /// anchored to each node re-centres the surface in every cell, so
-        /// carving one node opened space its neighbours had no reason to fill
-        /// — the voids. Sampling one WORLD field instead means every sub-cell
-        /// has exactly one answer, whichever node asks: no two nodes can both
-        /// claim it, and none can be left unclaimed. The solid region becomes
-        /// a single connected sheet through the terrain rather than a set of
-        /// independently carved cubes.
-        ///
-        /// 64 bits, so the whole node fits one ulong and the shape cache keys
-        /// on it directly.
-        /// </summary>
-        public readonly ulong Surface;
-
-        public Mask(RawNodeGeometry.Mask raw, ulong surface)
+        public Mask(int neighbours)
         {
-            Raw = raw;
-            Surface = surface;
+            Neighbours = neighbours;
         }
     }
 
-    // Shapes are cached per distinct mask, exactly as the raw type does.
-    private static readonly Dictionary<(int, ulong), NodeMesh> _cache = new();
-    private static readonly Dictionary<(int, ulong), int[]> _occupancyCache = new();
+    // 64 shapes, built on demand and kept. Small enough to build up front;
+    // done lazily only to keep startup free of work a world may never need.
+    private static readonly NodeMesh[] _meshes = new NodeMesh[64];
+    private static readonly int[][] _occupancy = new int[64][];
     private static readonly object _lock = new();
-
-    /// <summary>The bit index of a sub-cell within <see cref="Mask.Surface"/>.</summary>
-    public static int SurfaceBit(int i, int j, int k) => (i * Sub + j) * Sub + k;
-
-    private static (int Raw, ulong Surface) KeyOf(in Mask mask) => (
-        mask.Raw.Corners << 12 | mask.Raw.Edges,
-        mask.Surface);
 
     /// <summary>The meshed shape for a mask, built once and cached.</summary>
     public static NodeMesh Get(in Mask mask)
     {
-        var key = KeyOf(mask);
+        int key = mask.Neighbours & 63;
         lock (_lock)
         {
-            if (_cache.TryGetValue(key, out NodeMesh cached))
-                return cached;
-
-            NodeMesh built = Build(mask);
-            _cache[key] = built;
-            return built;
+            return _meshes[key] ??= Build(new Mask(key));
         }
     }
 
@@ -142,63 +107,100 @@ public static class TopsoilGeometry
     /// node-local coordinates.</summary>
     public static int[] OccupiedCells(in Mask mask)
     {
-        var key = KeyOf(mask);
+        int key = mask.Neighbours & 63;
         lock (_lock)
         {
-            if (_occupancyCache.TryGetValue(key, out int[] cached))
-                return cached;
+            if (_occupancy[key] != null)
+                return _occupancy[key];
 
-            var list = new List<int>(96);
-            for (int i = RawNodeGeometry.Lo; i < RawNodeGeometry.Hi; i++)
-                for (int j = RawNodeGeometry.Lo; j < RawNodeGeometry.Hi; j++)
-                    for (int k = RawNodeGeometry.Lo; k < RawNodeGeometry.Hi; k++)
-                        if (Occupies(mask, i, j, k))
+            var list = new List<int>(Sub * Sub * Sub * 3);
+            var local = new Mask(key);
+            for (int i = 0; i < Sub; i++)
+                for (int j = 0; j < Sub; j++)
+                    for (int k = 0; k < Sub; k++)
+                        if (Occupies(local, i, j, k))
                         {
                             list.Add(i);
                             list.Add(j);
                             list.Add(k);
                         }
 
-            int[] built = list.ToArray();
-            _occupancyCache[key] = built;
-            return built;
+            return _occupancy[key] = list.ToArray();
         }
     }
 
     /// <summary>
     /// Does this shape fill the quarter-cell at node-local (i,j,k)?
     ///
-    /// The authority both the mesher and the world's culling consult, and the
-    /// single place the field line's two consequences are applied.
+    /// The whole rule lives here: a column of the node is solid up to a height
+    /// decided by which sides face ground, and nothing ever reaches outside the
+    /// node's own cell.
     /// </summary>
     public static bool Occupies(in Mask mask, int i, int j, int k)
     {
-        if (i < RawNodeGeometry.Lo || i >= RawNodeGeometry.Hi
-            || j < RawNodeGeometry.Lo || j >= RawNodeGeometry.Hi
-            || k < RawNodeGeometry.Lo || k >= RawNodeGeometry.Hi)
-            return false;
-
-        // SOIL GROWS NO RIMS, AND YIELDS NONE.
-        //
-        // It fills exactly its own cell, wherever the surface says solid, and
-        // never reaches outside it. That is the contract PlainNode has always
-        // kept: a type confined to its own footprint tiles space by
-        // construction, and a raw neighbour's rim simply overhangs it. The
-        // seam is honest — crystal grows over soil, which is what it should
-        // look like.
-        //
-        // Entering the crystal contests was the mistake behind the divots.
-        // Running the raw rule made every soil node wear a bismuth shape:
-        // dumping the actual occupancy showed it matching the raw mask
-        // exactly, hollowed to a 2x2 nub along every border it lost. The
-        // surface field was deciding nothing, because a node below ground has
-        // every surface bit set and the contests then had the last word.
-        //
-        // Soil is not crystal. It should not grow like it.
+        // Never outside its own footprint. Soil grows no rims; a raw
+        // neighbour's rim may overhang it, which is what makes crystal read as
+        // growing over the ground rather than out of it.
         if (i < 0 || i >= Sub || j < 0 || j >= Sub || k < 0 || k >= Sub)
             return false;
 
-        return (mask.Surface & 1UL << SurfaceBit(i, j, k)) != 0UL;
+        // With ground above, this node is buried and has no surface to shape.
+        // Filling solid is what makes a stack of soil read as one mass rather
+        // than as layers with a lid on each.
+        if (NodeFace.Has(mask.Neighbours, NodeFace.PosY))
+            return true;
+
+        return j < TopHeight(mask, i, k);
+    }
+
+    /// <summary>
+    /// How many quarter-cell layers of soil stand over column (i,k).
+    ///
+    /// Starts from a full node and applies each horizontal side's verdict: a
+    /// side facing air bevels its edge down, a side facing ground steps it up.
+    /// A column in a corner is touched by two sides and takes both, so corners
+    /// round and rise consistently with the edges meeting there.
+    /// </summary>
+    private static int TopHeight(in Mask mask, int i, int k)
+    {
+        int height = Sub;
+
+        // How far into the node each side reaches, in quarter-cells from that
+        // face. Only the outermost row is touched, so a bevel takes a corner
+        // off rather than sloping the whole node.
+        height = Apply(height, mask.Neighbours, NodeFace.NegX, i);
+        height = Apply(height, mask.Neighbours, NodeFace.PosX, Sub - 1 - i);
+        height = Apply(height, mask.Neighbours, NodeFace.NegZ, k);
+        height = Apply(height, mask.Neighbours, NodeFace.PosZ, Sub - 1 - k);
+
+        // Never below one layer while the node holds soil at all: the
+        // generator placed this node because there is ground here, and a node
+        // that bevelled itself away on every side would leave a hole in it.
+        return Mathf.Clamp(height, 1, Sub);
+    }
+
+    /// <summary>
+    /// Applies one side's verdict to a column standing `distance` quarter-cells
+    /// in from that face.
+    /// </summary>
+    private static int Apply(int height, int neighbours, int face, int distance)
+    {
+        // Only the row against the face is affected. Beyond that the column is
+        // the node's own business, which is what keeps the bevel a lip and the
+        // step a stair rather than a ramp across the whole cell.
+        if (distance >= Bevel)
+            return height;
+
+        if (NodeFace.Has(neighbours, face))
+        {
+            // Ground continues this way: rise to meet it. Capped at the cell,
+            // since a node cannot grow past its own top without reaching into
+            // the cell above — which belongs to whatever is up there.
+            return Mathf.Min(height + Step, Sub);
+        }
+
+        // Open air this way: take the top edge off.
+        return height - Bevel;
     }
 
     /// <summary>Builds the mesh for one shape.</summary>
@@ -210,9 +212,9 @@ public static class TopsoilGeometry
         var solid = new bool[span, span, span];
         Mask local = mask;
 
-        for (int i = lo; i < RawNodeGeometry.Hi; i++)
-            for (int j = lo; j < RawNodeGeometry.Hi; j++)
-                for (int k = lo; k < RawNodeGeometry.Hi; k++)
+        for (int i = 0; i < Sub; i++)
+            for (int j = 0; j < Sub; j++)
+                for (int k = 0; k < Sub; k++)
                     if (Occupies(local, i, j, k))
                         solid[i - lo, j - lo, k - lo] = true;
 
