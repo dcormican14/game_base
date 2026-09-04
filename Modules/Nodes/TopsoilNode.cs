@@ -1,5 +1,5 @@
 using Godot;
-using GameBase.Density;
+using System.Collections.Generic;
 
 namespace GameBase.Nodes;
 
@@ -93,12 +93,7 @@ public sealed class TopsoilNode : INodeType
         // quantised field line in the other. Equal handles mean identical
         // geometry, which is what the mesher's per-shape cache requires.
         int a = mask.Raw.Corners << 12 | mask.Raw.Edges;
-        int b = ((mask.Flow.X + TopsoilGeometry.FlowSteps) * 25
-            + (mask.Flow.Y + TopsoilGeometry.FlowSteps) * 5
-            + mask.Flow.Z + TopsoilGeometry.FlowSteps)
-            * (TopsoilGeometry.MaxPhase * 2 + 1)
-            + mask.Phase + TopsoilGeometry.MaxPhase;
-        return new NodeShape(a, b);
+        return new NodeShape(a, InternSurface(mask));
     }
 
     public NodeMesh MeshFor(NodeShape shape) => TopsoilGeometry.Get(ToMask(shape));
@@ -108,21 +103,37 @@ public sealed class TopsoilNode : INodeType
     public bool Occupies(NodeShape shape, int i, int j, int k) =>
         TopsoilGeometry.Occupies(ToMask(shape), i, j, k);
 
-    private static TopsoilGeometry.Mask ToMask(NodeShape shape)
+    private TopsoilGeometry.Mask ToMask(NodeShape shape)
     {
         var raw = new RawNodeGeometry.Mask(shape.A >> 12, shape.A & 0xFFF);
+        lock (_surfaceLock)
+            return new TopsoilGeometry.Mask(raw, _surfaces[shape.B]);
+    }
 
-        const int steps = TopsoilGeometry.FlowSteps;
-        const int span = TopsoilGeometry.MaxPhase * 2 + 1;
+    // The sampled surface is 64 bits and will not fit alongside the raw mask
+    // in a NodeShape's two ints, so distinct (flow, surface) pairs are interned
+    // and the handle carries an index. The contract that matters is unchanged:
+    // equal handles still mean identical geometry.
+    //
+    // The table stays small because the surface is a smooth sheet through the
+    // terrain — most nodes are entirely inside it or entirely outside, and only
+    // the ones it actually passes through carry an interesting pattern.
+    private readonly Dictionary<ulong, int> _surfaceIds = new();
+    private readonly List<ulong> _surfaces = new();
+    private readonly object _surfaceLock = new();
 
-        int phase = shape.B % span - TopsoilGeometry.MaxPhase;
-        int f = shape.B / span;
-        var flow = new Vector3I(
-            f / 25 - steps,
-            f / 5 % 5 - steps,
-            f % 5 - steps);
+    private int InternSurface(in TopsoilGeometry.Mask mask)
+    {
+        lock (_surfaceLock)
+        {
+            if (_surfaceIds.TryGetValue(mask.Surface, out int existing))
+                return existing;
 
-        return new TopsoilGeometry.Mask(raw, flow, phase);
+            int id = _surfaces.Count;
+            _surfaces.Add(mask.Surface);
+            _surfaceIds[mask.Surface] = id;
+            return id;
+        }
     }
 
     /// <summary>
@@ -130,62 +141,41 @@ public sealed class TopsoilNode : INodeType
     /// field line that cuts its surface.
     /// </summary>
     private TopsoilGeometry.Mask MaskFor(Vector3I cell) =>
-        new(_raw.MaskFor(cell), FlowAt(cell), PhaseAt(cell));
+        new(_raw.MaskFor(cell), SurfaceAt(cell));
 
     /// <summary>
-    /// Where this node's cut plane sits, relative to its own centre, so that
-    /// the plane lands at the same place in the WORLD as its neighbours'.
+    /// Samples the terrain surface across this node's sub-cells, one bit each.
     ///
-    /// The surface is one continuous sheet through the terrain: the level set
-    /// where burial crosses a fixed value. A node cutting at a plane fixed to
-    /// its own centre restarts that sheet in every cell, which is why the
-    /// facets used to be flat within a node and step at every boundary. The
-    /// burial value at the node's centre says how far this node sits from the
-    /// sheet, and shifting the plane by that much puts every node's facet back
-    /// on the one surface.
-    ///
-    /// Scaled into quarter-cells and rounded, because that is the resolution
-    /// the geometry can express — and rounding is what keeps the number of
-    /// distinct shapes small enough to cache.
+    /// The whole point is that this reads a WORLD function at world positions.
+    /// Two nodes sampling the same sub-cell get the same answer, so the solid
+    /// region is one continuous sheet: nothing can be claimed twice, and
+    /// nothing the surface covers can be left unclaimed. Cutting each node with
+    /// a plane of its own instead left 565 voids where a carved face met a
+    /// neighbour that had no reason to fill it.
     /// </summary>
-    private int PhaseAt(Vector3I cell)
+    private ulong SurfaceAt(Vector3I cell)
     {
-        // How far this cell sits from the surface, in cells, along the field
-        // line. Burial rises going down at one unit per cell of depth (the
-        // field's own scaling), so the raw value is already a distance.
-        float depth = _terrain.SurfaceOffset(cell);
+        const int sub = TopsoilGeometry.Sub;
+        ulong bits = 0UL;
 
-        // Into quarter-cells, and clamped: beyond a node's own extent the
-        // plane no longer intersects it and the shape saturates to solid or
-        // empty, so there is nothing to gain by tracking it further.
-        int phase = Mathf.RoundToInt(depth * TopsoilGeometry.Sub);
-        return Mathf.Clamp(phase, -TopsoilGeometry.MaxPhase, TopsoilGeometry.MaxPhase);
-    }
+        for (int i = 0; i < sub; i++)
+        {
+            for (int j = 0; j < sub; j++)
+            {
+                for (int k = 0; k < sub; k++)
+                {
+                    // The sub-cell's centre, in cell units.
+                    float x = cell.X + (i + 0.5f) / sub;
+                    float y = cell.Y + (j + 0.5f) / sub;
+                    float z = cell.Z + (k + 0.5f) / sub;
 
-    /// <summary>
-    /// The field line at a cell, quantised for the shape cache.
-    ///
-    /// The gradient is taken by central differences a cell apart, which is the
-    /// right scale to measure at: closer would read noise rather than slope,
-    /// and wider would smooth over the features the surface should follow.
-    /// </summary>
-    private Vector3I FlowAt(Vector3I cell)
-    {
-        Vector3 flow = _terrain.FlowAt(cell);
+                    if (_terrain.Solid(x, y, z))
+                        bits |= 1UL << TopsoilGeometry.SurfaceBit(i, j, k);
+                }
+            }
+        }
 
-        const int steps = TopsoilGeometry.FlowSteps;
-        var quantised = new Vector3I(
-            Mathf.Clamp(Mathf.RoundToInt(flow.X * steps), -steps, steps),
-            Mathf.Clamp(Mathf.RoundToInt(flow.Y * steps), -steps, steps),
-            Mathf.Clamp(Mathf.RoundToInt(flow.Z * steps), -steps, steps));
-
-        // Quantising can round every component to zero for a direction sitting
-        // between steps. Falling back to straight down keeps the node shaped
-        // like flat ground rather than leaving it a bare cube.
-        if (quantised == Vector3I.Zero)
-            return new Vector3I(0, -steps, 0);
-
-        return quantised;
+        return bits;
     }
 
 }

@@ -21,37 +21,39 @@ namespace GameBase.Nodes;
 /// node happened to lose every contest. Exactly the role the core plays in
 /// <see cref="RawNodeGeometry"/>, and for the same reason.
 ///
-/// THE TWO HALVES, SPLIT BY THE FIELD LINE
+/// THE SURFACE IS SAMPLED, NOT CARVED
 ///
-/// The field line divides the node, rather than a fixed horizontal plane. The
-/// half it points TOWARD faces into the rock, so that half is grown by the raw
-/// rule — the same contests and the same rims, driven by the RAW field rather
-/// than this one — and interlocks with the crystal it meets like a puzzle
-/// piece.
+/// The soil's outer shape is the level set of the world's terrain field: each
+/// sub-cell is filled when the field says that point is inside the ground.
+/// Every node samples the SAME function at the SAME world positions, so a
+/// sub-cell has exactly one answer whichever node asks — it cannot be claimed
+/// twice, and it cannot be left unclaimed.
 ///
-/// The half it points AWAY from faces open air, and that is where the surface
-/// is shaped. A sub-cell there is omitted once it lies far enough opposite the
-/// field line: project its offset from the node's centre onto the reversed
-/// field line and drop it past a threshold. A field line pointing straight
-/// down removes the whole top layer; one pointing down and to the left removes
-/// the top layer and a further step off the opposite corner. The cut is a
-/// plane perpendicular to the field line, so what it leaves is a facet lying
-/// across the slope.
+/// That is what an earlier version got wrong. It cut each node with a plane of
+/// its own, which is a one-sided operation: carving a face left space the
+/// neighbour had no reason to fill, and the joins between nodes opened into
+/// holes — 565 of them between two soil layers. Material has to be DISPLACED
+/// rather than removed. Sampling a shared field does that implicitly, because
+/// the solid region is one sheet that happens to be divided among cells rather
+/// than a set of cubes each carving itself.
 ///
-/// WHY THIS ROLLS RATHER THAN STEPS
+/// THE RIMS ARE A PROMISE
 ///
-/// The field line comes from a smooth field, so it turns gradually across the
-/// terrain. Neighbouring nodes cut at almost the same angle, and their facets
-/// line up into a continuous surface following the hill — rather than the
-/// staircase of independent per-node heights a per-column height rule gives.
+/// The growth contests still run, and they are honoured in both directions: a
+/// feature this node won is filled wherever its rim reaches, INCLUDING outside
+/// its own cell and regardless of the surface, and a feature it lost is left
+/// empty. The loser vacates precisely because the winner will fill it, so a
+/// winner that declined on account of its own surface would leave a hole
+/// nobody else could close — which is exactly what the stacked-soil voids
+/// were.
 ///
 /// NO NEIGHBOUR QUERIES
 ///
 /// Every part of this is a pure function of the cell and the seed, which is
-/// the <see cref="INodeType"/> contract. The rock-facing half agrees with its
-/// neighbours because all of them run the same raw contest on the same lattice
-/// features. The air-facing half agrees because the field is continuous and
-/// shared. Nothing is ever read from the world.
+/// the <see cref="INodeType"/> contract. Neighbours agree about contests
+/// because all of them run the same contest on the same lattice features, and
+/// about the surface because all of them sample the same field. Nothing is
+/// ever read from the world.
 /// </summary>
 public static class TopsoilGeometry
 {
@@ -69,9 +71,6 @@ public static class TopsoilGeometry
     /// </summary>
     public const float CutThreshold = 0.9f;
 
-    /// <summary>How finely each axis of the field line is quantised.</summary>
-    public const int FlowSteps = 2;
-
     /// <summary>
     /// One topsoil node's shape: the raw mask its rock-facing half wears, and
     /// the quantised field line that decides the rest.
@@ -83,55 +82,42 @@ public static class TopsoilGeometry
         public readonly RawNodeGeometry.Mask Raw;
 
         /// <summary>
-        /// The field line, quantised to small integer components.
+        /// The surface, sampled: one bit per sub-cell of this node's own cell,
+        /// set where the shared terrain field says the point is inside ground.
+        /// Indexed i * Sub * Sub + j * Sub + k.
         ///
-        /// Quantised rather than kept as a float vector so shapes repeat: a
-        /// hillside uses a handful of distinct directions, each meshed once
-        /// and reused for every node wearing it. Components run
-        /// -FlowSteps..FlowSteps, fine enough that facets turn smoothly and
-        /// coarse enough that the cache stays small.
+        /// This replaces cutting the node with a plane of its own. A plane
+        /// anchored to each node re-centres the surface in every cell, so
+        /// carving one node opened space its neighbours had no reason to fill
+        /// — the voids. Sampling one WORLD field instead means every sub-cell
+        /// has exactly one answer, whichever node asks: no two nodes can both
+        /// claim it, and none can be left unclaimed. The solid region becomes
+        /// a single connected sheet through the terrain rather than a set of
+        /// independently carved cubes.
+        ///
+        /// 64 bits, so the whole node fits one ulong and the shape cache keys
+        /// on it directly.
         /// </summary>
-        public readonly Vector3I Flow;
+        public readonly ulong Surface;
 
-        /// <summary>
-        /// Where the cut plane sits, in quarter-cells from this node's centre
-        /// along the field line. Positive pushes it deeper, negative raises it.
-        ///
-        /// This is what makes the surface span nodes instead of restarting in
-        /// each one. Without it every node cuts at the same place relative to
-        /// ITSELF, so the facets are flat within a node and step at every
-        /// boundary — measured, 1665 of 3944 adjacent sub-columns stepped.
-        /// Offsetting by how much deeper the field says this node sits lets
-        /// neighbouring facets meet at the same world height and join into one
-        /// continuous surface.
-        ///
-        /// Quantised to whole quarter-cells because that is the resolution the
-        /// geometry has; the shape cache keys on it, so a hillside still reuses
-        /// a handful of meshes.
-        /// </summary>
-        public readonly int Phase;
-
-        public Mask(RawNodeGeometry.Mask raw, Vector3I flow, int phase)
+        public Mask(RawNodeGeometry.Mask raw, ulong surface)
         {
             Raw = raw;
-            Flow = flow;
-            Phase = phase;
+            Surface = surface;
         }
     }
 
     // Shapes are cached per distinct mask, exactly as the raw type does.
-    private static readonly Dictionary<(int, int), NodeMesh> _cache = new();
-    private static readonly Dictionary<(int, int), int[]> _occupancyCache = new();
+    private static readonly Dictionary<(int, ulong), NodeMesh> _cache = new();
+    private static readonly Dictionary<(int, ulong), int[]> _occupancyCache = new();
     private static readonly object _lock = new();
 
-    /// <summary>How far either way the cut plane may be shifted.</summary>
-    public const int MaxPhase = Sub;
+    /// <summary>The bit index of a sub-cell within <see cref="Mask.Surface"/>.</summary>
+    public static int SurfaceBit(int i, int j, int k) => (i * Sub + j) * Sub + k;
 
-    private static (int Raw, int FlowAndPhase) KeyOf(in Mask mask) => (
+    private static (int Raw, ulong Surface) KeyOf(in Mask mask) => (
         mask.Raw.Corners << 12 | mask.Raw.Edges,
-        ((mask.Flow.X + FlowSteps) * 25 + (mask.Flow.Y + FlowSteps) * 5
-            + mask.Flow.Z + FlowSteps) * (MaxPhase * 2 + 1)
-            + mask.Phase + MaxPhase);
+        mask.Surface);
 
     /// <summary>The meshed shape for a mask, built once and cached.</summary>
     public static NodeMesh Get(in Mask mask)
@@ -193,46 +179,35 @@ public static class TopsoilGeometry
         if (IsCore(i, j, k))
             return true;
 
-        // Which side of the node this sub-cell is on, relative to the field
-        // line. Positive lies along it, toward the rock.
-        float along = Along(mask.Flow, i, j, k);
-
-        // THE ROCK-FACING HALF — grown by the raw rule, including the rims it
-        // pushes into neighbouring cells. Not an approximation of the crystal
-        // it meets but the same shape function, so the two interlock exactly.
-        if (along >= 0f)
+        // OUTSIDE THIS CELL — the rims the growth contests awarded.
+        //
+        // A won feature must be filled wherever it reaches, without consulting
+        // the surface. The contest is a promise between neighbours: the loser
+        // vacates that space precisely because the winner is going to fill it,
+        // so a winner that declined would leave a hole nobody else can close.
+        //
+        // Splitting on the field line here was the bug behind the stacked-soil
+        // voids. A rim landing in what this node considers its air-facing half
+        // was dropped, while the neighbour had already vacated it — 524
+        // visible holes between two soil layers. Which half a rim falls in is
+        // this node's private business; the promise is not.
+        if (i < 0 || i >= Sub || j < 0 || j >= Sub || k < 0 || k >= Sub)
             return RawNodeGeometry.Occupies(mask.Raw, i, j, k);
 
-        // THE AIR-FACING HALF — the surface. Soil grows no rims, so it never
-        // reaches outside its own cell here.
-        if (i < 0 || i >= Sub || j < 0 || j >= Sub || k < 0 || k >= Sub)
-            return false;
-
-        // Space this node LOST is not its to keep, even on the surface side.
+        // INSIDE THIS CELL — space this node LOST is not its to keep.
         //
-        // A neighbouring raw node that wins an edge or corner grows its rim
-        // into this cell, and it does so on the strength of this node having
-        // vacated exactly that space. The raw rule encodes both halves of that
-        // bargain: it fills what a node won and leaves empty what it lost.
-        //
-        // Applying only the cut here would honour the first half and ignore
-        // the second — the soil would fill its whole footprint regardless of
-        // contests, colliding with every rim that reaches in. Measured at 457
-        // doubly-claimed sub-cells against plain rock, and 958 in a stack.
-        //
-        // So the surface half is the INTERSECTION of two rules: the space the
-        // raw contests leave to this node, minus what the field line cuts
-        // away. Tiling is preserved because the first rule is the same one
-        // every neighbour runs.
+        // The other side of the same promise: a neighbour that won a feature
+        // grows its rim in here, so this node must leave that space empty.
+        // Ignoring it collided on 457 sub-cells against plain rock.
         if (!RawNodeGeometry.Occupies(mask.Raw, i, j, k))
             return false;
 
-        // Omit what lies far enough opposite the field line, with the plane
-        // shifted by this node's phase so it lands at the same WORLD height as
-        // its neighbours'. `along` is the signed projection already, so this is
-        // a plane cut perpendicular to the field line — a facet lying across
-        // the slope, joined to the facets either side of it.
-        return -along + mask.Phase <= CutThreshold;
+        // And then the surface, read from the shared field rather than cut
+        // with a plane of this node's own. See Mask.Surface: one world
+        // function means one answer per sub-cell, so the soil forms a
+        // continuous sheet instead of each cube carving itself and leaving
+        // holes at the joins.
+        return (mask.Surface & 1UL << SurfaceBit(i, j, k)) != 0UL;
     }
 
     /// <summary>Is this the untouchable central 2x2x2?</summary>
@@ -241,39 +216,6 @@ public static class TopsoilGeometry
         const int lo = Sub / 2 - 1;
         const int hi = Sub / 2;
         return i >= lo && i <= hi && j >= lo && j <= hi && k >= lo && k <= hi;
-    }
-
-    /// <summary>
-    /// How far a sub-cell lies along the field line, from the node's centre in
-    /// quarter-cells.
-    ///
-    /// Positive is toward the rock the field line points into; negative toward
-    /// the open air it points away from, which is the magnitude the cut
-    /// threshold is compared against.
-    /// </summary>
-    private static float Along(Vector3I flow, int i, int j, int k)
-    {
-        // The node's centre sits BETWEEN sub-cells, so offsets are
-        // half-integers and no sub-cell ever projects to exactly zero — there
-        // is no cell sitting on the dividing plane whose side would have to be
-        // broken arbitrarily.
-        const float centre = (Sub - 1) * 0.5f;
-
-        float fx = flow.X;
-        float fy = flow.Y;
-        float fz = flow.Z;
-
-        float length = Mathf.Sqrt(fx * fx + fy * fy + fz * fz);
-        if (length < 0.0001f)
-        {
-            // No direction at all. Treated as pointing straight down, which is
-            // what flat ground means and what a node with no gradient should
-            // look like.
-            fy = -1f;
-            length = 1f;
-        }
-
-        return ((i - centre) * fx + (j - centre) * fy + (k - centre) * fz) / length;
     }
 
     /// <summary>Builds the mesh for one shape.</summary>

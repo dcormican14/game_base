@@ -82,7 +82,7 @@ public sealed class TerrainField : ITerrainFlow
     /// <summary>
     /// How deeply buried a point is. Higher means further into solid ground.
     /// </summary>
-    public float Buried(int x, int y, int z)
+    public float Buried(float x, float y, float z)
     {
         // Burial: lower is deeper, so descending y raises the value. Scaled by
         // the same frequency as the terrain term so the two are commensurate
@@ -94,6 +94,19 @@ public sealed class TerrainField : ITerrainFlow
 
         return burial + terrain * _weight;
     }
+
+    /// <summary>
+    /// Is this point inside the ground? The surface is where burial crosses
+    /// zero, so anything above that value is solid.
+    ///
+    /// Continuous in position, deliberately. This is what lets a node decide a
+    /// sub-cell by asking about the WORLD surface rather than about a copy of
+    /// it re-centred on itself. Every node asking the same question of the same
+    /// point gets the same answer, so the solid region is one connected sheet
+    /// rather than a per-cube carving — which is what stops the boundaries
+    /// between nodes opening into voids.
+    /// </summary>
+    public bool Solid(float x, float y, float z) => Buried(x, y, z) >= 0f;
 
     /// <summary>
     /// How far this cell sits from the surface sheet, in cells, measured along
