@@ -216,9 +216,15 @@ public static class RawNodeGeometry
 
     // Occupancy grid spans -1..Sub on each axis, so wins reaching one
     // quarter-cell outside the node have somewhere to land.
-    private const int Lo = -1;
-    private const int Hi = Sub + 1;
-    private const int Span = Hi - Lo;
+
+    /// <summary>Lowest quarter-cell index a shape may fill.</summary>
+    public const int Lo = -1;
+
+    /// <summary>One past the highest quarter-cell index a shape may fill.</summary>
+    public const int Hi = Sub + 1;
+
+    /// <summary>Width of the occupancy grid, in quarter-cells.</summary>
+    public const int Span = Hi - Lo;
 
     private static NodeMesh Build(Mask mask)
     {
@@ -323,7 +329,7 @@ public static class RawNodeGeometry
             }
         }
 
-        return Mesh(solid, At);
+        return MeshGrid(solid, At);
     }
 
     /// <summary>How many of a quarter-cell's coordinates sit on a border.</summary>
@@ -336,7 +342,9 @@ public static class RawNodeGeometry
         return n;
     }
 
-    private delegate bool Occupancy(int i, int j, int k);
+    /// <summary>Whether a shape fills one quarter-cell, in node-local
+    /// coordinates. What the greedy mesher walks.</summary>
+    public delegate bool Occupancy(int i, int j, int k);
 
     /// <summary>
     /// Greedy-merges coplanar quarter-faces into the largest rectangles that
@@ -344,7 +352,16 @@ public static class RawNodeGeometry
     /// quarter-cells that would otherwise ship as 16 quads; merged it is one.
     /// Paid once per distinct shape, then reused for every node wearing it.
     /// </summary>
-    private static NodeMesh Mesh(bool[,,] solid, Occupancy At)
+    /// <summary>
+    /// Greedy-meshes any occupancy grid on the shared quarter-cell lattice.
+    ///
+    /// Public because every node type that grows outside its own cell needs
+    /// exactly this: the merge, the outward winding, and the per-quad
+    /// occlusion lists the world's culling reads. A type that re-implemented
+    /// it would drift from the raw type's conventions and tear seams where the
+    /// two meet.
+    /// </summary>
+    public static NodeMesh MeshGrid(bool[,,] solid, Occupancy At)
     {
         var vertices = new List<Vector3>();
         var normals = new List<Vector3>();

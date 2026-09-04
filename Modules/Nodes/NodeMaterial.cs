@@ -69,13 +69,18 @@ public static class NodeMaterials
             new Color(0.62f, 0.62f, 0.66f),
             "raw"),
 
-        // Near-black, with just enough separation between the two shades to
-        // keep the grid legible and just enough blue to read as stone rather
-        // than as a hole in the render.
+        // Topsoil. Shaped by the "topsoil" type, whose lower half interlocks
+        // with the crystal below it and whose upper half rounds over along a
+        // contour field — so the cap reads as ground the rock turns into
+        // rather than as a lid set on top of it.
+        //
+        // Warm and dark against the cold grey of the bismuth, with the same
+        // two-shade split every material carries so the node grid stays
+        // readable across it.
         [NodeMaterial.Dark] = new Entry(
-            new Color(0.045f, 0.045f, 0.055f),
-            new Color(0.085f, 0.085f, 0.100f),
-            "plain"),
+            new Color(0.105f, 0.082f, 0.058f),
+            new Color(0.140f, 0.112f, 0.078f),
+            "topsoil"),
     };
 
     /// <summary>Appearance and geometry for a material, falling back to Raw

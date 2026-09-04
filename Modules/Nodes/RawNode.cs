@@ -70,6 +70,12 @@ public static class NodeTypes
         // Plain cubes ignore every growth dial — the shape has no freedom to
         // spend them on.
         ["plain"] = (_, _, _, _) => new PlainNode(),
+
+        // Topsoil takes the same growth dials as raw, because its lower half
+        // IS a raw node and has to be shaped by the same contests to
+        // interlock with the rock beneath it.
+        ["topsoil"] = (seed, scale, roughness, growth) =>
+            new TopsoilNode(seed, scale, roughness, growth),
     };
 
     /// <summary>Ids in registration order, for an editor dropdown.</summary>
