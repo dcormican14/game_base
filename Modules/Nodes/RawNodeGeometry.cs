@@ -1,35 +1,39 @@
 using Godot;
 using System.Collections.Generic;
 
-namespace GameBase.Blocks;
+namespace GameBase.Nodes;
 
 /// <summary>
-/// Turns a cube into a tiered bismuth crystal without ever looking at a
-/// neighbouring block.
+/// The geometry of a RAW node: a tiered bismuth crystal, solved without ever
+/// looking at a neighbouring node.
+///
+/// This is the shape solver behind <see cref="RawNode"/>. It knows nothing
+/// about the world grid or meshing — it turns a shape mask into occupancy and
+/// quads, and caches both per distinct mask.
 ///
 /// WHAT MOVES: EDGES AND CORNERS, NOT FACES
 ///
 /// Real bismuth grows fastest where the most free space meets — along edges
 /// and especially at corners — which is why a hopper crystal has raised rims
 /// around recessed faces. So the displacement here lives on the 12 edges and
-/// 8 corners of a block. Flat faces stay put; the rim around them steps out or
+/// 8 corners of a node. Flat faces stay put; the rim around them steps out or
 /// pulls back. A corner reaches twice as far as an edge, because three
 /// directions of free space meet there rather than two.
 ///
-/// THE INTERLOCK RULE — why blocks fit like puzzle pieces
+/// THE INTERLOCK RULE — why nodes fit like puzzle pieces
 ///
-/// A lattice edge is shared by 4 blocks; a lattice corner by 8. Rather than
-/// each block deciding independently how far to grow (which would collide or
+/// A lattice edge is shared by 4 nodes; a lattice corner by 8. Rather than
+/// each node deciding independently how far to grow (which would collide or
 /// leave gaps), the contested region around each lattice feature is awarded
 /// WHOLE to a single owner, chosen by hashing that feature's position. The
 /// winner fills it; the losers vacate it. Nothing is created and nothing is
 /// destroyed, so space stays exactly tiled — gaplessness is structural, not
 /// something the mesher checks for.
 ///
-/// Every block touching a feature computes the same hash from the same
-/// position and reaches the same verdict, so a block never has to ask what is
+/// Every node touching a feature computes the same hash from the same
+/// position and reaches the same verdict, so a node never has to ask what is
 /// next to it. That is the property that makes whole planets affordable: a
-/// block dropped into empty space mid-game gets exactly the shape it would
+/// node dropped into empty space mid-game gets exactly the shape it would
 /// have had if the planet had generated it.
 ///
 /// THE SUBDIVISION
@@ -38,37 +42,37 @@ namespace GameBase.Blocks;
 /// a border (0 or 3):
 ///   - 0 borders — the central 2x2x2 CORE. Always solid, never contested. It
 ///     is the "present at the very least" region, and it is what guarantees a
-///     block can never be carved away to nothing.
+///     node can never be carved away to nothing.
 ///   - 1 border — FACE cells. Left alone, so flat faces stay flat.
 ///   - 2 borders — EDGE cells, awarded per lattice edge.
 ///   - 3 borders — CORNER cells, awarded per lattice corner.
 ///
 /// A winner's territory extends OUTSIDE its own cell, into the space the
 /// losers vacated: an edge win takes a 2x2 run straddling the lattice edge, a
-/// corner win takes the whole 2x2x2 block straddling the lattice corner. That
+/// corner win takes the whole 2x2x2 node straddling the lattice corner. That
 /// straddling is what gives corners their double reach.
 ///
 /// COST
 ///
-/// A block's shape is 12 edge bits plus 8 corner bits — 2^20 combinations, far
+/// A node's shape is 12 edge bits plus 8 corner bits — 2^20 combinations, far
 /// too many to tabulate. But the regions are independent and additive, so the
 /// occupancy is built from the bitmask directly (a few dozen writes into a
 /// 6x6x6 grid) and meshed with a greedy merge. Small, allocation-free per
-/// block, and no dependence on neighbours.
+/// node, and no dependence on neighbours.
 /// </summary>
-public static class BismuthShape
+public static class RawNodeGeometry
 {
-    /// <summary>Quarter-cells per block edge. The 4x4x4 subdivision.</summary>
+    /// <summary>Quarter-cells per node edge. The 4x4x4 subdivision.</summary>
     public const int Sub = 4;
 
-    /// <summary>A block's shape: which contests it won.</summary>
+    /// <summary>A raw node's shape: which contests it won.</summary>
     public readonly struct Mask
     {
-        /// <summary>Bit c set = this block won its local corner c, where c
+        /// <summary>Bit c set = this node won its local corner c, where c
         /// packs (xHigh, yHigh, zHigh) as bits 0,1,2.</summary>
         public readonly int Corners;
 
-        /// <summary>Bit e set = this block won its local edge e. Edges are
+        /// <summary>Bit e set = this node won its local edge e. Edges are
         /// indexed axis * 4 + (uHigh | vHigh &lt;&lt; 1), where axis is the
         /// direction the edge runs along.</summary>
         public readonly int Edges;
@@ -82,32 +86,9 @@ public static class BismuthShape
         public override int GetHashCode() => Corners * 4096 ^ Edges;
     }
 
-    /// <summary>One meshed shape, ready to be scaled and translated.</summary>
-    public sealed class Variant
-    {
-        /// <summary>Vertices in units of quarter-cells, relative to the block's
-        /// min corner. Range -1..5, since a win reaches one quarter outside.</summary>
-        public Vector3[] Vertices = System.Array.Empty<Vector3>();
-        public Vector3[] Normals = System.Array.Empty<Vector3>();
-        public int[] Indices = System.Array.Empty<int>();
-
-        /// <summary>
-        /// Per QUAD (not per vertex), the block-local quarter-cells that must
-        /// all be solid for the quad to be buried, as flat runs of
-        /// (i, j, k) triples. <see cref="OccludedStart"/> indexes into this.
-        /// A merged quad covers several cells and every one of them must be
-        /// filled before it can be dropped.
-        /// </summary>
-        public int[] OccludedCells = System.Array.Empty<int>();
-
-        /// <summary>Per quad, its first index into <see cref="OccludedCells"/>;
-        /// the run ends where the next quad's starts. Length is quadCount + 1.</summary>
-        public int[] OccludedStart = System.Array.Empty<int>();
-    }
-
     // Shapes are cached on demand rather than enumerated: 2^20 combinations
     // exist in principle, but a given world uses a small, repeating subset.
-    private static readonly Dictionary<int, Variant> _cache = new();
+    private static readonly Dictionary<int, NodeMesh> _cache = new();
     private static readonly object _lock = new();
 
     // Occupied quarter-cells per shape, cached alongside the meshes so the
@@ -116,7 +97,7 @@ public static class BismuthShape
 
     /// <summary>
     /// The quarter-cells this shape occupies, as flat (i,j,k) triples in
-    /// block-local coordinates spanning -1..Sub. Built once per distinct
+    /// node-local coordinates spanning -1..Sub. Built once per distinct
     /// shape and cached.
     /// </summary>
     public static int[] OccupiedCells(Mask mask)
@@ -145,14 +126,14 @@ public static class BismuthShape
     }
 
     /// <summary>The meshed shape for a mask, built once and cached.</summary>
-    public static Variant Get(Mask mask)
+    public static NodeMesh Get(Mask mask)
     {
         int key = mask.Corners << 12 | mask.Edges;
         lock (_lock)
         {
-            if (_cache.TryGetValue(key, out Variant cached))
+            if (_cache.TryGetValue(key, out NodeMesh cached))
                 return cached;
-            Variant built = Build(mask);
+            NodeMesh built = Build(mask);
             _cache[key] = built;
             return built;
         }
@@ -162,7 +143,7 @@ public static class BismuthShape
     public static int CornerIndex(bool xHigh, bool yHigh, bool zHigh) =>
         (xHigh ? 1 : 0) | (yHigh ? 2 : 0) | (zHigh ? 4 : 0);
 
-    /// <summary>Floor division, so negative coordinates map to the block below
+    /// <summary>Floor division, so negative coordinates map to the node below
     /// rather than truncating toward zero.</summary>
     public static int FloorDiv(int value, int divisor)
     {
@@ -171,9 +152,9 @@ public static class BismuthShape
     }
 
     /// <summary>
-    /// Does the block wearing `mask` occupy the quarter-cell at block-local
+    /// Does the node wearing `mask` occupy the quarter-cell at node-local
     /// (i,j,k)? Coordinates outside -1..Sub are never occupied, since a win
-    /// reaches at most one quarter-cell beyond the block.
+    /// reaches at most one quarter-cell beyond the node.
     ///
     /// This is the authority the mesher consults to decide whether a quad is
     /// really buried. It re-derives the same ownership rule Build() uses.
@@ -234,12 +215,12 @@ public static class BismuthShape
         axis * 4 + ((uHigh ? 1 : 0) | (vHigh ? 2 : 0));
 
     // Occupancy grid spans -1..Sub on each axis, so wins reaching one
-    // quarter-cell outside the block have somewhere to land.
+    // quarter-cell outside the node have somewhere to land.
     private const int Lo = -1;
     private const int Hi = Sub + 1;
     private const int Span = Hi - Lo;
 
-    private static Variant Build(Mask mask)
+    private static NodeMesh Build(Mask mask)
     {
         var solid = new bool[Span, Span, Span];
 
@@ -258,7 +239,7 @@ public static class BismuthShape
         }
 
         // --- Core and faces: everything with at most one border coordinate.
-        // Never contested, so it is unconditionally the block's own.
+        // Never contested, so it is unconditionally the node's own.
         for (int i = 0; i < Sub; i++)
         {
             for (int j = 0; j < Sub; j++)
@@ -292,7 +273,7 @@ public static class BismuthShape
                 // The cells at each end belong to the two lattice corners that
                 // terminate this edge, and those are decided by their own
                 // contests. Letting the edge run the full length double-claims
-                // them, which is an overlap wherever a block wins an edge but
+                // them, which is an overlap wherever a node wins an edge but
                 // loses the corner beside it.
                 int uBase = uHigh ? Sub - 1 : 0;
                 int vBase = vHigh ? Sub - 1 : 0;
@@ -315,7 +296,7 @@ public static class BismuthShape
 
         // --- Corner wins: the winner takes the whole 2x2x2 straddling the
         // lattice corner — seven of its eight quarter-cells lie outside the
-        // block, which is the double reach corners are meant to have.
+        // node, which is the double reach corners are meant to have.
         for (int corner = 0; corner < 8; corner++)
         {
             if ((mask.Corners & 1 << corner) == 0)
@@ -361,9 +342,9 @@ public static class BismuthShape
     /// Greedy-merges coplanar quarter-faces into the largest rectangles that
     /// share a direction, a slice and a hidden-by tag. A flat face is 4x4
     /// quarter-cells that would otherwise ship as 16 quads; merged it is one.
-    /// Paid once per distinct shape, then reused for every block wearing it.
+    /// Paid once per distinct shape, then reused for every node wearing it.
     /// </summary>
-    private static Variant Mesh(bool[,,] solid, Occupancy At)
+    private static NodeMesh Mesh(bool[,,] solid, Occupancy At)
     {
         var vertices = new List<Vector3>();
         var normals = new List<Vector3>();
@@ -451,7 +432,7 @@ public static class BismuthShape
                         // Record every quarter-cell in front of this merged
                         // rectangle. Recorded for EVERY quad, not only ones a
                         // bake-time tag guessed were occludable: a rim from an
-                        // edge or corner win reaches diagonally, so the block
+                        // edge or corner win reaches diagonally, so the node
                         // that ends up burying a quad is often not the face
                         // neighbour such a tag would name. The mesher asks the
                         // world what is actually solid there instead.
@@ -480,7 +461,7 @@ public static class BismuthShape
 
         occludedStart.Add(occludedCells.Count);
 
-        return new Variant
+        return new NodeMesh
         {
             Vertices = vertices.ToArray(),
             Normals = normals.ToArray(),
@@ -519,7 +500,7 @@ public static class BismuthShape
 
         // Godot treats clockwise winding as front-facing, so the test is
         // (v2-v0) x (v1-v0) — matching AddFace here and the bismuth blob.
-        // Flipping this culls every face and blocks render inside-out.
+        // Flipping this culls every face and nodes render inside-out.
         if ((v2 - v0).Cross(v1 - v0).Dot(normal) < 0f)
             (v1, v3) = (v3, v1);
 

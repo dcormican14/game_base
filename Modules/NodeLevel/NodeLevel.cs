@@ -1,25 +1,25 @@
 using Godot;
 using System.Collections.Generic;
-using GameBase.Blocks;
+using GameBase.Nodes;
 
 namespace GameBase.Levels;
 
 /// <summary>
-/// Builds a whole level out of blocks: a rounded pillar of rock falling away
+/// Builds a whole level out of nodes: a rounded pillar of rock falling away
 /// into the void, its top cut flat, with primitive solids scattered across the
 /// surface and a few floating above it.
 ///
-/// Everything goes into a single <see cref="BlockWorld"/>, so the level is
-/// editable block-by-block like anything the player builds. Shapes are
+/// Everything goes into a single <see cref="NodeWorld"/>, so the level is
+/// editable node-by-node like anything the player builds. Shapes are
 /// rasterised into the grid rather than instanced as meshes — a pyramid is a
 /// stack of shrinking squares, a sphere a distance test — so the bismuth
 /// shaping treats them as ordinary rock.
 ///
-/// Attach to a BlockWorld (or instance BlockLevel.tscn); it is a [Tool] script,
+/// Attach to a NodeWorld (or instance NodeLevel.tscn); it is a [Tool] script,
 /// so changing any export regenerates the level live in the editor.
 /// </summary>
 [Tool]
-public partial class BlockLevel : Node
+public partial class NodeLevel : Node
 {
     private int _seed = 20240;
     private int _pillarRadius = 22;
@@ -31,11 +31,11 @@ public partial class BlockLevel : Node
     private bool _autoBuild = true;
 
     [ExportGroup("Pillar")]
-    /// <summary>Radius of the flat top surface, in blocks.</summary>
+    /// <summary>Radius of the flat top surface, in nodes.</summary>
     [Export(PropertyHint.Range, "4,64,1")]
     public int PillarRadius { get => _pillarRadius; set { _pillarRadius = Mathf.Max(3, value); RebuildIfReady(); } }
 
-    /// <summary>How far the pillar extends below the surface, in blocks.</summary>
+    /// <summary>How far the pillar extends below the surface, in nodes.</summary>
     [Export(PropertyHint.Range, "4,128,1")]
     public int PillarDepth { get => _pillarDepth; set { _pillarDepth = Mathf.Max(1, value); RebuildIfReady(); } }
 
@@ -69,9 +69,9 @@ public partial class BlockLevel : Node
     public bool AutoBuild { get => _autoBuild; set { _autoBuild = value; RebuildIfReady(); } }
 
     /// <summary>The world to fill. Defaults to the parent when left empty.</summary>
-    [Export] public NodePath BlockWorldPath { get; set; } = "";
+    [Export] public NodePath NodeWorldPath { get; set; } = "";
 
-    private BlockWorld _world;
+    private NodeWorld _world;
     private ulong _rng;
 
     /// <summary>Mesh the generated level a few chunks per frame rather than
@@ -91,11 +91,11 @@ public partial class BlockLevel : Node
     /// <summary>Clears the world and regenerates the level.</summary>
     public void Build()
     {
-        _world = !BlockWorldPath.IsEmpty ? GetNodeOrNull<BlockWorld>(BlockWorldPath) : null;
-        _world ??= GetParent<BlockWorld>();
+        _world = !NodeWorldPath.IsEmpty ? GetNodeOrNull<NodeWorld>(NodeWorldPath) : null;
+        _world ??= GetParent<NodeWorld>();
         if (_world == null)
         {
-            GD.PushWarning("BlockLevel: needs a BlockWorld parent (or BlockWorldPath) — nothing built.");
+            GD.PushWarning("NodeLevel: needs a NodeWorld parent (or NodeWorldPath) — nothing built.");
             return;
         }
 
@@ -108,9 +108,9 @@ public partial class BlockLevel : Node
                 _rng = 0x9E3779B97F4A7C15UL; // xorshift is stuck at zero
         }
 
-        // One rebuild for the whole level rather than one per block: a rebuild
-        // costs the same whether one block changed or fifty thousand.
-        // Generate the block set without meshing, then hand the meshing to
+        // One rebuild for the whole level rather than one per node: a rebuild
+        // costs the same whether one node changed or fifty thousand.
+        // Generate the node set without meshing, then hand the meshing to
         // the incremental path so the loading screen can report progress.
         _world.Batch(() =>
         {
@@ -176,7 +176,7 @@ public partial class BlockLevel : Node
                     // Noise fades out toward the top, so the rim under
                     // the flat surface stays clean.
                     if (distance <= baseRadius + wobble * Mathf.Min(1f, t * 3f))
-                        _world.AddBlock(new Vector3I(x, y, z));
+                        _world.AddNode(new Vector3I(x, y, z));
                 }
             }
         }
@@ -188,7 +188,7 @@ public partial class BlockLevel : Node
             for (int z = -_pillarRadius; z <= _pillarRadius; z++)
             {
                 if (x * x + z * z <= _pillarRadius * _pillarRadius)
-                    _world.AddBlock(new Vector3I(x, -1, z));
+                    _world.AddNode(new Vector3I(x, -1, z));
             }
         }
     }
@@ -264,8 +264,8 @@ public partial class BlockLevel : Node
             // Uniform over the disc: sqrt keeps props from bunching at the
             // centre the way a linear radius would. Held inside the rim so
             // nothing hangs over the edge.
-            // The extra block of margin absorbs rounding the centre to a cell,
-            // which can push a prop half a block further out than planned.
+            // The extra node of margin absorbs rounding the centre to a cell,
+            // which can push a prop half a node further out than planned.
             float maxRadius = _pillarRadius - reach - 2f;
             if (maxRadius <= 2f)
                 continue;
@@ -277,7 +277,7 @@ public partial class BlockLevel : Node
             int baseY = floating ? 5 + (int)(NextFloat() * 11) : 0;
 
             // Floating props only need to clear other floating props, and
-            // ground props only other ground props: a ball 10 blocks up and a
+            // ground props only other ground props: a ball 10 nodes up and a
             // cube below it do not collide, and forcing them apart in plan
             // view is what starved the level of props.
             bool clear = true;
@@ -328,11 +328,11 @@ public partial class BlockLevel : Node
         for (int x = -hx; x <= hx; x++)
             for (int y = 0; y < height; y++)
                 for (int z = -hz; z <= hz; z++)
-                    _world.AddBlock(origin + new Vector3I(x, y, z));
+                    _world.AddNode(origin + new Vector3I(x, y, z));
     }
 
     /// <summary>
-    /// A prism with a right-triangle cross-section: a ramp `length` blocks
+    /// A prism with a right-triangle cross-section: a ramp `length` nodes
     /// long rising to `height`, extruded across its width. `axis` picks which
     /// of the four horizontal directions it climbs toward.
     /// </summary>
@@ -347,8 +347,8 @@ public partial class BlockLevel : Node
         for (int step = 0; step < length; step++)
         {
             // Height falls off linearly along the run, so the slope is a
-            // staircase of single blocks rather than a smooth wedge — which is
-            // what a block grid can actually represent.
+            // staircase of single nodes rather than a smooth wedge — which is
+            // what a node grid can actually represent.
             int columnHeight = Mathf.Max(1, Mathf.RoundToInt(height * (1f - step / (float)length)));
             int along = step - halfLength;
             for (int across = -halfWidth; across <= halfWidth; across++)
@@ -362,7 +362,7 @@ public partial class BlockLevel : Node
                         2 => new Vector3I(across, y, along),
                         _ => new Vector3I(across, y, -along),
                     };
-                    _world.AddBlock(origin + offset);
+                    _world.AddNode(origin + offset);
                 }
             }
         }
@@ -377,11 +377,11 @@ public partial class BlockLevel : Node
             int half = baseHalfWidth - y;
             for (int x = -half; x <= half; x++)
                 for (int z = -half; z <= half; z++)
-                    _world.AddBlock(origin + new Vector3I(x, y, z));
+                    _world.AddNode(origin + new Vector3I(x, y, z));
         }
     }
 
-    /// <summary>A ball of blocks, measured from cell centres so it comes out
+    /// <summary>A ball of nodes, measured from cell centres so it comes out
     /// symmetric rather than lopsided toward the origin corner.</summary>
     private void AddSphere(Vector3I origin, int radius)
     {
@@ -392,7 +392,7 @@ public partial class BlockLevel : Node
                 for (int z = -radius; z <= radius; z++)
                 {
                     if (new Vector3(x, y, z).Length() <= radius + 0.25f)
-                        _world.AddBlock(origin + new Vector3I(x, y + radius, z));
+                        _world.AddNode(origin + new Vector3I(x, y + radius, z));
                 }
             }
         }

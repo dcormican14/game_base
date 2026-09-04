@@ -1,11 +1,12 @@
 using Godot;
-using GameBase.Blocks;
+using GameBase.Nodes;
 using GameBase.Core;
+using GameBase.Levels;
 
 namespace GameBase.UI;
 
 /// <summary>
-/// Covers the screen with a progress bar while the block world meshes, then
+/// Covers the screen with a progress bar while the node world meshes, then
 /// drops the player in and fades out.
 ///
 /// A large level takes a noticeable time to mesh, and the player is a live
@@ -17,13 +18,13 @@ namespace GameBase.UI;
 /// instantiation, so the scene tree stays as authored and the camera is live
 /// behind the fade.
 ///
-/// Instance LoadingScreen.tscn in a scene with a BlockWorld; it finds the
+/// Instance LoadingScreen.tscn in a scene with a NodeWorld; it finds the
 /// world and the player itself.
 /// </summary>
 public partial class LoadingScreen : CanvasLayer
 {
     /// <summary>The world to wait on. Found by search when left empty.</summary>
-    [Export] public NodePath BlockWorldPath { get; set; } = "";
+    [Export] public NodePath NodeWorldPath { get; set; } = "";
 
     /// <summary>The body to hold until the world is ready. Found by search
     /// when left empty.</summary>
@@ -39,8 +40,38 @@ public partial class LoadingScreen : CanvasLayer
     /// <summary>Text shown above the bar.</summary>
     [Export] public string Message { get; set; } = "Building world";
 
-    private BlockWorld _world;
+    private NodeWorld _world;
     private Node3D _player;
+
+    /// <summary>
+    /// The generator, when it builds over several frames.
+    ///
+    /// Two phases sit behind this screen: walking the density field to decide
+    /// which cells are rock, then meshing them. Only the second reports
+    /// through the world, so without the generator the bar would sit at zero
+    /// for the whole first half and then sweep across — which reads as a hang.
+    /// </summary>
+    private IslandLevel _generator;
+
+    /// <summary>
+    /// The streamer, when the world is endless rather than a fixed region.
+    ///
+    /// A streaming world never finishes — there is always more of it out of
+    /// range — so waiting on the world to be wholly built would hold the
+    /// screen up forever. The streamer reports something different and more
+    /// useful: whether the ground around the SPAWN exists yet, which is the
+    /// actual precondition for letting the player go.
+    /// </summary>
+    private ChunkStreamer _streamer;
+
+    /// <summary>
+    /// The scene's pause menu, suspended while the world builds.
+    ///
+    /// Pausing mid-build would stop the very work the player is waiting on,
+    /// and the menu's Resume would drop them into a world that does not exist
+    /// yet.
+    /// </summary>
+    private PauseMenu _pauseMenu;
     private ProgressBar _bar;
     private Label _label;
     private Control _root;
@@ -54,11 +85,18 @@ public partial class LoadingScreen : CanvasLayer
         _label = GetNode<Label>("%Label");
         _label.Text = Message;
 
-        _world = !BlockWorldPath.IsEmpty ? GetNodeOrNull<BlockWorld>(BlockWorldPath) : null;
-        _world ??= NodeSearch.FindByType<BlockWorld>(GetTree().CurrentScene ?? GetParent());
+        _world = !NodeWorldPath.IsEmpty ? GetNodeOrNull<NodeWorld>(NodeWorldPath) : null;
+        _world ??= NodeSearch.FindByType<NodeWorld>(GetTree().CurrentScene ?? GetParent());
 
         _player = !PlayerPath.IsEmpty ? GetNodeOrNull<Node3D>(PlayerPath) : null;
         _player ??= NodeSearch.FindByType<CharacterBody3D>(GetTree().CurrentScene ?? GetParent());
+
+        _generator = NodeSearch.FindByType<IslandLevel>(GetTree().CurrentScene ?? GetParent());
+        _streamer = NodeSearch.FindByType<ChunkStreamer>(GetTree().CurrentScene ?? GetParent());
+
+        _pauseMenu = NodeSearch.FindByType<PauseMenu>(GetTree().CurrentScene ?? GetParent());
+        if (_pauseMenu != null)
+            _pauseMenu.Suspended = true;
 
         if (_world == null)
         {
@@ -70,6 +108,18 @@ public partial class LoadingScreen : CanvasLayer
 
         HoldPlayer(true);
 
+        // A streamed world answers for itself; only a fixed-region world uses
+        // the world's own one-shot ready signal.
+        if (_streamer != null)
+        {
+            if (_streamer.IsReady)
+                Release();
+            else
+                _streamer.BecameReady += Release;
+
+            return;
+        }
+
         if (_world.IsWorldReady)
             Release();
         else
@@ -80,12 +130,22 @@ public partial class LoadingScreen : CanvasLayer
     {
         if (_world != null)
             _world.WorldReady -= Release;
+
+        if (_streamer != null)
+            _streamer.BecameReady -= Release;
+
+        // Never leave the menu suspended behind us. If this screen is torn
+        // down before the world finished — a scene change mid-load — the
+        // suspension would otherwise outlive the thing that imposed it and
+        // silently disable pausing for the rest of the session.
+        if (_pauseMenu != null && GodotObject.IsInstanceValid(_pauseMenu))
+            _pauseMenu.Suspended = false;
     }
 
     public override void _Process(double delta)
     {
         if (_world != null && !_released)
-            _bar.Value = _world.BuildProgress * 100.0;
+            _bar.Value = Progress() * 100.0;
 
         if (_fade < 0f)
             return;
@@ -99,6 +159,30 @@ public partial class LoadingScreen : CanvasLayer
             SetProcess(false);
             QueueFree();
         }
+    }
+
+    /// <summary>
+    /// How far the wait has come, over both phases.
+    ///
+    /// Generation is given the larger share because it is the longer of the
+    /// two by some way; the split is only about where the bar sits, never
+    /// about when the player is released, which still waits on the world
+    /// itself.
+    /// </summary>
+    private float Progress()
+    {
+        const float GenerateShare = 0.7f;
+
+        // A streamed world's progress is toward being PLAYABLE — the chunks
+        // around the spawn — rather than toward an end of work that never
+        // arrives.
+        if (_streamer != null)
+            return _streamer.ReadyProgress;
+
+        if (_generator != null && _generator.IsGenerating)
+            return _generator.GenerateProgress * GenerateShare;
+
+        return GenerateShare + _world.BuildProgress * (1f - GenerateShare);
     }
 
     /// <summary>Freezes the player. Physics is what has to stop: a
@@ -128,11 +212,16 @@ public partial class LoadingScreen : CanvasLayer
         _bar.Value = 100.0;
         PlacePlayer();
         HoldPlayer(false);
+
+        // The scene is playable from here, so the menu becomes meaningful.
+        if (_pauseMenu != null)
+            _pauseMenu.Suspended = false;
+
         _fade = 0f;
     }
 
     /// <summary>
-    /// Puts the player just above the highest solid block over its spawn
+    /// Puts the player just above the highest solid node over its spawn
     /// column, so it lands on the surface whatever the generator produced.
     /// </summary>
     private void PlacePlayer()
@@ -143,17 +232,17 @@ public partial class LoadingScreen : CanvasLayer
         Vector3 spawn = _player.GlobalPosition;
         Vector3I cell = _world.CellAt(spawn);
 
-        // Search down from well above the spawn for the first solid block.
+        // Search down from well above the spawn for the first solid node.
         const int SearchUp = 64;
         const int SearchDown = 128;
         for (int y = cell.Y + SearchUp; y >= cell.Y - SearchDown; y--)
         {
-            if (!_world.HasBlock(new Vector3I(cell.X, y, cell.Z)))
+            if (!_world.HasNode(new Vector3I(cell.X, y, cell.Z)))
                 continue;
 
-            // Stand on top of that block, plus the drop margin.
+            // Stand on top of that node, plus the drop margin.
             Vector3 top = _world.CellCentre(new Vector3I(cell.X, y, cell.Z));
-            top.Y += _world.BlockSize * 0.5f + DropHeight;
+            top.Y += _world.NodeSize * 0.5f + DropHeight;
             _player.GlobalPosition = new Vector3(spawn.X, top.Y, spawn.Z);
             return;
         }

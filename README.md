@@ -17,15 +17,15 @@ another project by copying that folder.
 | `Modules/Filters/` | Drop-in screen-space stylization: outlines, pixelation, dither |
 | `Modules/Bismuth/` | `[Tool]` bismuth hopper-crystal blobs — stepped terraces on a jittered tessellation (art-direction prototype for project-infinite-world WP05) |
 | `Modules/Crosshair/` | Centre-screen pixel-art crosshair — 0-4 dashes spread evenly around the centre, fading out toward the tips |
-| `Modules/Blocks/` | World-grid cube world, shaped as tiered bismuth crystal by an edge/corner growth field (`BismuthShape` / `BismuthField`); chunked meshing |
-| `Modules/BlockLevel/` | `[Tool]` level generator — a rounded pillar of rock with primitive solids scattered on and above its flat top |
-| `Modules/LoadingScreen/` | Progress bar shown while the block world meshes; holds the player until collision exists |
-| `Modules/BlockEditor/` | Place/destroy blocks on bismuth blobs by looking at them |
+| `Modules/Nodes/` | The node world: a global grid whose cells (`nodes`) are shaped by a pluggable `INodeType`. `RawNode` is the raw-bismuth type; chunked meshing |
+| `Modules/NodeLevel/` | `[Tool]` level generator — a rounded pillar of rock with primitive solids scattered on and above its flat top |
+| `Modules/LoadingScreen/` | Progress bar shown while the node world meshes; holds the player until collision exists |
+| `Modules/NodeEditor/` | Place/destroy nodes by looking at them; hold to repeat |
 | `Modules/Stats/` | Performance overlay (FPS, frame/physics time, draw calls, tris, VRAM/memory) plus the current movement mode, toggled in Settings -> Video |
 | `Modules/Skybox/` | Deep-space skybox — procedural stars + nebulae placeholder, or your own panorama/sky shader |
 | `Modules/Terrain/` | `[Tool]` procedural "workshop" terrain: flat dark checker floor, box platforms, prism ramps |
-| `Game/PillarLevel.tscn` | The block level: a rounded pillar built entirely from blocks (the scene the menu launches) |
-| `Game/World.tscn` | Training level — the workshop terrain with no blocks, kept for testing the rig in isolation |
+| `Game/PillarLevel.tscn` | The node level: a rounded pillar built entirely from nodes (the scene the menu launches) |
+| `Game/World.tscn` | Training level — the workshop terrain with no nodes, kept for testing the rig in isolation |
 
 ## First run
 
@@ -35,8 +35,8 @@ another project by copying that folder.
 3. Run. Main menu → Play loads `Game/World.tscn`.
 
 Default controls: WASD move, Space jump, Shift sprint, Ctrl crouch (press
-while sprinting to slide), mouse look, Esc pause. Left click places a block on
-a bismuth blob, right click destroys one. **Double-tap Space** to toggle
+while sprinting to slide), mouse look, Esc pause. Left click places a node,
+right click destroys one; hold either to repeat. **Double-tap Space** to toggle
 sandbox mode — free flight with no collision, for inspecting geometry from
 inside.
 
@@ -350,10 +350,10 @@ live in the editor.
    sphere is nearly flat near its equator, so height-sampled tiers come out at
    almost identical widths and the result reads as a barrel.
 
-## Bismuth block shaping
+## Nodes and node types
 
-`Modules/Blocks/` renders the world grid as tiered bismuth crystal rather than
-plain cubes. `Bismuth = false` on the `BlockWorld` node returns it to cubes;
+`Modules/Nodes/` renders the world grid as tiered bismuth crystal rather than
+plain cubes. `Bismuth = false` on the `NodeWorld` node returns it to cubes;
 everything else — the grid, picking, placing, mining — is unchanged either way.
 
 ### What moves: EDGES and CORNERS, not faces
@@ -361,22 +361,22 @@ everything else — the grid, picking, placing, mining — is unchanged either w
 Real bismuth grows fastest where the most free space meets — along edges and
 especially at corners — which is why a hopper crystal has raised rims around
 recessed faces. So the displacement lives on the **12 edges and 8 corners** of
-each block. Flat faces stay flat; the rim around them steps out or pulls back.
+each node. Flat faces stay flat; the rim around them steps out or pulls back.
 A corner reaches **twice as far as an edge**, because three directions of free
 space meet there rather than two.
 
-### The interlock rule — why blocks fit like puzzle pieces
+### The interlock rule — why nodes fit like puzzle pieces
 
-A lattice edge is shared by 4 blocks; a lattice corner by 8. Rather than each
-block deciding independently how far to grow (which would collide or leave
+A lattice edge is shared by 4 nodes; a lattice corner by 8. Rather than each
+node deciding independently how far to grow (which would collide or leave
 gaps), the contested region around each lattice feature is awarded **whole to a
 single owner**, chosen by hashing that feature's position. The winner fills it;
 the losers vacate it. Nothing is created and nothing is destroyed, so space
 stays exactly tiled — gaplessness is structural, not something the mesher
 checks for.
 
-Every block touching a feature computes the same hash from the same position
-and reaches the same verdict, so **a block never inspects its neighbours to
+Every node touching a feature computes the same hash from the same position
+and reaches the same verdict, so **a node never inspects its neighbours to
 find its shape.** That is what makes planet scale affordable: a cube placed
 mid-game gets exactly the shape it would have had if the planet had generated
 it, so placement never re-shapes anything around it, and generation works in
@@ -386,7 +386,7 @@ The winner is not uniformly random. A flowing 3D vector field is sampled at the
 feature and whichever contender lies furthest **along that flow** takes it.
 Because the flow varies smoothly, neighbouring features favour the same
 direction, so growth reads as a current running through the rock rather than as
-per-block static.
+per-node static.
 
 ### The 4x4x4 subdivision
 
@@ -409,20 +409,20 @@ Two partition details the correctness depends on:
 
 1. **Edges own only their middle** (t = 1..2), and the cells at each end belong
    to the corners that terminate them. A full-length edge run double-claims
-   those cells, which overlaps wherever a block wins an edge but loses the
+   those cells, which overlaps wherever a node wins an edge but loses the
    corner beside it.
-2. **An uncontested feature still has an owner** — it falls to the block that
+2. **An uncontested feature still has an owner** — it falls to the node that
    nominally contains it. Letting `Growth` simply skip a contest leaves the
    region claimed by nobody, which is a hole.
 
 ### Why it is cheap
 
-A block's shape is 12 edge bits plus 8 corner bits, so the occupancy is built
+A node's shape is 12 edge bits plus 8 corner bits, so the occupancy is built
 straight from the bitmask and meshed with a greedy merge, cached per distinct
 shape. Winners are memoized per lattice feature — each corner is shared by 8
-blocks and each edge by 4, so meshing a region would otherwise re-ask the same
+nodes and each edge by 4, so meshing a region would otherwise re-ask the same
 question 4-8 times. Measured **0.7M shape lookups/sec** (~47 ms for a 32³
-chunk), averaging **73 quads per block**.
+chunk), averaging **73 quads per node**.
 
 Greedy merging keys on WHICH NEIGHBOUR owns the space in front of a quad, not
 on the exact quarter-cell. Keying on the cell makes every tag unique so nothing
@@ -437,7 +437,7 @@ Checked against the shipped code, not a model of it:
 - **Watertight** — across six seed/scale/roughness/growth regimes: 0 overlaps,
   0 gaps over 4096 interior quarter-cells, core never lost.
 - **Exactly one winner per contest** — 0/512 corners and 0/1536 edges wrong.
-- **Rims move, faces do not** — 0 face-centre cells lost; 1727/1728 blocks show
+- **Rims move, faces do not** — 0 face-centre cells lost; 1727/1728 nodes show
   rim growth.
 - **Corner reach is double an edge's** — corner wins spread along 3 axes, edge
   wins along 2.
@@ -452,16 +452,16 @@ Checked against the shipped code, not a model of it:
 ### Edit cost
 
 The world is split into **8x8x8 chunks**, each with its own mesh and collision
-shape, and an edit re-meshes only the chunks it touches. On the 42k-block
-pillar level a full rebuild is ~560 ms — a visible freeze — while a one-block
-edit re-meshes 512 blocks in **~3.4 ms**, 162x quicker.
+shape, and an edit re-meshes only the chunks it touches. On the 42k-node
+pillar level a full rebuild is ~560 ms — a visible freeze — while a one-node
+edit re-meshes 512 nodes in **~3.4 ms**, 162x quicker.
 
 **The occupancy map is maintained incrementally**, and this matters more than
 the chunking. Culling asks "is this quarter-cell solid in the world", answered
 from a map of every occupied quarter-cell. Rebuilding that map wholesale meant
-re-inserting ~2.7 million entries for a one-block change: **228 ms, 98% of the
-cost of an edit**, and enough to make placing a block feel broken even with
-chunked meshing in place. Adding or removing a block now stamps only its own
+re-inserting ~2.7 million entries for a one-node change: **228 ms, 98% of the
+cost of an edit**, and enough to make placing a node feel broken even with
+chunked meshing in place. Adding or removing a node now stamps only its own
 ~50 quarter-cells in and out (0.002 ms), which took an edit from 192 ms to
 **3.4 ms** — a fifth of a 60 fps frame.
 
@@ -476,7 +476,7 @@ Chunk size is not "smaller is better": an edit dirties the 3x3x3 of chunks
 around it, so at size 6 that region spans 8 chunks instead of 2 and the cost
 climbs back to ~7 ms. 16/12/8/6 were measured; 8 won.
 
-A block's rim reaches one block outward and its neighbours' culling depends on
+A node's rim reaches one node outward and its neighbours' culling depends on
 it, so the dirty region is the 3x3x3 around the edit, not just the one chunk.
 Chunked output is verified bit-identical to a whole-world rebuild (84,946
 quads, 0 missing, 0 extra) — anything less would leave seams at chunk borders.
@@ -484,10 +484,10 @@ quads, 0 missing, 0 extra) — anything less would leave seams at chunk borders.
 Three more things keep the per-chunk pass cheap, each measured:
 
 - **Occupancy is built once per rebuild**, as one set of global quarter-cells
-  every block stamps into, and culling is then a single hash lookup. Asking
-  per-quad which of the 27 surrounding blocks might reach into a quarter-cell
+  every node stamps into, and culling is then a single hash lookup. Asking
+  per-quad which of the 27 surrounding nodes might reach into a quarter-cell
   re-derives the same answer thousands of times and measured **15x slower**.
-- **Collision uses the block hull, not the rendered surface.** The physics
+- **Collision uses the node hull, not the rendered surface.** The physics
   engine builds a BVH over every triangle it is given, and crystal rims
   multiply that count for relief no player can feel through a collision
   capsule. Colliding against plain cube faces is **9.8x fewer triangles**
@@ -496,7 +496,7 @@ Three more things keep the per-chunk pass cheap, each measured:
   would mean a new shader instance and a cold pipeline cache every edit.
 
 `Batch(...)` wraps several edits into one rebuild — a rebuild costs the same
-whether one block changed or a hundred, so any multi-block operation should use
+whether one node changed or a hundred, so any multi-node operation should use
 it.
 
 ### Culling is the subtle part
@@ -507,11 +507,11 @@ costs either holes or triangles.
 The question asked is **"is this space solid in the world"**, not "does one
 particular neighbour fill it". Two failure modes sit either side of that:
 
-- Culling on *presence* of a neighbouring block tears holes. Under
+- Culling on *presence* of a neighbouring node tears holes. Under
   edge-and-corner growth a rim can retreat inward, so the shared boundary is
-  genuinely exposed even with a solid block next door.
+  genuinely exposed even with a solid node next door.
 - Culling only against the *one* neighbour a bake-time tag names leaves buried
-  faces drawn. Rims reach diagonally, so the block that actually buries a quad
+  faces drawn. Rims reach diagonally, so the node that actually buries a quad
   is frequently not the face neighbour. That left **67% of emitted faces
   buried but still rendered** — 94k triangles where 18k would do.
 
@@ -525,7 +525,7 @@ show up under a specific renderer setting, that is where to look.
 
 ### Knobs
 
-On the `BlockWorld` node, under **Bismuth**:
+On the `NodeWorld` node, under **Bismuth**:
 
 - `Seed` — same seed, same planet.
 - `FlowScale` — cells per lobe of the flow. Larger gives long, lazy currents;
@@ -539,7 +539,7 @@ On the `BlockWorld` node, under **Bismuth**:
 Under **Starter Fill**: `StarterSize` / `StarterDepth` lay down a slab sitting
 **on** the ground (its underside at y=0 — the workshop floor is the plane y=0,
 so sinking it below that z-fights), and `DemoSphereSize` / `DemoSphereHeight`
-float a ball of blocks overhead for inspecting the shaping from every angle,
+float a ball of nodes overhead for inspecting the shaping from every angle,
 undersides included. Set either size to 0 to omit it.
 
 The surface is intentionally bumpy at this stage.
@@ -547,12 +547,12 @@ The surface is intentionally bumpy at this stage.
 
 ## The pillar level
 
-`Game/PillarLevel.tscn` is the block level, and it is made **entirely of
-blocks** — there is no mesh terrain in it at all. `Modules/BlockLevel/`
-generates it into a single `BlockWorld`, so every part of it is editable and
+`Game/PillarLevel.tscn` is the node level, and it is made **entirely of
+nodes** — there is no mesh terrain in it at all. `Modules/NodeLevel/`
+generates it into a single `NodeWorld`, so every part of it is editable and
 minable exactly like something the player built.
 
-- A **rounded pillar** falling away into the void, ~42k blocks, tapering with
+- A **rounded pillar** falling away into the void, ~42k nodes, tapering with
   depth and perturbed by smooth angular noise so the silhouette reads as
   weathered rock. The noise fades out toward the top, so the rim under the
   surface stays clean.
@@ -561,7 +561,7 @@ minable exactly like something the player built.
   spawns standing on it at the origin.
 - **Primitive solids** scattered across the surface — cubes, rectangular
   prisms, triangular prisms, pyramids and spheres — with roughly a quarter left
-  floating overhead. They are rasterised into the block grid (a pyramid is a
+  floating overhead. They are rasterised into the node grid (a pyramid is a
   stack of shrinking squares, a sphere a distance test), not instanced meshes,
   which is what lets the bismuth shaping treat them as ordinary rock.
 
@@ -577,23 +577,23 @@ Three placement details worth knowing:
    prisms overhang the rim.
 2. **Triangular prisms are centred on their origin** along the run rather than
    growing out from it, for the same reason.
-3. **Floating props only clear other floating props.** A ball ten blocks up and
+3. **Floating props only clear other floating props.** A ball ten nodes up and
    a cube below it do not collide, and forcing them apart in plan view starved
    the level of props — it built 12 of 26 before this was separated.
 
 `Game/World.tscn` is kept as the training level: the workshop terrain with no
-blocks in it, for testing the player rig on its own.
+nodes in it, for testing the player rig on its own.
 
 
 ## Loading
 
-A 42k-block level takes ~0.5 s to mesh, and the player is a live physics body
+A 42k-node level takes ~0.5 s to mesh, and the player is a live physics body
 the moment the scene loads. Without a gate it spawns into a world that has no
 collision yet and **falls straight through the floor** — which is exactly what
 happened. Freezing the game for the duration instead would read as a hang.
 
 So `Modules/LoadingScreen/` covers the screen with a progress bar while
-`BlockWorld` meshes a few chunks per frame (`ChunksPerFrame`, default 6 —
+`NodeWorld` meshes a few chunks per frame (`ChunksPerFrame`, default 6 —
 about 23 frames for the pillar level), then drops the player in and fades out.
 
 Four things this depends on:
@@ -603,7 +603,7 @@ Four things this depends on:
    live, so the level is already drawn behind the fade. Physics is the part
    that must stop; `SetProcessUnhandledInput(false)` also stops mouse-look
    swinging the camera while the bar is up.
-2. **`BlockWorld._Ready` must not rebuild when an incremental build is already
+2. **`NodeWorld._Ready` must not rebuild when an incremental build is already
    running.** Godot readies children first, so the generator starts the
    incremental build and then the world's own `_Ready` would throw it away and
    mesh everything synchronously — reintroducing the freeze. There is a guard,
@@ -611,7 +611,7 @@ Four things this depends on:
 3. **The screen checks `IsWorldReady` as well as subscribing to `WorldReady`.**
    A world that finished before the screen readied would otherwise never fire
    the event the screen is waiting on, and the player would stay frozen.
-4. **The player is placed by searching down for the highest solid block** over
+4. **The player is placed by searching down for the highest solid node** over
    its spawn column, rather than at a fixed height, so it lands on the surface
    whatever the level generator produced.
 
@@ -622,19 +622,19 @@ Everything the first edit would otherwise pay for is done during loading:
 - **`deferMesh` clears the full-rebuild flag.** `Batch(wholesale: true)` sets a
   flag meaning "re-mesh everything at the end"; handing meshing to the
   incremental loader dropped the queued rebuild but left that flag set, so the
-  player's very first mined block took the whole-world path — a ~520 ms stall
+  player's very first mined node took the whole-world path — a ~520 ms stall
   on the first edit and only the first. This was the bug.
-- **A warm-up edit runs behind the loading bar.** One block is removed and put
+- **A warm-up edit runs behind the loading bar.** One node is removed and put
   straight back, through the ordinary edit path, before the world reports
   ready. That forces the engine's one-time work for a *modified* (rather than
   newly created) mesh — pipeline recompiles, physics buffer growth, JIT over
   the dirty-rebuild path — into the loading screen. It is verified lossless:
-  block count, occupancy map, and all 84,946 quads are identical afterwards.
+  node count, occupancy map, and all 84,946 quads are identical afterwards.
 - **Collision shapes are assigned once.** Writing `Data` updates a shape in
   place; re-assigning `Shape` re-registers it with the physics server.
 
 Level generation also passes `wholesale: true` to `Batch`, which skips
-per-block dirty marking — marking the 3x3x3 around each of 42k blocks is about
+per-node dirty marking — marking the 3x3x3 around each of 42k nodes is about
 a million wasted hash operations when a full rebuild follows anyway.
 
 
@@ -660,28 +660,28 @@ Four details the mode depends on:
    instead of immediately flipping back.
 3. **Position is written directly**, not through `MoveAndSlide`, which always
    resolves collisions and is exactly what would stop the camera entering a
-   block. Disabling the collision shape alone is not enough.
+   node. Disabling the collision shape alone is not enough.
 4. **Sandbox forces first person.** A third-person spring arm pushes the camera
    out of anything solid, so it would shove the view around the moment you fly
-   into a block, and the character model would fill the view from inside. The
+   into a node, and the character model would fill the view from inside. The
    player's real camera preference is restored on the way out.
 
-The block editor's don't-place-inside-yourself guard is skipped while in
+The node editor's don't-place-inside-yourself guard is skipped while in
 sandbox, since an intangible free-flying player has no reason to be blocked
 from building where they float.
 
 
-## Block editing
+## Node editing
 
 **Hold to repeat.** Holding a button carves or builds continuously at ~12.5
-blocks/sec, for stress-testing the block world. The repeat is keyboard-style:
+nodes/sec, for stress-testing the node world. The repeat is keyboard-style:
 one edit on press, nothing until `RepeatDelay`, then one every
 `RepeatInterval`.
 
 `RepeatDelay` defaults to **0.35 s**, and that number is load-bearing: the
-window in which a click stays a single block is the delay minus about one
+window in which a click stays a single node is the delay minus about one
 frame, and a deliberate click commonly runs 100-300 ms. At 0.25 s a slow click
-placed two blocks — exactly the failure the delay exists to prevent. Verified
+placed two nodes — exactly the failure the delay exists to prevent. Verified
 single-edit for clicks up to 300 ms.
 
 Repeats are capped at **one edit per frame**, with any backlog dropped rather
@@ -692,12 +692,12 @@ is the better trade — the repeat just tracks the frame rate.
 
 Sustained holding costs about 7% of one core. Per-edit cost is not constant: it
 starts near 1.5 ms and rises to ~19 ms as a tunnel deepens. That is not a leak
-— the same 488 blocks are re-meshed either way, but carving exposes interior
+— the same 488 nodes are re-meshed either way, but carving exposes interior
 faces that were previously culled, so they go from emitting almost nothing to
 ~1,300 quads. Revealing new surface is inherently more work than not revealing
 it.
 
-`Modules/BlockEditor` raycasts from the camera centre (matching the crosshair)
+`Modules/NodeEditor` raycasts from the camera centre (matching the crosshair)
 and edits whichever `BismuthBlob` it hits — left click places, right click
 destroys, both as rebindable input actions. It is instanced under the player
 and finds the active camera itself.
@@ -711,18 +711,18 @@ box-vs-capsule test — a keep-out box around the body origin rejected valid
 placements near the feet, which is what made ledge edges refuse to build).
 
 Picking hands the blob the **ray**, not the contact point, and the blob marches
-along it to the first solid cell. A raycast hit lands exactly on a block face —
+along it to the first solid cell. A raycast hit lands exactly on a node face —
 a cell boundary — so mapping that single point to a cell rounds ambiguously
 between neighbours and can target an empty cell, which is why some clicks
 appeared to do nothing. Marching resolves faces, edges and corners
 consistently; measured 38/38 removals across angles and heights on a full blob.
 
-Edits are stored as **sparse per-block deltas on the blob** — keyed by
+Edits are stored as **sparse per-node deltas on the blob** — keyed by
 (cell x, cell z, tier), not by column — applied on top of the generated field
-rather than baked into it. Per-block is what makes single-cube editing
+rather than baked into it. Per-node is what makes single-cube editing
 possible: a per-column "top tier" can only raise or clear a whole stack, so
 removing carved out the entire column and placing always landed on top of it.
-The mesher works from an explicit block set and emits only faces whose
+The mesher works from an explicit node set and emits only faces whose
 neighbour is absent, so a cube can be carved from the middle of a stack or
 stuck onto any one face. That is the
 diff-against-seed model from the terrain design: the blob still regenerates

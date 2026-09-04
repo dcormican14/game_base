@@ -1,31 +1,31 @@
 using Godot;
-using GameBase.Blocks;
+using GameBase.Nodes;
 using GameBase.Core;
 
 namespace GameBase.Player;
 
 /// <summary>
 /// Places and mines cubes anywhere in the world. Raycasts from the camera
-/// centre (matching the crosshair): left click places a block, right click
+/// centre (matching the crosshair): left click places a node, right click
 /// mines the one being looked at.
 ///
-/// Placement works against anything solid, not only against existing blocks —
+/// Placement works against anything solid, not only against existing nodes —
 /// aim at the terrain and the new cube snaps to the world grid cell in front
 /// of the surface. Both buttons are exported input actions, so they appear in
 /// the rebind list like any other binding.
 ///
 /// Holding a button repeats the edit, keyboard-style: one edit on press, then
 /// nothing until RepeatDelay, then one every RepeatInterval. That delay is what
-/// keeps a normal click to exactly one block.
+/// keeps a normal click to exactly one node.
 ///
-/// Instance BlockEditor.tscn under the player; it finds the scene's camera and
-/// BlockWorld itself unless the paths are set.
+/// Instance NodeEditor.tscn under the player; it finds the scene's camera and
+/// NodeWorld itself unless the paths are set.
 /// </summary>
-public partial class BlockEditor : Node3D
+public partial class NodeEditor : Node3D
 {
     [Export] public NodePath CameraPath { get; set; } = "";
-    /// <summary>The BlockWorld to edit. Found by search when left empty.</summary>
-    [Export] public NodePath BlockWorldPath { get; set; } = "";
+    /// <summary>The NodeWorld to edit. Found by search when left empty.</summary>
+    [Export] public NodePath NodeWorldPath { get; set; } = "";
     [Export] public StringName PlaceAction { get; set; } = "place_block";
     [Export] public StringName MineAction { get; set; } = "destroy_block";
     [Export(PropertyHint.Range, "1,100,0.5")] public float Reach { get; set; } = 6f;
@@ -37,7 +37,7 @@ public partial class BlockEditor : Node3D
 
     /// <summary>
     /// How long a button must be held before it starts repeating — anything
-    /// shorter edits exactly once, so a click never places two blocks.
+    /// shorter edits exactly once, so a click never places two nodes.
     ///
     /// The safe click window is this minus about one frame, and deliberate
     /// clicks run 100-300 ms; 0.25 s measurably let a slow click place two.
@@ -55,7 +55,7 @@ public partial class BlockEditor : Node3D
     [Export] public float PlayerHeight { get; set; } = 1.8f;
 
     private Camera3D _camera;
-    private BlockWorld _world;
+    private NodeWorld _world;
     private CollisionObject3D _playerBody;
 
     // Held-button state. Actions are polled in _Process rather than driven by
@@ -71,11 +71,11 @@ public partial class BlockEditor : Node3D
         _camera = !CameraPath.IsEmpty ? GetNodeOrNull<Camera3D>(CameraPath) : null;
         _camera ??= NodeSearch.FindByType<Camera3D>(GetTree().CurrentScene ?? GetParent());
 
-        _world = !BlockWorldPath.IsEmpty ? GetNodeOrNull<BlockWorld>(BlockWorldPath) : null;
-        _world ??= NodeSearch.FindByType<BlockWorld>(GetTree().CurrentScene ?? GetParent());
+        _world = !NodeWorldPath.IsEmpty ? GetNodeOrNull<NodeWorld>(NodeWorldPath) : null;
+        _world ??= NodeSearch.FindByType<NodeWorld>(GetTree().CurrentScene ?? GetParent());
 
         if (_camera == null || _world == null)
-            GD.PushWarning("BlockEditor: needs a Camera3D and a BlockWorld — editing disabled.");
+            GD.PushWarning("NodeEditor: needs a Camera3D and a NodeWorld — editing disabled.");
 
         for (Node node = GetParent(); node != null; node = node.GetParent())
         {
@@ -179,18 +179,18 @@ public partial class BlockEditor : Node3D
     private bool Mine(Vector3 from, Vector3 dir, float reach)
     {
         return _world.RayPick(from, dir, reach, out Vector3I hit, out _)
-            && _world.RemoveBlock(hit);
+            && _world.RemoveNode(hit);
     }
 
     private bool Place(Vector3 from, Vector3 dir, float reach)
     {
-        // Against an existing block: place in the empty cell the ray entered
+        // Against an existing node: place in the empty cell the ray entered
         // through, so the cube lands on the face being looked at.
         if (_world.RayPick(from, dir, reach, out Vector3I hit, out Vector3I empty) && empty != hit)
             return PlaceIfClear(empty);
 
         // Otherwise place against whatever the physics world hit (terrain), so
-        // building can start anywhere rather than only on existing blocks.
+        // building can start anywhere rather than only on existing nodes.
         var query = PhysicsRayQueryParameters3D.Create(from, from + dir * reach, CollisionMask);
         if (_playerBody != null)
             query.Exclude = new Godot.Collections.Array<Rid> { _playerBody.GetRid() };
@@ -201,29 +201,29 @@ public partial class BlockEditor : Node3D
 
         Vector3 point = (Vector3)surface["position"];
         Vector3 normal = ((Vector3)surface["normal"]).Normalized();
-        return PlaceIfClear(_world.CellAt(point + normal * (_world.BlockSize * 0.5f)));
+        return PlaceIfClear(_world.CellAt(point + normal * (_world.NodeSize * 0.5f)));
     }
 
     /// <summary>
-    /// Places a block unless it would overlap the player's capsule. A real
+    /// Places a node unless it would overlap the player's capsule. A real
     /// box-vs-capsule test, not a keep-out box around the body origin — that
     /// rejected valid placements near the feet.
     /// </summary>
     private bool PlaceIfClear(Vector3I cell)
     {
         // In sandbox the player is intangible and free-flying, so the
-        // don't-entomb-yourself guard is just an obstacle: placing a block
+        // don't-entomb-yourself guard is just an obstacle: placing a node
         // where you happen to be floating is a normal thing to want.
         bool intangible = _playerBody is PlayerController { IsSandbox: true };
         if (!intangible && _playerBody != null && OverlapsPlayer(cell))
             return false;
 
-        return _world.AddBlock(cell);
+        return _world.AddNode(cell);
     }
 
     private bool OverlapsPlayer(Vector3I cell)
     {
-        float half = _world.BlockSize * 0.5f;
+        float half = _world.NodeSize * 0.5f;
         Vector3 centre = _world.CellCentre(cell);
         Vector3 min = centre - Vector3.One * half;
         Vector3 max = centre + Vector3.One * half;

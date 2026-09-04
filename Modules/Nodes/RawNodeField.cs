@@ -1,14 +1,14 @@
 using Godot;
 
-namespace GameBase.Blocks;
+namespace GameBase.Nodes;
 
 /// <summary>
-/// The flowing field that decides which block wins each edge and corner.
+/// The flowing field that decides which RAW node wins each edge and corner.
 ///
-/// A lattice edge is shared by 4 blocks and a lattice corner by 8. This awards
+/// A lattice edge is shared by 4 nodes and a lattice corner by 8. This awards
 /// each contested region to exactly one of them, as a pure function of the
-/// feature's position and the seed. Every block touching the feature runs the
-/// same computation on the same position and agrees on the winner, so no block
+/// feature's position and the seed. Every node touching the feature runs the
+/// same computation on the same position and agrees on the winner, so no node
 /// ever inspects a neighbour — which is what makes the shapes interlock and
 /// what makes planet-scale generation affordable.
 ///
@@ -17,13 +17,13 @@ namespace GameBase.Blocks;
 /// it. Because the flow varies smoothly, neighbouring features tend to favour
 /// the same direction, so crystal growth reads as a current running through
 /// the rock — long rims and terraces marching one way — rather than as
-/// per-block static. `Roughness` mixes in per-feature jitter to break up that
+/// per-node static. `Roughness` mixes in per-feature jitter to break up that
 /// coherence when a more granular, chaotic crystal is wanted.
 ///
 /// Everything here is a pure function of position and seed: no state, no
 /// allocation, no neighbour queries.
 /// </summary>
-public sealed class BismuthField
+public sealed class RawNodeField
 {
     private readonly int _seed;
     private readonly float _frequency;
@@ -37,9 +37,9 @@ public sealed class BismuthField
     /// growth is strongly directional; at 1 contests are essentially random
     /// and the crystal is chaotic.</param>
     /// <param name="growth">0..1, how many contests are awarded at all. At 0
-    /// no edge or corner moves and blocks stay plain cubes; at 1 every one is
+    /// no edge or corner moves and nodes stay plain cubes; at 1 every one is
     /// claimed by somebody. Middling values leave some rims flat.</param>
-    public BismuthField(int seed, float scale = 6f, float roughness = 0.35f, float growth = 0.7f)
+    public RawNodeField(int seed, float scale = 6f, float roughness = 0.35f, float growth = 0.7f)
     {
         _seed = seed;
         _frequency = 1f / Mathf.Max(scale, 0.5f);
@@ -47,7 +47,7 @@ public sealed class BismuthField
         _growth = Mathf.Clamp(growth, 0f, 1f);
     }
 
-    // Winners memoized per lattice feature. Each corner is shared by 8 blocks
+    // Winners memoized per lattice feature. Each corner is shared by 8 nodes
     // and each edge by 4, so meshing a region re-asks the same question 4-8
     // times; caching the verdict removes that redundancy outright. Purely an
     // optimisation — the answer is a pure function of position either way, so
@@ -55,12 +55,12 @@ public sealed class BismuthField
     private readonly System.Collections.Generic.Dictionary<(int, int, int, int), Vector3I> _winners = new();
 
     /// <summary>
-    /// The shape mask for a block: which of its 12 edges and 8 corners it won.
+    /// The shape mask for a node: which of its 12 edges and 8 corners it won.
     /// This is the O(1) shape lookup — no neighbour queries and no dependence
-    /// on what has been placed, so a block dropped into empty space mid-game
+    /// on what has been placed, so a node dropped into empty space mid-game
     /// gets exactly the shape it would have had if generated with the planet.
     /// </summary>
-    public BismuthShape.Mask MaskFor(Vector3I cell)
+    public RawNodeGeometry.Mask MaskFor(Vector3I cell)
     {
         int corners = 0;
         for (int c = 0; c < 8; c++)
@@ -72,7 +72,7 @@ public sealed class BismuthField
                 cell.Z + (zHigh ? 1 : 0));
 
             if (WinsCorner(cell, lattice))
-                corners |= 1 << BismuthShape.CornerIndex(xHigh, yHigh, zHigh);
+                corners |= 1 << RawNodeGeometry.CornerIndex(xHigh, yHigh, zHigh);
         }
 
         int edges = 0;
@@ -88,11 +88,11 @@ public sealed class BismuthField
                 if (vHigh) lattice = Step(lattice, vAxis);
 
                 if (WinsEdge(cell, axis, lattice))
-                    edges |= 1 << BismuthShape.EdgeIndex(axis, uHigh, vHigh);
+                    edges |= 1 << RawNodeGeometry.EdgeIndex(axis, uHigh, vHigh);
             }
         }
 
-        return new BismuthShape.Mask(corners, edges);
+        return new RawNodeGeometry.Mask(corners, edges);
     }
 
     private static Vector3I Step(Vector3I v, int axis) => axis switch
@@ -110,7 +110,7 @@ public sealed class BismuthField
     private bool WinsCorner(Vector3I cell, Vector3I lattice) =>
         CornerWinner(lattice) == cell;
 
-    /// <summary>Which block takes the region around this lattice corner.</summary>
+    /// <summary>Which node takes the region around this lattice corner.</summary>
     private Vector3I CornerWinner(Vector3I lattice)
     {
         var key = (0, lattice.X, lattice.Y, lattice.Z);
@@ -125,8 +125,8 @@ public sealed class BismuthField
     {
         // An uncontested corner still has to belong to somebody, or the
         // region it covers is claimed by nobody and leaves a hole. It falls
-        // to the block that nominally contains it — the one whose own cell
-        // the quarter-cells sit in — which is the block at lattice - (1,1,1).
+        // to the node that nominally contains it — the one whose own cell
+        // the quarter-cells sit in — which is the node at lattice - (1,1,1).
         if (!Contested(0u, lattice))
             return new Vector3I(lattice.X - 1, lattice.Y - 1, lattice.Z - 1);
 
@@ -169,7 +169,7 @@ public sealed class BismuthField
     private bool WinsEdge(Vector3I cell, int axis, Vector3I lattice) =>
         EdgeWinner(axis, lattice) == cell;
 
-    /// <summary>Which block takes the region around this lattice edge.</summary>
+    /// <summary>Which node takes the region around this lattice edge.</summary>
     private Vector3I EdgeWinner(int axis, Vector3I lattice)
     {
         var key = (axis + 1, lattice.X, lattice.Y, lattice.Z);
@@ -186,7 +186,7 @@ public sealed class BismuthField
         int vAxis = axis == 2 ? 1 : 2;
 
         // As with corners: an unclaimed edge would leave its region ownerless,
-        // so it defaults to the block that nominally contains it.
+        // so it defaults to the node that nominally contains it.
         if (!Contested((uint)(axis + 1), lattice))
             return Back(Back(lattice, uAxis), vAxis);
 

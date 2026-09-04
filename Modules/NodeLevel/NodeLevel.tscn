@@ -1,0 +1,9 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="PackedScene" path="res://Modules/Nodes/NodeWorld.tscn" id="1_world"]
+[ext_resource type="Script" path="res://Modules/NodeLevel/NodeLevel.cs" id="2_level"]
+
+[node name="NodeLevel" instance=ExtResource("1_world")]
+
+[node name="Generator" type="Node" parent="."]
+script = ExtResource("2_level")
