@@ -13,14 +13,6 @@ namespace GameBase.Nodes;
 /// a mountain it points horizontally into the rock. Everything else follows
 /// from which way that vector faces.
 ///
-/// THE CORE
-///
-/// The central 2x2x2 is never touched. It is the node's guarantee that it
-/// exists at all — whatever the field line says, a topsoil node can never be
-/// carved away to nothing, and the surface can never open a hole where one
-/// node happened to lose every contest. Exactly the role the core plays in
-/// <see cref="RawNodeGeometry"/>, and for the same reason.
-///
 /// THE SURFACE IS SAMPLED, NOT CARVED
 ///
 /// The soil's outer shape is the level set of the world's terrain field: each
@@ -46,6 +38,18 @@ namespace GameBase.Nodes;
 /// winner that declined on account of its own surface would leave a hole
 /// nobody else could close — which is exactly what the stacked-soil voids
 /// were.
+///
+/// NO CORE
+///
+/// Unlike <see cref="RawNodeGeometry"/> this keeps no untouchable centre. A
+/// core exists there to stop contests carving a node away to nothing, and
+/// contests do not shape soil. Forcing one here does the opposite of its job:
+/// where the terrain field says a cell is entirely above ground, a mandatory
+/// core leaves a 2x2x2 nub floating in the air with nothing attached to it.
+///
+/// Nothing is lost by dropping it. Which cells hold soil at all is the
+/// generator's decision, and a cell the surface says is empty simply meshes to
+/// nothing.
 ///
 /// NO NEIGHBOUR QUERIES
 ///
@@ -174,48 +178,27 @@ public static class TopsoilGeometry
             || k < RawNodeGeometry.Lo || k >= RawNodeGeometry.Hi)
             return false;
 
-        // THE CORE — the central 2x2x2, never contested and never carved. The
-        // node's guarantee that it exists whatever the field line says.
-        if (IsCore(i, j, k))
-            return true;
-
-        // OUTSIDE THIS CELL — the rims the growth contests awarded.
+        // SOIL GROWS NO RIMS, AND YIELDS NONE.
         //
-        // A won feature must be filled wherever it reaches, without consulting
-        // the surface. The contest is a promise between neighbours: the loser
-        // vacates that space precisely because the winner is going to fill it,
-        // so a winner that declined would leave a hole nobody else can close.
+        // It fills exactly its own cell, wherever the surface says solid, and
+        // never reaches outside it. That is the contract PlainNode has always
+        // kept: a type confined to its own footprint tiles space by
+        // construction, and a raw neighbour's rim simply overhangs it. The
+        // seam is honest — crystal grows over soil, which is what it should
+        // look like.
         //
-        // Splitting on the field line here was the bug behind the stacked-soil
-        // voids. A rim landing in what this node considers its air-facing half
-        // was dropped, while the neighbour had already vacated it — 524
-        // visible holes between two soil layers. Which half a rim falls in is
-        // this node's private business; the promise is not.
+        // Entering the crystal contests was the mistake behind the divots.
+        // Running the raw rule made every soil node wear a bismuth shape:
+        // dumping the actual occupancy showed it matching the raw mask
+        // exactly, hollowed to a 2x2 nub along every border it lost. The
+        // surface field was deciding nothing, because a node below ground has
+        // every surface bit set and the contests then had the last word.
+        //
+        // Soil is not crystal. It should not grow like it.
         if (i < 0 || i >= Sub || j < 0 || j >= Sub || k < 0 || k >= Sub)
-            return RawNodeGeometry.Occupies(mask.Raw, i, j, k);
-
-        // INSIDE THIS CELL — space this node LOST is not its to keep.
-        //
-        // The other side of the same promise: a neighbour that won a feature
-        // grows its rim in here, so this node must leave that space empty.
-        // Ignoring it collided on 457 sub-cells against plain rock.
-        if (!RawNodeGeometry.Occupies(mask.Raw, i, j, k))
             return false;
 
-        // And then the surface, read from the shared field rather than cut
-        // with a plane of this node's own. See Mask.Surface: one world
-        // function means one answer per sub-cell, so the soil forms a
-        // continuous sheet instead of each cube carving itself and leaving
-        // holes at the joins.
         return (mask.Surface & 1UL << SurfaceBit(i, j, k)) != 0UL;
-    }
-
-    /// <summary>Is this the untouchable central 2x2x2?</summary>
-    private static bool IsCore(int i, int j, int k)
-    {
-        const int lo = Sub / 2 - 1;
-        const int hi = Sub / 2;
-        return i >= lo && i <= hi && j >= lo && j <= hi && k >= lo && k <= hi;
     }
 
     /// <summary>Builds the mesh for one shape.</summary>
