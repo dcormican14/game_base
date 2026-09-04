@@ -63,6 +63,17 @@ public interface INodeType
     /// into space a neighbour vacated.
     /// </summary>
     int[] OccupiedCells(NodeShape shape);
+
+    /// <summary>
+    /// Does this shape fill one sub-cell, in node-local coordinates?
+    ///
+    /// The same answer <see cref="OccupiedCells"/> gives, asked one cell at a
+    /// time. Picking needs it: the world's occupancy map records THAT a
+    /// sub-cell is filled but not BY WHICH node, and a shape reaching outside
+    /// its own cell means the sub-cell's index cannot be divided down to name
+    /// its owner. Only the shape itself can answer.
+    /// </summary>
+    bool Occupies(NodeShape shape, int i, int j, int k);
 }
 
 /// <summary>

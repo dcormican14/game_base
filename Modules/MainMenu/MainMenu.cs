@@ -10,7 +10,7 @@ namespace GameBase.UI;
 public partial class MainMenu : Control
 {
     [Export(PropertyHint.File, "*.tscn")]
-    public string GameScenePath { get; set; } = "res://Game/PillarLevel.tscn";
+    public string GameScenePath { get; set; } = "res://Game/IslandLevel.tscn";
 
     [Export] public string GameTitle { get; set; } = "GAME BASE";
 

@@ -22,6 +22,33 @@ public partial class PauseMenu : CanvasLayer
     private Control _menuPanel;
     private SettingsMenu _settings;
 
+    /// <summary>
+    /// Suppresses the menu entirely: the pause action does nothing and, if the
+    /// menu is already open, it closes.
+    ///
+    /// For the stretch before a scene is playable — a level still building
+    /// behind a loading screen. Pausing then is meaningless (there is nothing
+    /// running to pause) and actively harmful: the tree stops, so the very
+    /// work the player is waiting on stops with it, and the menu's Resume
+    /// hands them a world that is not there yet.
+    ///
+    /// A plain flag rather than a reference to whatever is loading, so the
+    /// module stays drop-in: anything that knows the scene is not ready yet
+    /// can set it.
+    /// </summary>
+    public bool Suspended
+    {
+        get => _suspended;
+        set
+        {
+            _suspended = value;
+            if (_suspended && IsPaused)
+                Resume();
+        }
+    }
+
+    private bool _suspended;
+
     public bool IsPaused => GetTree().Paused;
 
     public override void _Ready()
@@ -43,6 +70,14 @@ public partial class PauseMenu : CanvasLayer
     {
         if (!@event.IsActionPressed(PauseAction))
             return;
+
+        if (_suspended)
+        {
+            // Swallowed rather than ignored, so the key does not fall through
+            // to whatever else might be listening while the scene loads.
+            GetViewport().SetInputAsHandled();
+            return;
+        }
 
         if (_settings.Visible)
             CloseSettings();

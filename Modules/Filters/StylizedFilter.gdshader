@@ -15,9 +15,31 @@ uniform sampler2D normal_texture : hint_normal_roughness_texture, repeat_disable
 
 // --- Pixelation -------------------------------------------------------------
 uniform bool pixelate_enabled = false;
-// Height of the virtual low-res buffer; width follows the screen's aspect so
-// pixels stay square.
+// Height of the virtual low-res buffer at the NEAR end; width follows the
+// screen's aspect so pixels stay square. Higher = finer pixels.
 uniform int pixel_resolution : hint_range(60, 1080) = 320;
+
+// Leave the sky at full resolution. The skybox is already drawn as pixel art
+// at its own grid, so pixelating it again resamples one pixel grid onto
+// another — which beats the stars into aliased noise that crawls as the camera
+// turns. Objects are what the filter is for.
+uniform bool pixelate_sky = false;
+// Depth beyond which a pixel counts as sky. Reverse-Z puts the sky at the far
+// plane, far past any real geometry, so this only has to sit above the
+// furthest object.
+uniform float sky_depth : hint_range(50.0, 5000.0) = 300.0;
+
+// Distant objects get FINER pixels, so the jump between a chunky foreground
+// and a distant one is less dramatic. `pixel_far_scale` is how many times
+// finer the grid gets by `pixel_far_distance`; 1.0 disables the ramp.
+uniform float pixel_far_scale : hint_range(1.0, 6.0) = 2.2;
+uniform float pixel_near_distance : hint_range(0.5, 40.0) = 3.0;
+uniform float pixel_far_distance : hint_range(2.0, 200.0) = 22.0;
+// Number of discrete grid sizes between near and far. The ramp is QUANTIZED
+// rather than continuous: a grid that changes smoothly with depth slides its
+// pixel boundaries as the camera moves, and the whole image shimmers. Stepping
+// it means a surface keeps one pixel size until it crosses a band edge.
+uniform int pixel_distance_steps : hint_range(1, 12) = 4;
 
 // --- Outlines ---------------------------------------------------------------
 uniform bool outline_enabled = true;
@@ -94,11 +116,36 @@ void fragment() {
     // whole image reads as one low-res picture rather than crisp lines over a
     // blocky background.
     if (pixelate_enabled) {
-        float rows = float(pixel_resolution);
-        vec2 grid = vec2(floor(rows * (VIEWPORT_SIZE.x / VIEWPORT_SIZE.y)), rows);
-        dither_coord = floor(uv * grid);
-        uv = (dither_coord + 0.5) / grid;
-        texel = 1.0 / grid;
+        // Classify with depth at the TRUE uv, before any snapping. Reading it
+        // through the snapped uv instead lets a pixel near a silhouette land
+        // on a sky texel (or the reverse), so objects would sample the sky's
+        // grid along every edge.
+        float raw_here = textureLod(depth_texture, uv, 0.0).r;
+        vec4 vp_here = INV_PROJECTION_MATRIX * vec4(uv * 2.0 - 1.0, raw_here, 1.0);
+        float depth_here = -(vp_here.xyz / vp_here.w).z;
+
+        bool is_sky = depth_here >= sky_depth;
+
+        if (!is_sky || pixelate_sky) {
+            float rows = float(pixel_resolution);
+
+            if (pixel_far_scale > 1.0 && !is_sky) {
+                // Finer grid with distance, in discrete bands. Smooth
+                // interpolation here would drift pixel boundaries every frame
+                // the camera moves; banding keeps a surface on one grid until
+                // it crosses an edge.
+                float span = max(pixel_far_distance - pixel_near_distance, 0.001);
+                float t = clamp((depth_here - pixel_near_distance) / span, 0.0, 1.0);
+                float steps = float(pixel_distance_steps);
+                t = floor(t * steps) / steps;
+                rows *= mix(1.0, pixel_far_scale, t);
+            }
+
+            vec2 grid = vec2(floor(rows * (VIEWPORT_SIZE.x / VIEWPORT_SIZE.y)), rows);
+            dither_coord = floor(uv * grid);
+            uv = (dither_coord + 0.5) / grid;
+            texel = 1.0 / grid;
+        }
     }
 
     vec3 color = textureLod(screen_texture, uv, 0.0).rgb;

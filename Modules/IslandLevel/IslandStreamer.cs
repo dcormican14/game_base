@@ -65,7 +65,7 @@ public partial class IslandStreamer : ChunkStreamer
     [Export(PropertyHint.Range, "6,120,0.5")] public float AnchorRadius { get; set; } = 30f;
 
     [ExportGroup("Erosion")]
-    [Export(PropertyHint.Range, "0,8,1")] public int ErosionOctaves { get; set; } = 5;
+    [Export(PropertyHint.Range, "0,8,1")] public int ErosionOctaves { get; set; } = 3;
     [Export(PropertyHint.Range, "0,1,0.01")] public float ErosionStrength { get; set; } = 0.5f;
     [Export(PropertyHint.Range, "6,120,1")] public float ErosionScale { get; set; } = 34f;
     [Export(PropertyHint.Range, "0,3,0.05")] public float ErosionBias { get; set; } = 1.35f;
@@ -74,7 +74,6 @@ public partial class IslandStreamer : ChunkStreamer
     [Export(PropertyHint.Range, "0,12,0.1")] public float TopRelief { get; set; } = 2.6f;
     [Export(PropertyHint.Range, "0,8,0.5")] public float CapThickness { get; set; } = 2f;
     [Export] public bool ScaleCapWithIsland { get; set; }
-    [Export(PropertyHint.Range, "0,1,0.01")] public float CaveStrength { get; set; } = 0.5f;
     [Export(PropertyHint.Range, "0.5,3,0.05")] public float TaperExponent { get; set; } = 1.15f;
     [Export(PropertyHint.Range, "0,1,0.01")] public float WarpStrength { get; set; } = 0.28f;
     [Export(PropertyHint.Range, "10,200,1")] public float WarpScale { get; set; } = 60f;
@@ -159,7 +158,6 @@ public partial class IslandStreamer : ChunkStreamer
             TopRelief = TopRelief,
             CapThickness = CapThickness,
             ScaleCapWithIsland = ScaleCapWithIsland,
-            CaveStrength = CaveStrength,
             TaperExponent = TaperExponent,
             WarpStrength = WarpStrength,
             WarpScale = WarpScale,

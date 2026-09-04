@@ -28,7 +28,11 @@ public partial class Crosshair : Control
     /// <summary>Dashes to draw when SettingsService is absent. 0 hides the crosshair.</summary>
     [Export(PropertyHint.Range, "0,4,1")] public int Lines { get; set; } = 2;
 
-    [Export] public Color BarColor { get; set; } = new(0.25f, 1f, 0.35f);
+    /// <summary>
+    /// Warm gold, picked to sit in the same family as the sky's plum and the
+    /// nebulae's warm accent rather than cutting across them.
+    /// </summary>
+    [Export] public Color BarColor { get; set; } = new(0.913f, 0.546f, 0.058f);
     /// <summary>Alpha of the block nearest the centre gap.</summary>
     [Export(PropertyHint.Range, "0,1,0.01")] public float InnerAlpha { get; set; } = 0.95f;
     /// <summary>Alpha of the outermost block.</summary>
@@ -40,9 +44,13 @@ public partial class Crosshair : Control
     /// <summary>Empty virtual pixels between the centre and each dash.</summary>
     [Export(PropertyHint.Range, "0,32,1")] public int Gap { get; set; } = 6;
 
-    /// <summary>Dark blocks behind the dashes, so they stay visible on light terrain.</summary>
+    /// <summary>Blocks behind the dashes, so they stay visible against terrain.</summary>
     [Export] public bool Outline { get; set; } = true;
-    [Export] public Color OutlineColor { get; set; } = new(0f, 0f, 0f, 0.6f);
+
+    /// <summary>
+    /// Warm off-white, matching the gold rather than fighting it.
+    /// </summary>
+    [Export] public Color OutlineColor { get; set; } = new(1f, 0.922f, 0.761f, 0.85f);
 
     /// <summary>
     /// Height of the virtual low-res buffer the blocks are sized against —
@@ -188,6 +196,7 @@ public partial class Crosshair : Control
             if (i == cells.Count - 1)
                 _ink.TryAdd(cell + dirCell, alpha);
         }
+
     }
 
     /// <summary>Draws the accumulated cells, outline first so fill sits on top.</summary>
@@ -210,7 +219,7 @@ public partial class Crosshair : Control
                 continue;
             Color ink = OutlineColor;
             // The outline fades with the block it belongs to, so the tips do
-            // not end in a dark smudge after the green has faded out.
+            // not end in a smudge after the gold has faded out.
             ink.A *= pair.Value;
             DrawRect(new Rect2(origin + (Vector2)pair.Key * scale, scale, scale), ink);
         }

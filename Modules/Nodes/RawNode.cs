@@ -50,6 +50,9 @@ public sealed class RawNode : INodeType
 
     public int[] OccupiedCells(NodeShape shape) => RawNodeGeometry.OccupiedCells(ToMask(shape));
 
+    public bool Occupies(NodeShape shape, int i, int j, int k) =>
+        RawNodeGeometry.Occupies(ToMask(shape), i, j, k);
+
     private static RawNodeGeometry.Mask ToMask(NodeShape shape) => new(shape.A, shape.B);
 }
 
@@ -63,6 +66,10 @@ public static class NodeTypes
     private static readonly Dictionary<string, System.Func<int, float, float, float, INodeType>> Factories = new()
     {
         ["raw"] = (seed, scale, roughness, growth) => new RawNode(seed, scale, roughness, growth),
+
+        // Plain cubes ignore every growth dial — the shape has no freedom to
+        // spend them on.
+        ["plain"] = (_, _, _, _) => new PlainNode(),
     };
 
     /// <summary>Ids in registration order, for an editor dropdown.</summary>

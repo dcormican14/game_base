@@ -1,0 +1,33 @@
+[gd_scene load_steps=9 format=3]
+
+[ext_resource type="PackedScene" path="res://Modules/Player/Player.tscn" id="1_player"]
+[ext_resource type="PackedScene" path="res://Modules/PauseMenu/PauseMenu.tscn" id="2_pause"]
+[ext_resource type="PackedScene" path="res://Modules/Filters/StylizedFilter.tscn" id="3_filter"]
+[ext_resource type="PackedScene" path="res://Modules/Stats/PerfStats.tscn" id="4_stats"]
+[ext_resource type="PackedScene" path="res://Modules/Crosshair/Crosshair.tscn" id="5_crosshair"]
+[ext_resource type="PackedScene" path="res://Modules/IslandLevel/IslandLevel.tscn" id="6_level"]
+[ext_resource type="PackedScene" path="res://Modules/Skybox/Skybox.tscn" id="7_skybox"]
+[ext_resource type="PackedScene" path="res://Modules/LoadingScreen/LoadingScreen.tscn" id="8_loading"]
+
+[node name="IslandLevel" type="Node3D"]
+
+[node name="Skybox" parent="." instance=ExtResource("7_skybox")]
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+rotation = Vector3(-0.85, 0.55, 0)
+shadow_enabled = true
+
+[node name="IslandWorld" parent="." instance=ExtResource("6_level")]
+
+[node name="Player" parent="." instance=ExtResource("1_player")]
+position = Vector3(0, 2, 0)
+
+[node name="PauseMenu" parent="." instance=ExtResource("2_pause")]
+
+[node name="StylizedFilter" parent="." instance=ExtResource("3_filter")]
+
+[node name="PerfStats" parent="." instance=ExtResource("4_stats")]
+
+[node name="Crosshair" parent="." instance=ExtResource("5_crosshair")]
+
+[node name="LoadingScreen" parent="." instance=ExtResource("8_loading")]

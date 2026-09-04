@@ -47,7 +47,7 @@ public sealed class IslandDensity
 
     /// <summary>Octaves of side erosion. More gives finer spurs; each costs a
     /// noise evaluation per sample.</summary>
-    public int ErosionOctaves { get; set; } = 5;
+    public int ErosionOctaves { get; set; } = 3;
 
     /// <summary>How deeply erosion bites into the sides, as a fraction of the
     /// island's radius. This is the main "how jagged" dial.</summary>
@@ -112,40 +112,6 @@ public sealed class IslandDensity
     /// below it.
     /// </summary>
     public float ErosionRimFade { get; set; } = 6f;
-
-    /// <summary>How much of the island's interior is hollowed into caves.
-    /// 0 disables caves entirely.</summary>
-    public float CaveStrength { get; set; } = 0.5f;
-
-    /// <summary>Nodes per lobe of the cave network.</summary>
-    public float CaveScale { get; set; } = 26f;
-
-    /// <summary>Fraction of islands split by a cleave plane.</summary>
-    public float CleaveChance { get; set; } = 0.34f;
-
-    /// <summary>How far a cleave plane may tilt from vertical, in degrees.</summary>
-    public float CleaveTilt { get; set; } = 38f;
-
-    /// <summary>Width of the gap a cleave opens, in nodes, for an island of
-    /// <see cref="CleaveSizeReference"/> radius. Larger islands open wider
-    /// chasms.</summary>
-    public float CleaveGap { get; set; } = 2.5f;
-
-    /// <summary>Most planes that may cut one island. Each is less likely than
-    /// the one before, so this is a ceiling on shattering rather than a
-    /// count.</summary>
-    public int MaxCleaves { get; set; } = 4;
-
-    /// <summary>Island radius at which <see cref="CleaveChance"/> applies
-    /// as written. Bigger islands cleave more readily, smaller ones less.</summary>
-    public float CleaveSizeReference { get; set; } = 26f;
-
-    /// <summary>How far a cleave face wanders from a true plane, as a fraction
-    /// of island radius. 0 gives faces that look sawn.</summary>
-    public float CleaveRoughness { get; set; } = 0.12f;
-
-    /// <summary>Nodes per lobe of the cleave face's wobble.</summary>
-    public float CleaveWobbleScale { get; set; } = 30f;
 
     /// <summary>
     /// How far space is bent before the island's body is measured in it, as a
@@ -436,14 +402,7 @@ public sealed class IslandDensity
             && depthBelowTop > slack + TopRelief
             && depthBelowTop < island.Depth - slack)
         {
-            float deep = island.Radius - flatHorizontal;
-            if (CaveStrength > 0f)
-                deep = Carve(island, point, deep, deep);
-
-            // The cleave still applies: a cleft has to run all the way through
-            // the island, and skipping it here would leave the split healed
-            // over in the interior.
-            return CleaveChance > 0f ? ApplyCleave(island, point, deep) : deep;
+            return island.Radius - flatHorizontal;
         }
 
         // DOMAIN WARP — bend space before the body shape is measured in it.
@@ -624,48 +583,9 @@ public sealed class IslandDensity
             density += (ridged - 0.5f) * amplitude * 1.7f;
         }
 
-        if (density <= 0f)
-            return density;
-
-        // ---------------------------------------------------- 4. caves
-
-        if (CaveStrength > 0f)
-            density = Carve(island, point, density, Mathf.Min(density, topY + relief - local.Y));
-
-        // ---------------------------------------------------- cleave plane
-
-        if (CleaveChance > 0f)
-            density = ApplyCleave(island, point, density);
-
         return density;
     }
 
-    /// <summary>
-    /// Bores caves through solid rock — layer 4's second half, shared by the
-    /// full path and the deep-interior shortcut.
-    /// </summary>
-    /// <param name="fromSurface">How far this sample is from the nearest
-    /// surface. Caves fade out as it approaches zero, so they never lace the
-    /// exterior with holes or breach the walkable top.</param>
-    private float Carve(in Island island, Vector3 point, float density, float fromSurface)
-    {
-        // Two ridged fields multiplied: each is a set of sheets, and the
-        // places where BOTH are near their ridge are tubes rather than
-        // sheets. This is the standard trick for worm caves without
-        // actually tracing worms.
-        float cs = 1f / Mathf.Max(CaveScale, 1f);
-        float a = DensityNoise.Ridged(point * cs, _seed + 2311, 2);
-        float b = DensityNoise.Ridged(point * cs + new Vector3(41.3f, 17.7f, -29.1f),
-            _seed + 3079, 2);
-        float tube = a * b;
-
-        float threshold = 1f - CaveStrength * 0.35f;
-        if (tube <= threshold)
-            return density;
-
-        float interior = Mathf.Clamp((fromSurface - 2f) / 6f, 0f, 1f);
-        return density - (tube - threshold) * 40f * interior;
-    }
 
     // The last point the warp was evaluated at, and its result. A sample is
     // tested against every candidate island in turn, and the warp is identical
@@ -699,10 +619,18 @@ public sealed class IslandDensity
             return;
         }
 
+        // Two octaves rather than three.
+        //
+        // The warp DISPLACES space; it does not draw a surface. Its job is to
+        // bend the body enough to fold overhangs out of it, which is a
+        // low-frequency effect — the third octave moves each sample by a few
+        // hundredths of a radius, which is finer than the lattice the result
+        // is rasterised onto. Measured at 9% of the whole field's cost for a
+        // 1.3% change in solid volume.
         float ws = 1f / Mathf.Max(WarpScale, 1f);
-        wx = DensityNoise.Fbm(point * ws, _seed + 5077, 3);
-        wy = DensityNoise.Fbm(point * ws + new Vector3(19.3f, -7.1f, 43.9f), _seed + 6151, 3);
-        wz = DensityNoise.Fbm(point * ws + new Vector3(-33.7f, 61.2f, 11.4f), _seed + 7213, 3);
+        wx = DensityNoise.Fbm(point * ws, _seed + 5077, 2);
+        wy = DensityNoise.Fbm(point * ws + new Vector3(19.3f, -7.1f, 43.9f), _seed + 6151, 2);
+        wz = DensityNoise.Fbm(point * ws + new Vector3(-33.7f, 61.2f, 11.4f), _seed + 7213, 2);
 
         _warpPoint = point;
         _warpSeed = _seed;
@@ -736,75 +664,6 @@ public sealed class IslandDensity
         return DensityNoise.Fbm(at, _seed + 4231, 3) * TopRelief;
     }
 
-    /// <summary>
-    /// The cleave: a tilted plane that splits an island into shards.
-    ///
-    /// Rock within half a gap of the plane is removed, which leaves the two
-    /// pieces with matching flat faces and a clean void between them — the
-    /// read of something broken apart, rather than two islands that happen to
-    /// be close. Whether an island cleaves at all, and at what angle, is fixed
-    /// per island by its own hash.
-    /// </summary>
-    private float ApplyCleave(in Island island, Vector3 point, float density)
-    {
-        Vector3I c = island.Cell;
-        uint slotSalt = (uint)island.Slot * 128u;
-
-        // How many planes cut this island. Each successive one is less likely
-        // than the last, so most cleaved islands are split in two, a few shear
-        // into three or four pieces, and the occasional big one shatters —
-        // which is what makes an archipelago look broken apart rather than
-        // uniformly bisected.
-        for (int i = 0; i < MaxCleaves; i++)
-        {
-            uint salt = 21u + slotSalt + (uint)i * 16u;
-
-            // Larger islands are likelier to be cut: a big mass has more to
-            // break, and cleaving is what gives it internal structure rather
-            // than leaving it a single smooth dome.
-            float sizeBoost = Mathf.Clamp(island.Radius / Mathf.Max(CleaveSizeReference, 1f), 0.4f, 2.2f);
-            float chance = CleaveChance * sizeBoost * Mathf.Pow(0.55f, i);
-
-            if (DensityNoise.Hash01(c.X, c.Y, c.Z, _seed, salt) >= chance)
-                break;
-
-            // A mostly-vertical plane, tilted by up to CleaveTilt. Sampling
-            // the normal as a direction and then flattening its Y keeps the
-            // cleave running down through the island rather than slicing off
-            // its top, which the top cut already handles.
-            Vector3 normal = DensityNoise.UnitVector(c.X, c.Y, c.Z, _seed, salt + 1u);
-            normal.Y *= Mathf.Sin(Mathf.DegToRad(Mathf.Clamp(CleaveTilt, 0f, 80f)));
-            if (normal.LengthSquared() < 1e-6f)
-                continue;
-            normal = normal.Normalized();
-
-            // Offset from the island's centre, so the split is rarely even.
-            float offset = (DensityNoise.Hash01(c.X, c.Y, c.Z, _seed, salt + 2u) - 0.5f)
-                * island.Radius * 1.3f;
-
-            float signedDistance = (point - island.Centre).Dot(normal) - offset;
-
-            // The gap widens with the island, so a cleave through a large mass
-            // opens a real chasm rather than a hairline crack.
-            float gap = CleaveGap * Mathf.Clamp(island.Radius / 24f, 0.6f, 3f);
-
-            // A per-plane wobble along the cut, so the faces read as fractured
-            // rock rather than as something sawn.
-            if (CleaveRoughness > 0f)
-            {
-                float w = DensityNoise.Fbm(point * (1f / Mathf.Max(CleaveWobbleScale, 1f)),
-                    _seed + (int)salt * 31, 2);
-                signedDistance += w * island.Radius * CleaveRoughness;
-            }
-
-            float half = Mathf.Max(gap, 0f) * 0.5f;
-            float intoGap = half - Mathf.Abs(signedDistance);
-            if (intoGap > 0f)
-                density -= intoGap * 20f;
-        }
-
-        return density;
-    }
 
     // ---------------------------------------------------------------- surface
 

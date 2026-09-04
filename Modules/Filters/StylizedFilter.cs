@@ -40,8 +40,41 @@ public partial class StylizedFilter : MeshInstance3D
 
     [ExportGroup("Pixelation")]
     [Export] public bool PixelateEnabled { get; set; } = true;
-    /// <summary>Virtual vertical resolution; width follows the screen aspect.</summary>
+    /// <summary>Virtual vertical resolution at the NEAR end; width follows the
+    /// screen aspect. Higher means finer pixels.</summary>
     [Export(PropertyHint.Range, "60,1080,1")] public int PixelResolution { get; set; } = 320;
+
+    /// <summary>
+    /// Pixelate the sky as well as objects. Off by default: the skybox is
+    /// already drawn as pixel art on its own grid, and resampling one pixel
+    /// grid onto another beats the stars into aliased noise that crawls as the
+    /// camera turns.
+    /// </summary>
+    [Export] public bool PixelateSky { get; set; }
+
+    /// <summary>Depth past which a pixel counts as sky. Only has to sit above
+    /// the furthest real geometry.</summary>
+    [Export(PropertyHint.Range, "50,5000,10")] public float SkyDepth { get; set; } = 300f;
+
+    /// <summary>
+    /// How many times FINER the pixel grid becomes by <see cref="PixelFarDistance"/>,
+    /// so the jump between a chunky foreground and a distant object is less
+    /// dramatic. 1 disables the ramp.
+    /// </summary>
+    [Export(PropertyHint.Range, "1,6,0.05")] public float PixelFarScale { get; set; } = 2.2f;
+
+    /// <summary>Distance at which the grid starts getting finer.</summary>
+    [Export(PropertyHint.Range, "0.5,40,0.5")] public float PixelNearDistance { get; set; } = 3f;
+
+    /// <summary>Distance at which the grid reaches its finest.</summary>
+    [Export(PropertyHint.Range, "2,200,1")] public float PixelFarDistance { get; set; } = 22f;
+
+    /// <summary>
+    /// Discrete grid sizes between near and far. The ramp is quantized rather
+    /// than continuous: a grid that changes smoothly with depth slides its
+    /// pixel boundaries as the camera moves and the whole image shimmers.
+    /// </summary>
+    [Export(PropertyHint.Range, "1,12,1")] public int PixelDistanceSteps { get; set; } = 4;
 
     [ExportGroup("Dither")]
     [Export] public bool DitherEnabled { get; set; }
@@ -98,6 +131,12 @@ public partial class StylizedFilter : MeshInstance3D
 
         _material.SetShaderParameter("pixelate_enabled", pixelate);
         _material.SetShaderParameter("pixel_resolution", PixelResolution);
+        _material.SetShaderParameter("pixelate_sky", PixelateSky);
+        _material.SetShaderParameter("sky_depth", SkyDepth);
+        _material.SetShaderParameter("pixel_far_scale", PixelFarScale);
+        _material.SetShaderParameter("pixel_near_distance", PixelNearDistance);
+        _material.SetShaderParameter("pixel_far_distance", PixelFarDistance);
+        _material.SetShaderParameter("pixel_distance_steps", PixelDistanceSteps);
 
         _material.SetShaderParameter("dither_enabled", dither);
         _material.SetShaderParameter("dither_strength", DitherStrength);
