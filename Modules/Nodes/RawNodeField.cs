@@ -23,6 +23,21 @@ namespace GameBase.Nodes;
 /// Everything here is a pure function of position and seed: no state, no
 /// allocation, no neighbour queries.
 /// </summary>
+/// <summary>
+/// A smooth vector field over the world, for bending growth contests toward
+/// the shape of the land.
+///
+/// Implemented by whatever knows the terrain — <see cref="TopsoilNode"/> owns
+/// one — and consumed by <see cref="RawNodeField"/> when deciding who wins a
+/// shared feature. It must be a pure function of position, like everything
+/// else in the contest, or two nodes could disagree about a feature they share.
+/// </summary>
+public interface ITerrainFlow
+{
+    /// <summary>The terrain direction at a lattice position.</summary>
+    Vector3 FlowAt(Vector3I lattice);
+}
+
 public sealed class RawNodeField
 {
     private readonly int _seed;
@@ -39,13 +54,38 @@ public sealed class RawNodeField
     /// <param name="growth">0..1, how many contests are awarded at all. At 0
     /// no edge or corner moves and nodes stay plain cubes; at 1 every one is
     /// claimed by somebody. Middling values leave some rims flat.</param>
-    public RawNodeField(int seed, float scale = 6f, float roughness = 0.35f, float growth = 0.7f)
+    /// <param name="terrain">Optional terrain field the growth flow is bent
+    /// toward. See <see cref="_terrainBias"/>.</param>
+    /// <param name="terrainBias">How strongly to bend. 0 leaves the flow purely
+    /// noise, as bismuth wants; higher makes rims march along the land.</param>
+    public RawNodeField(int seed, float scale = 6f, float roughness = 0.35f,
+        float growth = 0.7f, ITerrainFlow terrain = null, float terrainBias = 0f)
     {
         _seed = seed;
         _frequency = 1f / Mathf.Max(scale, 0.5f);
         _roughness = Mathf.Clamp(roughness, 0f, 1f);
         _growth = Mathf.Clamp(growth, 0f, 1f);
+        _terrain = terrain;
+        _terrainBias = Mathf.Max(terrainBias, 0f);
     }
+
+    /// <summary>
+    /// The terrain the growth flow is bent toward, if any.
+    ///
+    /// Contests decide which node owns each shared edge and corner, and the
+    /// flow is what decides them. Left to noise alone the rims march in
+    /// crystal currents, which is right for bismuth and wrong for soil — soil
+    /// shaped that way reads as another kind of rock however its surface is
+    /// cut.
+    ///
+    /// Bending the flow toward the land makes the rims follow the slope
+    /// instead. Crucially this is a property of the FEATURE, not of the
+    /// material: every node touching a feature bends the same flow by the same
+    /// amount and still reaches the same verdict, so soil and rock continue to
+    /// interlock exactly.
+    /// </summary>
+    private readonly ITerrainFlow _terrain;
+    private readonly float _terrainBias;
 
     // Winners memoized per lattice feature. Each corner is shared by 8 nodes
     // and each edge by 4, so meshing a region re-asks the same question 4-8
@@ -243,6 +283,14 @@ public sealed class RawNodeField
             Value(x, y, z, kind * 7u + 1u),
             Value(x + 31.4f, y - 17.9f, z + 5.3f, kind * 7u + 2u),
             Value(x - 11.7f, y + 23.1f, z - 3.8f, kind * 7u + 3u));
+
+        // Bend toward the land, when a terrain field is supplied. The bias is
+        // added rather than replacing the noise so rims still wander; at bias
+        // 1 the terrain is as strong as the noise, and the currents run along
+        // the slope rather than across it.
+        if (_terrain != null && _terrainBias > 0f)
+            v += _terrain.FlowAt(lattice) * _terrainBias;
+
         return v.LengthSquared() < 1e-8f ? Vector3.Up : v.Normalized();
     }
 

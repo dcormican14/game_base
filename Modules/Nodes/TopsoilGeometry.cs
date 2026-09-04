@@ -93,10 +93,29 @@ public static class TopsoilGeometry
         /// </summary>
         public readonly Vector3I Flow;
 
-        public Mask(RawNodeGeometry.Mask raw, Vector3I flow)
+        /// <summary>
+        /// Where the cut plane sits, in quarter-cells from this node's centre
+        /// along the field line. Positive pushes it deeper, negative raises it.
+        ///
+        /// This is what makes the surface span nodes instead of restarting in
+        /// each one. Without it every node cuts at the same place relative to
+        /// ITSELF, so the facets are flat within a node and step at every
+        /// boundary — measured, 1665 of 3944 adjacent sub-columns stepped.
+        /// Offsetting by how much deeper the field says this node sits lets
+        /// neighbouring facets meet at the same world height and join into one
+        /// continuous surface.
+        ///
+        /// Quantised to whole quarter-cells because that is the resolution the
+        /// geometry has; the shape cache keys on it, so a hillside still reuses
+        /// a handful of meshes.
+        /// </summary>
+        public readonly int Phase;
+
+        public Mask(RawNodeGeometry.Mask raw, Vector3I flow, int phase)
         {
             Raw = raw;
             Flow = flow;
+            Phase = phase;
         }
     }
 
@@ -105,10 +124,14 @@ public static class TopsoilGeometry
     private static readonly Dictionary<(int, int), int[]> _occupancyCache = new();
     private static readonly object _lock = new();
 
-    private static (int Raw, int Flow) KeyOf(in Mask mask) => (
+    /// <summary>How far either way the cut plane may be shifted.</summary>
+    public const int MaxPhase = Sub;
+
+    private static (int Raw, int FlowAndPhase) KeyOf(in Mask mask) => (
         mask.Raw.Corners << 12 | mask.Raw.Edges,
-        (mask.Flow.X + FlowSteps) * 25 + (mask.Flow.Y + FlowSteps) * 5
-            + mask.Flow.Z + FlowSteps);
+        ((mask.Flow.X + FlowSteps) * 25 + (mask.Flow.Y + FlowSteps) * 5
+            + mask.Flow.Z + FlowSteps) * (MaxPhase * 2 + 1)
+            + mask.Phase + MaxPhase);
 
     /// <summary>The meshed shape for a mask, built once and cached.</summary>
     public static NodeMesh Get(in Mask mask)
@@ -204,11 +227,12 @@ public static class TopsoilGeometry
         if (!RawNodeGeometry.Occupies(mask.Raw, i, j, k))
             return false;
 
-        // Omit what lies far enough opposite the field line. `along` is the
-        // signed projection already, so this is a plane cut perpendicular to
-        // the field line — which is what makes the surface a facet lying
-        // across the slope rather than a per-column staircase.
-        return -along <= CutThreshold;
+        // Omit what lies far enough opposite the field line, with the plane
+        // shifted by this node's phase so it lands at the same WORLD height as
+        // its neighbours'. `along` is the signed projection already, so this is
+        // a plane cut perpendicular to the field line — a facet lying across
+        // the slope, joined to the facets either side of it.
+        return -along + mask.Phase <= CutThreshold;
     }
 
     /// <summary>Is this the untouchable central 2x2x2?</summary>

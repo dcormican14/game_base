@@ -31,9 +31,20 @@ public sealed class RawNode : INodeType
     /// runs directionally; 1 makes contests random and the crystal chaotic.</param>
     /// <param name="growth">How many edge and corner contests are awarded at
     /// all. 0 leaves every rim flat (plain cubes); 1 claims every one.</param>
-    public RawNode(int seed, float flowScale = 6f, float roughness = 0.35f, float growth = 0.7f)
+    /// <param name="terrain">The world's terrain field, bending the growth
+    /// contests toward the shape of the land.</param>
+    /// <param name="terrainBias">How strongly to bend. MUST match what every
+    /// other type in the world uses: a lattice feature is shared between
+    /// neighbouring nodes, and the two only interlock because they compute the
+    /// same winner from the same flow. A rock node biasing differently from
+    /// the soil node beside it would have them disagree about who owns the
+    /// space between them.</param>
+    public RawNode(int seed, float flowScale = 6f, float roughness = 0.35f,
+        float growth = 0.7f, TerrainField terrain = null,
+        float terrainBias = TerrainField.ContestBias)
     {
-        _field = new RawNodeField(seed, flowScale, roughness, growth);
+        _field = new RawNodeField(seed, flowScale, roughness, growth,
+            terrain ?? new TerrainField(seed), terrainBias);
     }
 
     public string Id => "raw";
@@ -65,18 +76,45 @@ public static class NodeTypes
     /// <summary>Every type this build knows how to construct, keyed by id.</summary>
     private static readonly Dictionary<string, System.Func<int, float, float, float, INodeType>> Factories = new()
     {
-        ["raw"] = (seed, scale, roughness, growth) => new RawNode(seed, scale, roughness, growth),
+        ["raw"] = (seed, scale, roughness, growth) =>
+            new RawNode(seed, scale, roughness, growth, TerrainFor(seed)),
 
         // Plain cubes ignore every growth dial — the shape has no freedom to
         // spend them on.
         ["plain"] = (_, _, _, _) => new PlainNode(),
 
-        // Topsoil takes the same growth dials as raw, because its lower half
-        // IS a raw node and has to be shaped by the same contests to
-        // interlock with the rock beneath it.
+        // Topsoil takes the same growth dials as raw, because the half of it
+        // that meets the rock IS shaped by the same contests and has to
+        // interlock with what it meets.
         ["topsoil"] = (seed, scale, roughness, growth) =>
-            new TopsoilNode(seed, scale, roughness, growth),
+            new TopsoilNode(seed, scale, roughness, growth, TerrainFor(seed)),
     };
+
+    /// <summary>
+    /// The world's terrain field, one per seed.
+    ///
+    /// Shared deliberately. The field bends every growth contest toward the
+    /// shape of the land, and a lattice feature is shared between neighbouring
+    /// nodes of possibly different materials — they interlock only because
+    /// each computes the same winner from the same flow. Two types holding
+    /// separate fields with the same seed would agree by luck; holding the
+    /// same one, they agree by construction.
+    /// </summary>
+    private static readonly Dictionary<int, TerrainField> Terrains = new();
+    private static readonly object TerrainLock = new();
+
+    private static TerrainField TerrainFor(int seed)
+    {
+        lock (TerrainLock)
+        {
+            if (Terrains.TryGetValue(seed, out TerrainField found))
+                return found;
+
+            var built = new TerrainField(seed);
+            Terrains[seed] = built;
+            return built;
+        }
+    }
 
     /// <summary>Ids in registration order, for an editor dropdown.</summary>
     public static IEnumerable<string> Ids => Factories.Keys;

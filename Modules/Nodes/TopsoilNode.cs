@@ -45,29 +45,40 @@ namespace GameBase.Nodes;
 public sealed class TopsoilNode : INodeType
 {
     private readonly RawNodeField _raw;
-    private readonly int _seed;
-    private readonly float _frequency;
-    private readonly float _terrainWeight;
+    private readonly TerrainField _terrain;
 
     /// <param name="seed">Same seed, same world.</param>
     /// <param name="flowScale">Cells per lobe of the raw growth flow, passed
     /// straight through so the interlock half matches the rock exactly.</param>
     /// <param name="roughness">Raw contest jitter, as above.</param>
     /// <param name="growth">Raw contest count, as above.</param>
-    /// <param name="terrainScale">Cells per lobe of the terrain term. Large,
-    /// because the field line should follow the shape of a hillside rather
-    /// than wobble per node — at 28 a slope holds its direction for tens of
-    /// nodes.</param>
-    /// <param name="terrainWeight">How strongly terrain tilts the line away
-    /// from straight down. Around 1 lets a steep face turn it fully horizontal
-    /// while leaving flat ground pointing down.</param>
+    /// <param name="terrain">The world's terrain field. Shared with the rock
+    /// so both decide shared features the same way.</param>
+    /// <param name="terrainBias">How strongly the growth contests bend toward
+    /// the land. This is the dial that decides whether soil reads as soil or
+    /// as another kind of crystal.</param>
     public TopsoilNode(int seed, float flowScale = 6f, float roughness = 0.35f,
-        float growth = 0.7f, float terrainScale = 28f, float terrainWeight = 1.1f)
+        float growth = 0.7f, TerrainField terrain = null,
+        float terrainBias = TerrainField.ContestBias)
     {
-        _raw = new RawNodeField(seed, flowScale, roughness, growth);
-        _seed = seed;
-        _frequency = 1f / Mathf.Max(terrainScale, 1f);
-        _terrainWeight = Mathf.Max(terrainWeight, 0f);
+        _terrain = terrain ?? new TerrainField(seed);
+
+        // The contests that shape this node are bent toward the land.
+        //
+        // Without this the winners follow the crystal's own noise currents,
+        // and since space must be exactly tiled — a feature this node loses is
+        // always filled by the neighbour that won it, verified exhaustively —
+        // the soil has no way to keep that space back. Its rims therefore
+        // march in the same currents the bismuth does, and it reads as another
+        // kind of rock however its surface is cut. Measured, the contests were
+        // removing 7770 sub-cells of the visible top layer against the field
+        // line's 3984.
+        //
+        // Biasing the flow does not break the interlock, because the bias is a
+        // property of the FEATURE rather than of the material: the rock beside
+        // this node bends the same flow by the same amount at the same lattice
+        // position and reaches the same verdict.
+        _raw = new RawNodeField(seed, flowScale, roughness, growth, _terrain, terrainBias);
     }
 
     public string Id => "topsoil";
@@ -82,9 +93,11 @@ public sealed class TopsoilNode : INodeType
         // quantised field line in the other. Equal handles mean identical
         // geometry, which is what the mesher's per-shape cache requires.
         int a = mask.Raw.Corners << 12 | mask.Raw.Edges;
-        int b = (mask.Flow.X + TopsoilGeometry.FlowSteps) * 25
+        int b = ((mask.Flow.X + TopsoilGeometry.FlowSteps) * 25
             + (mask.Flow.Y + TopsoilGeometry.FlowSteps) * 5
-            + mask.Flow.Z + TopsoilGeometry.FlowSteps;
+            + mask.Flow.Z + TopsoilGeometry.FlowSteps)
+            * (TopsoilGeometry.MaxPhase * 2 + 1)
+            + mask.Phase + TopsoilGeometry.MaxPhase;
         return new NodeShape(a, b);
     }
 
@@ -99,14 +112,17 @@ public sealed class TopsoilNode : INodeType
     {
         var raw = new RawNodeGeometry.Mask(shape.A >> 12, shape.A & 0xFFF);
 
-        int b = shape.B;
         const int steps = TopsoilGeometry.FlowSteps;
-        var flow = new Vector3I(
-            b / 25 - steps,
-            b / 5 % 5 - steps,
-            b % 5 - steps);
+        const int span = TopsoilGeometry.MaxPhase * 2 + 1;
 
-        return new TopsoilGeometry.Mask(raw, flow);
+        int phase = shape.B % span - TopsoilGeometry.MaxPhase;
+        int f = shape.B / span;
+        var flow = new Vector3I(
+            f / 25 - steps,
+            f / 5 % 5 - steps,
+            f % 5 - steps);
+
+        return new TopsoilGeometry.Mask(raw, flow, phase);
     }
 
     /// <summary>
@@ -114,7 +130,37 @@ public sealed class TopsoilNode : INodeType
     /// field line that cuts its surface.
     /// </summary>
     private TopsoilGeometry.Mask MaskFor(Vector3I cell) =>
-        new(_raw.MaskFor(cell), FlowAt(cell));
+        new(_raw.MaskFor(cell), FlowAt(cell), PhaseAt(cell));
+
+    /// <summary>
+    /// Where this node's cut plane sits, relative to its own centre, so that
+    /// the plane lands at the same place in the WORLD as its neighbours'.
+    ///
+    /// The surface is one continuous sheet through the terrain: the level set
+    /// where burial crosses a fixed value. A node cutting at a plane fixed to
+    /// its own centre restarts that sheet in every cell, which is why the
+    /// facets used to be flat within a node and step at every boundary. The
+    /// burial value at the node's centre says how far this node sits from the
+    /// sheet, and shifting the plane by that much puts every node's facet back
+    /// on the one surface.
+    ///
+    /// Scaled into quarter-cells and rounded, because that is the resolution
+    /// the geometry can express — and rounding is what keeps the number of
+    /// distinct shapes small enough to cache.
+    /// </summary>
+    private int PhaseAt(Vector3I cell)
+    {
+        // How far this cell sits from the surface, in cells, along the field
+        // line. Burial rises going down at one unit per cell of depth (the
+        // field's own scaling), so the raw value is already a distance.
+        float depth = _terrain.SurfaceOffset(cell);
+
+        // Into quarter-cells, and clamped: beyond a node's own extent the
+        // plane no longer intersects it and the shape saturates to solid or
+        // empty, so there is nothing to gain by tracking it further.
+        int phase = Mathf.RoundToInt(depth * TopsoilGeometry.Sub);
+        return Mathf.Clamp(phase, -TopsoilGeometry.MaxPhase, TopsoilGeometry.MaxPhase);
+    }
 
     /// <summary>
     /// The field line at a cell, quantised for the shape cache.
@@ -125,27 +171,7 @@ public sealed class TopsoilNode : INodeType
     /// </summary>
     private Vector3I FlowAt(Vector3I cell)
     {
-        float east = Buried(cell.X + 1, cell.Y, cell.Z);
-        float west = Buried(cell.X - 1, cell.Y, cell.Z);
-        float up = Buried(cell.X, cell.Y + 1, cell.Z);
-        float down = Buried(cell.X, cell.Y - 1, cell.Z);
-        float north = Buried(cell.X, cell.Y, cell.Z + 1);
-        float south = Buried(cell.X, cell.Y, cell.Z - 1);
-
-        // The gradient points toward MORE buried, which is into the surface —
-        // so unlike an ordinary height gradient it is used as-is rather than
-        // negated.
-        var flow = new Vector3(east - west, up - down, north - south);
-
-        float length = flow.Length();
-        if (length < 0.0001f)
-        {
-            // Degenerate: no direction at all. Straight down is what flat
-            // ground means.
-            return new Vector3I(0, -TopsoilGeometry.FlowSteps, 0);
-        }
-
-        flow /= length;
+        Vector3 flow = _terrain.FlowAt(cell);
 
         const int steps = TopsoilGeometry.FlowSteps;
         var quantised = new Vector3I(
@@ -162,24 +188,4 @@ public sealed class TopsoilNode : INodeType
         return quantised;
     }
 
-    /// <summary>
-    /// How deeply buried a point is — the scalar whose gradient is the field
-    /// line. Higher means further into solid ground.
-    ///
-    /// The downward bias is what makes the line point straight down on flat
-    /// ground; the noise term is what tilts it into a hillside. Their ratio
-    /// decides whether slopes roll or terrace.
-    /// </summary>
-    private float Buried(int x, int y, int z)
-    {
-        // Burial: lower is deeper, so descending y raises the value. Scaled by
-        // the same frequency as the terrain term so the two are commensurate
-        // and the weight below means what it says.
-        float burial = -y * _frequency;
-
-        var at = new Vector3(x * _frequency, y * _frequency, z * _frequency);
-        float terrain = DensityNoise.Fbm(at, _seed + 9187, 3);
-
-        return burial + terrain * _terrainWeight;
-    }
 }
