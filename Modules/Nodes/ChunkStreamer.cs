@@ -58,14 +58,14 @@ public abstract partial class ChunkStreamer : Node
     /// 8 is over 2000.
     /// </summary>
     [Export(PropertyHint.Range, "1,24,1")]
-    public int LoadRadius { get; set; } = 6;
+    public int LoadRadius { get; set; } = 3;
 
     /// <summary>
     /// How far a chunk must be before it is dropped, in chunks. Must exceed
     /// <see cref="LoadRadius"/>, or a chunk on the boundary thrashes.
     /// </summary>
     [Export(PropertyHint.Range, "2,32,1")]
-    public int UnloadRadius { get; set; } = 8;
+    public int UnloadRadius { get; set; } = 5;
 
     /// <summary>
     /// Chunks whose data is generated per frame.
@@ -100,7 +100,19 @@ public abstract partial class ChunkStreamer : Node
     /// target crosses into a new chunk.
     /// </summary>
     [Export(PropertyHint.Range, "1,64,1")]
-    public int RescanAfterCells { get; set; } = 8;
+    public int RescanAfterCells { get; set; } = NodeChunkStore.ChunkSize / 2;
+
+    /// <summary>
+    /// Most chunks to keep queued at once, nearest first.
+    ///
+    /// A backlog longer than the workers can clear before the next rescan is
+    /// not throughput, it is latency: the far end of it is terrain the player
+    /// will have left before it is built. Bounding it keeps the queue a
+    /// picture of what is wanted now rather than a record of everything ever
+    /// asked for.
+    /// </summary>
+    [Export(PropertyHint.Range, "8,512,1")]
+    public int QueueLimit { get; set; } = 64;
 
     protected Node3D Target;
 
@@ -256,8 +268,18 @@ public abstract partial class ChunkStreamer : Node
         }
 
         // Anything still queued but now out of range is work nobody wants.
-        _toGenerate.RemoveAll(c => ChunkDistance(c, centre) > unload);
-        _toMesh.RemoveAll(c => ChunkDistance(c, centre) > unload);
+        //
+        // Dropping these from _queued as well as from the lists is what makes
+        // the streamer recoverable. _queued exists to stop a chunk being
+        // enqueued twice; a chunk removed from a list but left in that set is
+        // marked as pending forever and can never be asked for again. Walking
+        // away from an area and back used to leave a growing set of chunks in
+        // exactly that state — the world emptied to a handful of chunks while
+        // the pending count sat stuck in the hundreds, which is the bug behind
+        // terrain thinning out as you travel.
+
+        DropOutOfRange(_toGenerate, centre, unload);
+        DropOutOfRange(_toMesh, centre, unload);
 
         // One chunk PAST the load radius is generated but never meshed.
         //
@@ -313,6 +335,59 @@ public abstract partial class ChunkStreamer : Node
             SquareDistance(a, centre).CompareTo(SquareDistance(b, centre)));
         _toMesh.Sort((a, b) =>
             SquareDistance(a, centre).CompareTo(SquareDistance(b, centre)));
+
+        // Keep only the nearest QueueLimit. The queue used to hold every chunk
+        // of the ball at once — hundreds of them, most of which the player had
+        // moved away from long before a worker reached them, so the streamer
+        // spent its time generating terrain that was stale on arrival while
+        // the ground underfoot waited behind it.
+        //
+        // Nothing is lost by forgetting the far ones: the rescan re-derives
+        // the whole ball from the player's position every time, so a chunk
+        // dropped here is simply re-offered when it matters. What the limit
+        // buys is that the work in flight is always work that is still wanted.
+        Trim(_toGenerate, QueueLimit);
+        Trim(_toMesh, QueueLimit);
+    }
+
+    /// <summary>
+    /// Keeps the first `limit` entries of an already-sorted queue and un-marks
+    /// the rest so a later rescan can offer them again.
+    /// </summary>
+    private void Trim(List<Vector3I> queue, int limit)
+    {
+        if (limit <= 0 || queue.Count <= limit)
+            return;
+
+        for (int i = limit; i < queue.Count; i++)
+        {
+            Vector3I chunk = queue[i];
+            if (!_inFlight.Contains(chunk))
+                _queued.Remove(chunk);
+        }
+
+        queue.RemoveRange(limit, queue.Count - limit);
+    }
+
+    /// <summary>
+    /// Removes chunks beyond `limit` from a queue, and un-marks them so they
+    /// can be requested again if the player returns.
+    /// </summary>
+    private void DropOutOfRange(List<Vector3I> queue, Vector3I centre, int limit)
+    {
+        for (int i = queue.Count - 1; i >= 0; i--)
+        {
+            Vector3I chunk = queue[i];
+            if (ChunkDistance(chunk, centre) <= limit)
+                continue;
+
+            queue.RemoveAt(i);
+
+            // Only un-mark chunks nothing else is still tracking: one being
+            // generated right now is legitimately queued until it lands.
+            if (!_inFlight.Contains(chunk))
+                _queued.Remove(chunk);
+        }
     }
 
     private static int ChunkDistance(Vector3I chunk, Vector3I centre)
@@ -328,12 +403,45 @@ public abstract partial class ChunkStreamer : Node
     }
 
     /// <summary>
-    /// Worker threads generating chunk data. 0 uses one fewer than the machine
-    /// has cores, leaving one for the main thread — which still has to mesh,
-    /// drive physics and render.
+    /// Worker threads generating chunk data. 0 picks a share of the machine
+    /// (see <see cref="ThreadBudget"/>).
+    ///
+    /// This used to default to every core but one, on the reasoning that
+    /// generation is the bottleneck so it should have the machine. That is
+    /// true and still the wrong thing to do: a game is a guest on the player's
+    /// desktop, and saturating 23 of 24 hardware threads with uninterruptible
+    /// noise evaluation starves everything else they are running — video
+    /// stutters, the compositor drops frames, fans spin up. A background
+    /// loader has no business being the heaviest process on the machine.
     /// </summary>
     [Export(PropertyHint.Range, "0,32,1")]
     public int WorkerThreads { get; set; }
+
+    /// <summary>
+    /// Share of the machine's threads to use when <see cref="WorkerThreads"/>
+    /// is 0.
+    ///
+    /// A quarter, capped: enough to keep several chunks in flight, few enough
+    /// that the rest of the machine stays responsive. The cap matters more
+    /// than the fraction on a big machine — a 24-thread desktop does not want
+    /// six background threads any more than it wants twenty-three.
+    /// </summary>
+    [Export(PropertyHint.Range, "0.1,1,0.05")]
+    public float ThreadBudget { get; set; } = 0.25f;
+
+    /// <summary>Most workers to run whatever the machine's size.</summary>
+    [Export(PropertyHint.Range, "1,16,1")]
+    public int MaxWorkers { get; set; } = 4;
+
+    /// <summary>How many worker threads to actually run.</summary>
+    private int ThreadCount()
+    {
+        if (WorkerThreads > 0)
+            return WorkerThreads;
+
+        int share = Mathf.FloorToInt(System.Environment.ProcessorCount * ThreadBudget);
+        return Mathf.Clamp(share, 1, Mathf.Max(1, MaxWorkers));
+    }
 
     /// <summary>One chunk generated and waiting to be installed.</summary>
     private readonly struct Generated
@@ -363,6 +471,7 @@ public abstract partial class ChunkStreamer : Node
     /// <summary>How many workers are running right now.</summary>
     private int _running;
 
+
     /// <summary>
     /// Bumped whenever the world this streamer describes changes, so results
     /// from work started against the old one are discarded rather than
@@ -379,9 +488,7 @@ public abstract partial class ChunkStreamer : Node
     /// </summary>
     private void DispatchGeneration()
     {
-        int threads = WorkerThreads > 0
-            ? WorkerThreads
-            : Mathf.Max(1, System.Environment.ProcessorCount - 1);
+        int threads = ThreadCount();
 
         while (_running < threads && _toGenerate.Count > 0)
         {
@@ -396,6 +503,23 @@ public abstract partial class ChunkStreamer : Node
 
             System.Threading.Tasks.Task.Run(() =>
             {
+                // Below normal priority, so the operating system hands the CPU
+                // to anything the player is actually interacting with first.
+                // Chunk generation is background work by nature — it has a
+                // deadline measured in seconds, not frames — and dropping the
+                // priority costs it almost nothing on an idle machine while
+                // making it yield promptly on a busy one.
+                System.Threading.Thread current = System.Threading.Thread.CurrentThread;
+                System.Threading.ThreadPriority was = current.Priority;
+                try
+                {
+                    current.Priority = System.Threading.ThreadPriority.BelowNormal;
+                }
+                catch (System.Exception)
+                {
+                    // Priority is advisory and some platforms refuse it.
+                }
+
                 // A buffer per job rather than one shared scratch: workers run
                 // concurrently, and the array is handed straight to the store
                 // on completion, so it could not be reused anyway.
@@ -422,6 +546,16 @@ public abstract partial class ChunkStreamer : Node
 
                     _running--;
                 }
+
+                // Thread-pool threads are reused, so the priority has to go
+                // back or it would leak onto whatever runs next.
+                try
+                {
+                    current.Priority = was;
+                }
+                catch (System.Exception)
+                {
+                }
             });
         }
     }
@@ -447,6 +581,12 @@ public abstract partial class ChunkStreamer : Node
             }
 
             _inFlight.Remove(done.Chunk);
+
+            // Unloaded while it was being generated — the player moved away.
+            // The result is stale; dropping the mark lets it be asked for
+            // again if they come back.
+            if (!_queued.Contains(done.Chunk))
+                continue;
 
             if (done.Solid == 0)
             {
@@ -516,7 +656,6 @@ public abstract partial class ChunkStreamer : Node
             }
 
             MeshOne(chunk);
-
             meshed++;
             if (Time.GetTicksMsec() >= deadline)
                 break;
