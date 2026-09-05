@@ -29,10 +29,11 @@ namespace GameBase.Nodes;
 /// of which are wrong if shape is order-dependent or if space is not tiled.
 /// </summary>
 /// <summary>
-/// The six face directions, as bit positions in a neighbour mask.
+/// The directions a node's neighbours lie in, as bit positions in a neighbour
+/// mask: the six faces first, then the four horizontal diagonals.
 ///
-/// Ordered so the opposite of a face is its index XOR 1, which is what lets a
-/// shape mirror itself without a lookup table.
+/// Faces are ordered so the opposite of a face is its index XOR 1, which is
+/// what lets a shape mirror itself without a lookup table.
 /// </summary>
 public static class NodeFace
 {
@@ -43,15 +44,32 @@ public static class NodeFace
     public const int NegZ = 4;
     public const int PosZ = 5;
 
-    /// <summary>The six directions, indexed by the constants above.</summary>
+    // The four horizontal DIAGONALS, after the faces.
+    //
+    // A surface material needs these as well as the faces. Where two soil
+    // nodes meet a diagonal that is air, each of them bevels the edge running
+    // toward the node between them — and that node, whose four faces are all
+    // soil, has to cut the corner where those two lines arrive or they stop
+    // dead at its boundary.
+    public const int NegXNegZ = 6;
+    public const int NegXPosZ = 7;
+    public const int PosXNegZ = 8;
+    public const int PosXPosZ = 9;
+
+    /// <summary>How many directions a neighbour mask covers.</summary>
+    public const int Count = 10;
+
+    /// <summary>The directions, indexed by the constants above.</summary>
     public static readonly Vector3I[] Offsets =
     {
         new(-1, 0, 0), new(1, 0, 0),
         new(0, -1, 0), new(0, 1, 0),
         new(0, 0, -1), new(0, 0, 1),
+        new(-1, 0, -1), new(-1, 0, 1),
+        new(1, 0, -1), new(1, 0, 1),
     };
 
-    /// <summary>Is the neighbour on this face solid?</summary>
+    /// <summary>Is the neighbour in this direction solid?</summary>
     public static bool Has(int mask, int face) => (mask & 1 << face) != 0;
 }
 
@@ -93,9 +111,9 @@ public interface INodeType
     /// shape stays a pure function of its inputs, so it remains cacheable and
     /// safe to evaluate on any thread in any order.
     ///
-    /// `neighbours` is a bitmask indexed by <see cref="NodeFace"/>. The default
-    /// implementation ignores it, so a type whose shape owes nothing to its
-    /// surroundings needs no changes.
+    /// `neighbours` is a bitmask indexed by <see cref="NodeFace"/> — six faces
+    /// and four horizontal diagonals. The default implementation ignores it, so
+    /// a type whose shape owes nothing to its surroundings needs no changes.
     /// </summary>
     NodeShape ShapeAt(Vector3I cell, int neighbours) => ShapeAt(cell);
 
