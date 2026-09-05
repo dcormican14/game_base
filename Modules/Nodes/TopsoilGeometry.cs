@@ -43,6 +43,19 @@ namespace GameBase.Nodes;
 /// those six neighbours to cull buried faces, so it hands over what it has and
 /// nothing extra is fetched. Sixty-four masks is the entire geometry set.
 ///
+/// FLAT GROUND STILL NEEDS RELIEF
+///
+/// The rule above shapes edges, and an interior node of a plateau has none —
+/// every side faces soil, so it came out a full cube and the middle of a
+/// plateau was one unbroken slab. Nothing derived from the neighbour mask can
+/// fix that, because every interior node has the SAME mask and so the same
+/// shape; a field of identical nodes is flat however each one is carved.
+///
+/// So the variation comes from position instead: a hash of the cell picks one
+/// of <see cref="Variants"/> relief patterns, each dimpling a column or two by
+/// a quarter-cell. It applies only where the bevel has not already lowered a
+/// column, so it textures the flat without steepening the slopes.
+///
 /// TILING
 ///
 /// A node never reaches outside its own cell, which tiles by construction —
@@ -85,40 +98,92 @@ public static class TopsoilGeometry
     {
         public readonly int Neighbours;
 
-        public Mask(int neighbours)
+        /// <summary>
+        /// Which of the relief patterns this node wears, 0..Variants-1.
+        ///
+        /// Chosen by hashing the node's position, so it varies from cell to
+        /// cell without anything being looked up. It is what stops the middle
+        /// of a plateau being one unbroken slab: every interior node has the
+        /// same neighbours, so any shape derived from the mask alone is the
+        /// same shape, and a field of identical nodes is flat however they are
+        /// carved.
+        /// </summary>
+        public readonly int Relief;
+
+        public Mask(int neighbours, int relief = 0)
         {
             Neighbours = neighbours;
+            Relief = relief;
         }
     }
 
+    /// <summary>
+    /// How many relief patterns there are to choose between.
+    ///
+    /// Eight. The patterns are a fixed table rather than a per-sub-column hash
+    /// because the mesher caches one mesh per distinct shape: hashing every
+    /// sub-column gave 2934 distinct patterns over 3600 nodes — near enough
+    /// one per node — which defeats the cache entirely. Eight keeps the whole
+    /// geometry set at 64 neighbour masks times 8, and at quarter-cell scale
+    /// the repeat is not visible.
+    /// </summary>
+    public const int Variants = 8;
+
+    /// <summary>
+    /// The relief patterns, as bitmasks over the node's 4x4 top columns
+    /// indexed i * Sub + k. A set bit means that column is dimpled one
+    /// quarter-cell.
+    ///
+    /// Sparse on purpose — one or two dimples each. The point is to break a
+    /// flat expanse up, not to roughen it: more than a couple per node and the
+    /// ground reads as gravel rather than as soil.
+    /// </summary>
+    private static readonly int[] ReliefPatterns =
+    {
+        0,
+        1 << (1 * Sub + 1),
+        1 << (2 * Sub + 2),
+        1 << (0 * Sub + 2) | 1 << (3 * Sub + 1),
+        1 << (1 * Sub + 3) | 1 << (2 * Sub + 0),
+        1 << (0 * Sub + 0),
+        1 << (3 * Sub + 3) | 1 << (1 * Sub + 1),
+        1 << (2 * Sub + 1),
+    };
+
     // 64 shapes, built on demand and kept. Small enough to build up front;
     // done lazily only to keep startup free of work a world may never need.
-    private static readonly NodeMesh[] _meshes = new NodeMesh[64];
-    private static readonly int[][] _occupancy = new int[64][];
+    private static readonly NodeMesh[] _meshes = new NodeMesh[64 * Variants];
+    private static readonly int[][] _occupancy = new int[64 * Variants][];
     private static readonly object _lock = new();
 
     /// <summary>The meshed shape for a mask, built once and cached.</summary>
     public static NodeMesh Get(in Mask mask)
     {
-        int key = mask.Neighbours & 63;
+        int key = KeyOf(mask);
         lock (_lock)
         {
-            return _meshes[key] ??= Build(new Mask(key));
+            return _meshes[key] ??= Build(FromKey(key));
         }
     }
+
+    /// <summary>The cache slot for a mask: neighbours and relief together.</summary>
+    private static int KeyOf(in Mask mask) =>
+        (mask.Neighbours & 63) * Variants + Mathf.PosMod(mask.Relief, Variants);
+
+    private static Mask FromKey(int key) => new(key / Variants, key % Variants);
 
     /// <summary>The quarter-cells this shape fills, as flat (i,j,k) triples in
     /// node-local coordinates.</summary>
     public static int[] OccupiedCells(in Mask mask)
     {
-        int key = mask.Neighbours & 63;
+        int key = KeyOf(mask);
         lock (_lock)
         {
             if (_occupancy[key] != null)
                 return _occupancy[key];
 
             var list = new List<int>(Sub * Sub * Sub * 3);
-            var local = new Mask(key);
+            Mask local = FromKey(key);
             for (int i = 0; i < Sub; i++)
                 for (int j = 0; j < Sub; j++)
                     for (int k = 0; k < Sub; k++)
@@ -198,8 +263,20 @@ public static class TopsoilGeometry
         // the column up, but a node may not grow past its own ceiling — the
         // cell above belongs to whatever is up there — so the rise is already
         // at the cap.
+        // Relief, on columns the bevel has left at full height.
+        //
+        // Only there: a bevelled column is already down, and dimpling it again
+        // would deepen the slope rather than texture the flat, turning the
+        // graded edge into a cliff.
+        if (drop == 0 && Dimpled(mask.Relief, i, k))
+            drop = 1;
+
         return Mathf.Max(Sub - drop, 1);
     }
+
+    /// <summary>Does this node's relief pattern dimple column (i,k)?</summary>
+    private static bool Dimpled(int relief, int i, int k) =>
+        (ReliefPatterns[Mathf.PosMod(relief, Variants)] & 1 << (i * Sub + k)) != 0;
 
     /// <summary>
     /// How far one side pulls a column down, for a column standing `distance`

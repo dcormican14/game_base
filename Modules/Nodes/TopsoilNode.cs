@@ -1,4 +1,5 @@
 using Godot;
+using GameBase.Density;
 
 namespace GameBase.Nodes;
 
@@ -31,10 +32,14 @@ namespace GameBase.Nodes;
 /// </summary>
 public sealed class TopsoilNode : INodeType
 {
-    /// <param name="seed">Unused — the shape owes nothing to noise. Accepted
-    /// so the type constructs like every other one in the registry.</param>
+    private readonly int _seed;
+
+    /// <param name="seed">Picks which relief pattern each cell wears, so two
+    /// worlds with different seeds dimple their flat ground differently. The
+    /// bevel and step owe nothing to it.</param>
     public TopsoilNode(int seed = 0)
     {
+        _seed = seed;
     }
 
     public string Id => "topsoil";
@@ -46,9 +51,23 @@ public sealed class TopsoilNode : INodeType
     /// open sky on every side — the shape a lone node placed in mid-air should
     /// have. The mesher always calls the overload below.
     /// </summary>
-    public NodeShape ShapeAt(Vector3I cell) => new(0);
+    public NodeShape ShapeAt(Vector3I cell) => new(0, ReliefAt(cell));
 
-    public NodeShape ShapeAt(Vector3I cell, int neighbours) => new(neighbours & 63);
+    public NodeShape ShapeAt(Vector3I cell, int neighbours) =>
+        new(neighbours & 63, ReliefAt(cell));
+
+    /// <summary>
+    /// Which relief pattern this cell wears.
+    ///
+    /// Hashed from the position, so it is fixed for a cell, varies from one
+    /// cell to the next, and costs one multiply-and-shift with nothing looked
+    /// up. This is the only part of a topsoil node's shape that comes from
+    /// where it IS rather than from what is around it — and it has to, because
+    /// every node in the middle of a plateau has identical neighbours and
+    /// would otherwise take an identical shape.
+    /// </summary>
+    private int ReliefAt(Vector3I cell) =>
+        (int)(DensityNoise.Hash(cell.X, cell.Y, cell.Z, _seed) % TopsoilGeometry.Variants);
 
     public NodeMesh MeshFor(NodeShape shape) => TopsoilGeometry.Get(ToMask(shape));
 
@@ -57,5 +76,5 @@ public sealed class TopsoilNode : INodeType
     public bool Occupies(NodeShape shape, int i, int j, int k) =>
         TopsoilGeometry.Occupies(ToMask(shape), i, j, k);
 
-    private static TopsoilGeometry.Mask ToMask(NodeShape shape) => new(shape.A);
+    private static TopsoilGeometry.Mask ToMask(NodeShape shape) => new(shape.A, shape.B);
 }
