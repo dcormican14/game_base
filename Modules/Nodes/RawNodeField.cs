@@ -100,7 +100,47 @@ public sealed class RawNodeField
     /// on what has been placed, so a node dropped into empty space mid-game
     /// gets exactly the shape it would have had if generated with the planet.
     /// </summary>
+    /// <summary>
+    /// Shapes already solved, keyed by cell.
+    ///
+    /// A node's mask costs twenty contests — eight corners and twelve edges —
+    /// and the mesher asks for the same cells over and over: once per node
+    /// while building a chunk's occupancy window, again while walking the
+    /// chunk itself, and again for every neighbouring chunk whose window
+    /// overlaps. Measured, redrawing the two chunks a single mined node
+    /// touches came to 3.2 million contest lookups.
+    ///
+    /// The answer never changes — it is a pure function of the cell and the
+    /// seed — so it is worth remembering. Bounded by trimming when it grows
+    /// past <see cref="MaskCacheLimit"/>, since the world is endless and the
+    /// player keeps moving.
+    /// </summary>
+    private readonly System.Collections.Generic.Dictionary<Vector3I, RawNodeGeometry.Mask>
+        _masks = new();
+
+    /// <summary>
+    /// How many solved shapes to keep. Roughly the nodes in the handful of
+    /// chunks an edit or a mesh job touches, with room to spare; past that the
+    /// cache is cleared wholesale rather than evicted one at a time, which
+    /// costs one re-solve for the cells still in use and needs no bookkeeping.
+    /// </summary>
+    private const int MaskCacheLimit = 1 << 18;
+
     public RawNodeGeometry.Mask MaskFor(Vector3I cell)
+    {
+        if (_masks.TryGetValue(cell, out RawNodeGeometry.Mask cachedMask))
+            return cachedMask;
+
+        RawNodeGeometry.Mask solved = Solve(cell);
+
+        if (_masks.Count >= MaskCacheLimit)
+            _masks.Clear();
+
+        _masks[cell] = solved;
+        return solved;
+    }
+
+    private RawNodeGeometry.Mask Solve(Vector3I cell)
     {
         int corners = 0;
         for (int c = 0; c < 8; c++)

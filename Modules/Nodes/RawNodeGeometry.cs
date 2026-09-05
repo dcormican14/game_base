@@ -88,12 +88,13 @@ public static class RawNodeGeometry
 
     // Shapes are cached on demand rather than enumerated: 2^20 combinations
     // exist in principle, but a given world uses a small, repeating subset.
-    private static readonly Dictionary<int, NodeMesh> _cache = new();
-    private static readonly object _lock = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, NodeMesh>
+        _cache = new();
 
     // Occupied quarter-cells per shape, cached alongside the meshes so the
     // world's occupancy set can be stamped in without re-deriving ownership.
-    private static readonly Dictionary<int, int[]> _occupancyCache = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, int[]>
+        _occupancyCache = new();
 
     /// <summary>
     /// The quarter-cells this shape occupies, as flat (i,j,k) triples in
@@ -103,40 +104,42 @@ public static class RawNodeGeometry
     public static int[] OccupiedCells(Mask mask)
     {
         int key = mask.Corners << 12 | mask.Edges;
-        lock (_lock)
-        {
-            if (_occupancyCache.TryGetValue(key, out int[] cached))
-                return cached;
 
-            var list = new List<int>(96);
-            for (int i = Lo; i < Hi; i++)
-                for (int j = Lo; j < Hi; j++)
-                    for (int k = Lo; k < Hi; k++)
-                        if (Occupies(mask, i, j, k))
-                        {
-                            list.Add(i);
-                            list.Add(j);
-                            list.Add(k);
-                        }
+        // Read without a lock. This is asked once per node of every chunk
+        // meshed — 46656 times for one chunk's occupancy window alone — and
+        // taking a lock on each was a measurable share of the cost of a single
+        // mined node. Two threads racing to build the same shape both get the
+        // right answer and one of them wins the write, which is harmless: the
+        // value is a pure function of the key.
+        if (_occupancyCache.TryGetValue(key, out int[] cached))
+            return cached;
 
-            int[] built = list.ToArray();
-            _occupancyCache[key] = built;
-            return built;
-        }
+        var list = new List<int>(96);
+        for (int i = Lo; i < Hi; i++)
+            for (int j = Lo; j < Hi; j++)
+                for (int k = Lo; k < Hi; k++)
+                    if (Occupies(mask, i, j, k))
+                    {
+                        list.Add(i);
+                        list.Add(j);
+                        list.Add(k);
+                    }
+
+        int[] built = list.ToArray();
+        _occupancyCache[key] = built;
+        return built;
     }
 
     /// <summary>The meshed shape for a mask, built once and cached.</summary>
     public static NodeMesh Get(Mask mask)
     {
         int key = mask.Corners << 12 | mask.Edges;
-        lock (_lock)
-        {
-            if (_cache.TryGetValue(key, out NodeMesh cached))
-                return cached;
-            NodeMesh built = Build(mask);
-            _cache[key] = built;
-            return built;
-        }
+        if (_cache.TryGetValue(key, out NodeMesh cached))
+            return cached;
+
+        NodeMesh built = Build(mask);
+        _cache[key] = built;
+        return built;
     }
 
     /// <summary>Local corner index from its three high/low bits.</summary>
