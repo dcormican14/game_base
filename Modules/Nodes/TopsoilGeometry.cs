@@ -156,52 +156,51 @@ public static class TopsoilGeometry
     /// <summary>
     /// How many quarter-cell layers of soil stand over column (i,k).
     ///
-    /// Starts from a full node and applies each horizontal side's verdict: a
-    /// side facing air bevels its edge down, a side facing ground steps it up.
-    /// A column in a corner is touched by two sides and takes both, so corners
-    /// round and rise consistently with the edges meeting there.
+    /// A full node, minus a bevel wherever the column touches a side that
+    /// faces open air. A column in a corner touches two sides, and one of them
+    /// facing air is enough to bevel it — see below for why that asymmetry is
+    /// the point.
     /// </summary>
     private static int TopHeight(in Mask mask, int i, int k)
     {
-        int height = Sub;
+        // EXPOSURE WINS. A column is bevelled if ANY side it touches faces
+        // open air, whatever the other sides say.
+        //
+        // Applying the sides in turn, each nudging the height, was the bug
+        // behind the row of small divots. Along a hill edge every node has air
+        // in front and soil to both sides, so its front-middle columns
+        // bevelled to 3 while its front-CORNER columns bevelled to 3 and were
+        // then stepped straight back to 4 by the soil beside them. The lip
+        // came out 4-3-3-4 instead of running level, and a row of those reads
+        // as a line of dimples rather than one continuous edge.
+        //
+        // A bevel marks an edge that is open to the sky. Nothing on another
+        // side can close it, so the two effects are decided independently and
+        // exposure takes precedence.
+        bool exposed =
+            Touches(i, NodeFace.NegX, mask.Neighbours, false) ||
+            Touches(Sub - 1 - i, NodeFace.PosX, mask.Neighbours, false) ||
+            Touches(k, NodeFace.NegZ, mask.Neighbours, false) ||
+            Touches(Sub - 1 - k, NodeFace.PosZ, mask.Neighbours, false);
 
-        // How far into the node each side reaches, in quarter-cells from that
-        // face. Only the outermost row is touched, so a bevel takes a corner
-        // off rather than sloping the whole node.
-        height = Apply(height, mask.Neighbours, NodeFace.NegX, i);
-        height = Apply(height, mask.Neighbours, NodeFace.PosX, Sub - 1 - i);
-        height = Apply(height, mask.Neighbours, NodeFace.NegZ, k);
-        height = Apply(height, mask.Neighbours, NodeFace.PosZ, Sub - 1 - k);
+        if (exposed)
+            return Mathf.Max(Sub - Bevel, 1);
 
-        // Never below one layer while the node holds soil at all: the
-        // generator placed this node because there is ground here, and a node
-        // that bevelled itself away on every side would leave a hole in it.
-        return Mathf.Clamp(height, 1, Sub);
+        // Not exposed. A side facing soil would step this column up, but a
+        // node may not grow past its own ceiling — the cell above belongs to
+        // whatever is up there — so the rise is already at the cap.
+        return Sub;
     }
 
     /// <summary>
-    /// Applies one side's verdict to a column standing `distance` quarter-cells
-    /// in from that face.
+    /// Does a column standing `distance` quarter-cells in from `face` touch
+    /// that face, and does the neighbour there match `solid`?
+    ///
+    /// Only the outermost row counts, which is what keeps the bevel a lip
+    /// around the rim rather than a slope across the whole cell.
     /// </summary>
-    private static int Apply(int height, int neighbours, int face, int distance)
-    {
-        // Only the row against the face is affected. Beyond that the column is
-        // the node's own business, which is what keeps the bevel a lip and the
-        // step a stair rather than a ramp across the whole cell.
-        if (distance >= Bevel)
-            return height;
-
-        if (NodeFace.Has(neighbours, face))
-        {
-            // Ground continues this way: rise to meet it. Capped at the cell,
-            // since a node cannot grow past its own top without reaching into
-            // the cell above — which belongs to whatever is up there.
-            return Mathf.Min(height + Step, Sub);
-        }
-
-        // Open air this way: take the top edge off.
-        return height - Bevel;
-    }
+    private static bool Touches(int distance, int face, int neighbours, bool solid) =>
+        distance < Bevel && NodeFace.Has(neighbours, face) == solid;
 
     /// <summary>Builds the mesh for one shape.</summary>
     private static NodeMesh Build(in Mask mask)
