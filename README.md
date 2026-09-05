@@ -16,11 +16,13 @@ another project by copying that folder.
 | `Assets/Characters/` | Character models, one folder per character (Mixamo XBot & YBot dummies) |
 | `Modules/Filters/` | Drop-in screen-space stylization: outlines, pixelation, dither |
 | `Modules/Bismuth/` | `[Tool]` bismuth hopper-crystal blobs — stepped terraces on a jittered tessellation (art-direction prototype for project-infinite-world WP05) |
-| `Modules/Crosshair/` | Centre-screen pixel-art crosshair — 0-4 dashes spread evenly around the centre, fading out toward the tips |
+| `Modules/Crosshair/` | Centre-screen pixel-art crosshair — 0-4 gold dashes spread evenly around the centre, fading out toward the tips, with a two-ring outline |
 | `Modules/Nodes/` | The node world: a global grid whose cells (`nodes`) are shaped by a pluggable `INodeType`. `RawNode` is the raw-bismuth type; chunked meshing |
 | `Modules/NodeLevel/` | `[Tool]` level generator — a rounded pillar of rock with primitive solids scattered on and above its flat top |
+| `Modules/Density/` | The layered density field floating islands are carved from: placement, body profile, side erosion, top relief and caves, plus the plane cuts |
+| `Modules/IslandLevel/` | `[Tool]` level generator — a field of floating islands built from the density map, dark-capped flat tops over jagged tapering undersides. `IslandHorizon` draws the world beyond it as rings of coarser blocks that follow the player |
 | `Modules/LoadingScreen/` | Progress bar shown while the node world meshes; holds the player until collision exists |
-| `Modules/NodeEditor/` | Place/destroy nodes by looking at them; hold to repeat |
+| `Modules/NodeEditor/` | Place/destroy nodes by looking at them; hold to repeat. `NodeHighlight` outlines the targeted node |
 | `Modules/Stats/` | Performance overlay (FPS, frame/physics time, draw calls, tris, VRAM/memory) plus the current movement mode, toggled in Settings -> Video |
 | `Modules/Skybox/` | Deep-space skybox — procedural stars + nebulae placeholder, or your own panorama/sky shader |
 | `Modules/Terrain/` | `[Tool]` procedural "workshop" terrain: flat dark checker floor, box platforms, prism ramps |
@@ -102,10 +104,119 @@ seam to worry about. `SpaceSky.gdshader` is a worked example.
 
 ### Tuning the placeholder
 
-With `Source = Procedural`, the `Placeholder Look` group on the node exposes
-space colour, star density/brightness, and the two nebula colours + intensity.
-More knobs (star size, colour variation, nebula scale and contrast) are
-uniforms in `SpaceSky.gdshader`.
+With `Source = Procedural` the sky is drawn as **pixel art** matching
+`space_pixel_art.jpg`, in three layers that composite in order. Each has its
+own export group and can be dialled to zero independently.
+
+**Everything snaps to a pixel grid.** `PixelGrid` sets the art's pixel size:
+every layer samples at cell centres, so colour is flat across a cell and edges
+land on cell boundaries. Smooth gradients and soft falloff are what made an
+earlier attempt read as airbrushed rather than drawn, so they are deliberately
+absent — the shader uses `step`, never `smoothstep`, for anything visible.
+
+**Layer 1 — Space.** A flat plum ground: the reference's `#28061e` halved
+toward black, i.e. `#14030f`.
+
+**Layer 2 — Nebulae.** Clouds quantized into **three flat tones** with hard
+stepped contours, like a topographic map, plus a muted warm accent on a
+minority of them. They orbit `NebulaAxis` at `NebulaSpin` — the player sits in
+the eye of a very slow hurricane, a full turn taking about nine minutes — and
+`NebulaMorph` reshapes them as they travel so they are not rigid stamps sliding
+past. `NebulaFloor` is a threshold rather than a power curve: `pow()` never
+reaches zero, so at any visible strength it washes the whole dome instead of
+leaving gaps between clouds.
+
+**Layer 3 — Stars.** Colour runs a **three-stop ramp** measured from the
+reference — `#fee1ea` cores, `#ba6976` mid, `#8c445c` faint — rather than one
+colour scaled up and down. The plum shift gets *stronger* as stars dim, which
+is what keeps the field inside the background's palette instead of dusting it
+with white specks. Per-star magnitude is squared and stepped so most stars stay
+faint and only a few reach the core colour.
+
+Three sizes, drawn as the reference draws them:
+
+- **Large** (`StarLargeShare`, ~1%): a 3x3 core, four axis arms that are
+  **exactly one pixel wide** and dozens long, and four shorter **dashed**
+  diagonals — separate pixels with gaps, not solid lines.
+- **Medium** (`StarMediumShare`, ~5%): one pixel plus four arms, either all
+  straight or all diagonal.
+- **Small** (the rest): a single pixel.
+
+Arm brightness steps down in four flat levels rather than fading continuously.
+**Only the small stars twinkle.** On a large star the pulse swings a 3x3 core
+plus eight long arms at once, which reads as the whole sky flashing rather than
+as distant points scintillating; the big stars are landmarks and hold steady.
+
+The field **rotates** at `StarSpin` about the same axis as the nebulae, at a
+third of the gas speed (a full turn in ~26 minutes against the clouds' ~9), so
+the sky drifts as one while the stars clearly lag. The direction is spun
+*before* snapping to the pixel grid, so cells and grid turn together as one
+rigid field instead of stars sliding across a fixed grid.
+
+**Stars sit on a SPHERE, not a cube.** The pixel snapping uses a cube-face
+grid, and for several iterations the stars used it too. Every version showed
+the cube, because the cube leaked in three independent ways:
+
+- keying cells by `(cell, face)` gave the six faces independent randomness, so
+  the pattern restarted at every edge;
+- measuring arm length in face pixels clipped the arms of any star within one
+  arm-length of an edge — about **14% of the sky**;
+- enumerating candidate cells on the viewer's own face meant a star just across
+  an edge was never considered, so it rendered cut in half.
+
+The cube is also unevenly sized: cells shrink **2.17x** from a face centre to a
+cube corner, so stars bunch there however the lookup is written. Patching the
+leaks one at a time could never fix that.
+
+Stars now live on a **ring lattice** with no faces at all. The sphere is cut
+into `StarRings` bands of equal angular height, and each band holds cells
+proportional to its circumference, which keeps every cell square to within
+**5%** from pole to pole. Lookup is two divisions (`acos` for the ring,
+`atan2` for the sector); neighbours are ring +/-1 and sector +/-1, the same
+nine candidates the old face search used. Verified by enumerating every cell:
+star density is uniform to **1.30x** across the whole sphere, poles included.
+
+Two details it depends on:
+
+- The tangent frame each star is drawn in comes from whichever world axis the
+  star is **least** aligned with. A fixed axis leaves the cross product tiny
+  near the poles and the frame badly conditioned.
+- The view direction and the star are both converted to **integer pixel
+  counts** in that frame before subtracting. Measuring a continuous angle and
+  rounding afterwards leaves the two grids offset, so one star cell catches
+  one, two or four screen pixels and every small star smears into a 2x2 block.
+
+Also tried and reverted: a Fibonacci sphere has no faces either, but its
+inverse does not localise — the nearest point sits at scattered index offsets,
+so a shader would need a wide search rather than a fixed neighbourhood.
+
+**Shooting stars** are modelled on a real meteor shower: mostly empty sky, then
+a streak gone almost before it registers. Time is cut into short slots and
+several are tested each frame, so shots can overlap and cluster rather than
+arriving one at a time on a metronome; `ShootingChance` (default 0.07) is the
+rarity dial. At the defaults that is about one visible every five and a half
+minutes from a fixed view, each lasting **0.16 s** and crossing about **7
+degrees** of sky (`ShootingArc`) — a blink across a small patch, roughly
+47 deg/s, rather than a slow traverse that would read as a drifting object. Trajectories are random great
+circles on the sphere, and the trail is drawn only *behind* the head with the
+same stepped falloff and colour ramp as a twinkle arm.
+
+Shots work in **direction space, not on a single cube face**. Confining them to
+one face made five sixths of them invisible from any given view — they were
+being generated correctly and simply never rendered where the camera was
+looking.
+
+**Two calibration notes.** The colour constants are *pre-tonemap* and were
+measured against a render, not computed: the environment's Filmic curve crushes
+darks so hard that the naive linear value for `#14030f` lands on screen at
+about `#050104`. Re-measure if the tonemapper, `SkyEnergy` or `AmbientEnergy`
+change. And any threshold applied to `fbm()` has to be centred on its real
+range — two octaves span 0..0.75 with mean ~0.38, not 0..1 — which is what made
+the warm nebula tint silently never appear in an earlier version.
+
+Measured against the reference art, the defaults land at 89% empty background /
+10% nebula / 0.8% star pixels, versus 88% / 11% / 1.0%. Star hue matches too:
+the render's faint tier is `#90425a` against the reference's `#8c445c`.
 
 ### Performance notes
 
@@ -289,6 +400,28 @@ persisted like any other setting:
   square. Every buffer is sampled through the snapped UV, so outlines land on
   the same grid as the colour rather than drawing crisp lines over blocky
   pixels.
+
+  **The sky is excluded** (`PixelateSky`, off). The skybox is already drawn as
+  pixel art on its own grid, and resampling one pixel grid onto another beats
+  the stars into aliased noise that crawls as the camera turns. Sky is
+  identified by depth: reverse-Z puts it at the far plane, well past any real
+  geometry, so `SkyDepth` only has to sit above the furthest object.
+
+  **Distant objects get finer pixels** (`PixelFarScale`, default 2.2x by
+  `PixelFarDistance`), so the jump between a chunky foreground and a distant
+  one is less dramatic. Two details this depends on:
+
+  - The ramp is **quantized** into `PixelDistanceSteps` bands rather than
+    varying smoothly. A grid that changes continuously with depth slides its
+    pixel boundaries as the camera moves and the whole image shimmers; banding
+    keeps a surface on one grid until it crosses an edge.
+  - Depth is read at the **true** UV, before any snapping. Reading it through
+    the snapped UV lets a pixel near a silhouette land on a sky texel (or the
+    reverse), so objects would sample the sky's grid along every edge.
+
+  `PixelNearDistance`/`PixelFarDistance` default to 3-22 m, which is the range
+  the pillar level actually occupies (its visible ground runs about 3.5-14 m).
+  A range wider than the scene contains leaves the ramp doing nothing visible.
 - **Dither** (off by default) - 4x4 ordered Bayer dither, applied in real
   screen pixels so the pattern stays fine even while pixelating.
 
@@ -637,6 +770,104 @@ Level generation also passes `wholesale: true` to `Batch`, which skips
 per-node dirty marking — marking the 3x3x3 around each of 42k nodes is about
 a million wasted hash operations when a full rebuild follows anyway.
 
+
+## Targeted-node outline
+
+`Modules/NodeEditor/NodeHighlight.cs` outlines whichever node the crosshair is
+on. It traces the node's **real silhouette**, not a box around its cell: a raw
+node is a bismuth crystal whose faces are recessed and whose edge and corner
+wins branch a quarter-cell out past the cell boundary, so a cube outline sits
+off the surface on the flats and cuts straight through the rims.
+
+### Convex folds only
+
+The node's occupancy is walked at quarter-cell resolution, and a bar is drawn
+along every lattice edge where the surface folds **outward**. Of the four
+quarter-cells around an edge:
+
+| filled | meaning | drawn |
+| --- | --- | --- |
+| 1 | convex corner — the surface turns outward | **yes** |
+| 0 or 4 | interior or empty | no |
+| 2 adjacent | the boundary is a straight plane: the surface is **flat** here | no |
+| 2 diagonal | a pinch, with no single outward direction | no |
+| 3 | concave — the inside corner of an indent | no |
+
+Rejecting the `2` cases matters most by volume: an adjacent pair is an interior
+line ruled across a flat face, and they were **272 of 490** bars on a typical
+node. Drawing them turned the outline into a wireframe.
+
+Concave folds are skipped for a different reason. They are real geometry, but a
+bar laid inside a crevice is enclosed by surface on both sides, so its clearance
+offset has nowhere to go and it clips through the walls instead of tracing them.
+An outline is for the node's outer form; indents are interior detail.
+
+Collinear runs are merged into single boxes before meshing — a straight edge
+four quarter-cells long is one box, not four — which removes about **56%** of
+the geometry.
+
+### Clearance has to exceed the bar's own width
+
+A bar straddles the convex edge it traces and is pushed out along the 45°
+diagonal. To clear the node corner underneath, that offset must exceed the bar's
+half-width *measured along the diagonal*, `(Thickness/2) * sqrt(2)`.
+
+This is not a nicety. At `Thickness` 0.025 the minimum is **0.0177**, and an
+offset of 0.006 left the corner protruding **0.0117 into the bar** — splitting
+it lengthwise, so every outline rendered as two thin lines with a slot of node
+surface down the middle. The minimum is now computed from `Thickness`, and
+`Expand` is the margin on top of it.
+
+### Picking: a DDA, not a fixed step
+
+`NodeWorld.RayPick` walks quarter-cells with an Amanatides-Woo DDA, stepping one
+axis at a time to the nearest grid plane, so **every** quarter-cell the ray
+passes through is visited in order.
+
+A fixed-step march cannot do this. On a body-diagonal ray the mean travel per
+quarter-cell is `0.577` of a cell, so even a half-cell step samples barely once
+per cell, and a cell the ray merely clips near a corner has a chord approaching
+zero and is skipped outright. That showed up in play as picking a node **past**
+the one under the crosshair. Measured against a fine reference walk over 3,000
+rays: fixed-step scored 94.2%, the DDA scores **100%** with no missed hits.
+
+Two further rules the picker depends on:
+
+- **Occupancy is tested, not cell membership.** A shaped node does not fill its
+  own cell, so `_nodes.Contains` picks a node while the ray is still in the
+  empty air of its indent, and misses one whose rim is the thing actually under
+  the crosshair.
+- **A quarter-cell's index cannot name its owner.** Occupancy spans `-1..Sub` in
+  node-local coordinates, so a node's wins stamp quarter-cells whose global
+  index divides into a *neighbour's* cell — 128 of them on a fully-won node.
+  Every cell that could reach the quarter-cell is asked directly, in its own
+  local coordinates, via `INodeType.Occupies`.
+
+Unshaped worlds keep the old cell-granularity path, where a node fills its cell
+exactly and there is nothing finer to march through.
+
+### Colour and thickness
+
+Warm off-white `#fff6e2`, the same colour the crosshair's outline uses, so the
+two read as one targeting system. Bars are **0.025** of a node thick — at the
+far end of `Reach` that spans 1.02 virtual pixels on the stylized filter's
+320-row grid; anything thinner drops below one pixel and flickers as the camera
+moves (0.018 measures 0.73px).
+
+**Depth testing stays on.** Disabling it (the obvious way to keep an outline
+visible) pushes the mesh into a later draw pass, after the stylized filter has
+sampled the screen — the filter then paints its full-screen quad over the top
+and the outline never appears at all. The clearance offset is what keeps the
+bars visible and stops them z-fighting.
+
+The mesh is rebuilt only when the target changes, not every frame.
+
+
+## Crosshair colours
+
+Gold `#f5c344`, chosen to sit in the same family as the sky's plum and the
+nebulae's warm accent rather than cutting across them, with a warm off-white
+`#fff6e2` outline behind the dashes so they stay legible against terrain.
 
 ## Sandbox mode
 

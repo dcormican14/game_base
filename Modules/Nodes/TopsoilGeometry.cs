@@ -12,12 +12,16 @@ namespace GameBase.Nodes;
 /// Take the right-hand side of a node. Two cases, and only two:
 ///
 ///   the cell to the right is AIR — the ground ends here, so the top-right
-///   edge is taken off. That bevel is what makes a slope read as rounded
-///   rather than as a stack of cubes.
+///   edge falls away. Not as a single chamfered row: the bevel is GRADED,
+///   dropping furthest against the face and stepping back up over
+///   <see cref="BevelReach"/> rows. One row alone reads as a rounded corner,
+///   which is the shape this had before; a graded one reads as a slope.
 ///
-///   the cell to the right is SOIL — the ground continues, and a step up of a
-///   quarter cell is added over the top-right edge. Its neighbour does the
-///   same toward this node, and the two meet as one continuous rise.
+///   the cell to the right is SOIL — the ground continues, so that edge is
+///   left alone at full height. Its neighbour does the same toward this node,
+///   and the two meet flush. The step UP a slope is what the bevel on the
+///   exposed side leaves behind: a node whose downhill side falls away and
+///   whose uphill side does not is a stair tread.
 ///
 /// The same applies on all four horizontal sides, so a node's shape is decided
 /// by which of its neighbours hold ground.
@@ -53,22 +57,22 @@ public static class TopsoilGeometry
     public const int Sub = RawNodeGeometry.Sub;
 
     /// <summary>
-    /// How deep the bevel is where the ground ends, in quarter-cells.
+    /// How far the bevel reaches into the node from an exposed side, in
+    /// quarter-cells — and, because it is graded, how deep it cuts at the very
+    /// edge.
     ///
-    /// One. The bevel exists to round a corner, not to shave the node down: at
-    /// one quarter-cell a node facing air loses a single row along that edge,
-    /// which is the smallest step the lattice can express and the one that
-    /// reads as a rounded lip rather than as a chamfer.
-    /// </summary>
-    public const int Bevel = 1;
-
-    /// <summary>
-    /// How far the ground rises toward a solid neighbour, in quarter-cells.
+    /// The bevel steps DOWN as it goes out: at reach 2 the row against the
+    /// face drops two quarter-cells and the row behind it drops one, leaving
+    /// the far half of the node at full height. That gradient is what reads as
+    /// a slope.
     ///
-    /// One, matching the bevel, so a run of soil climbing to the right rises a
-    /// quarter cell per node — the "step up by 1/4" the surface is built from.
+    /// One was the first attempt and it only ever removed the outermost row,
+    /// which on a four-tall node is a single chamfered edge — the shape looked
+    /// rounded rather than sloped, because one step is not a gradient. Three
+    /// grades the whole node and leaves nothing flat, so the terrain loses its
+    /// terraces; two is the value that shows a slope and keeps a top.
     /// </summary>
-    public const int Step = 1;
+    public const int BevelReach = 2;
 
     /// <summary>
     /// One topsoil node's shape: which of its six neighbours hold ground.
@@ -177,30 +181,42 @@ public static class TopsoilGeometry
         // A bevel marks an edge that is open to the sky. Nothing on another
         // side can close it, so the two effects are decided independently and
         // exposure takes precedence.
-        bool exposed =
-            Touches(i, NodeFace.NegX, mask.Neighbours, false) ||
-            Touches(Sub - 1 - i, NodeFace.PosX, mask.Neighbours, false) ||
-            Touches(k, NodeFace.NegZ, mask.Neighbours, false) ||
-            Touches(Sub - 1 - k, NodeFace.PosZ, mask.Neighbours, false);
+        int drop = 0;
+        drop = Mathf.Max(drop, DropFrom(i, NodeFace.NegX, mask.Neighbours));
+        drop = Mathf.Max(drop, DropFrom(Sub - 1 - i, NodeFace.PosX, mask.Neighbours));
+        drop = Mathf.Max(drop, DropFrom(k, NodeFace.NegZ, mask.Neighbours));
+        drop = Mathf.Max(drop, DropFrom(Sub - 1 - k, NodeFace.PosZ, mask.Neighbours));
 
-        if (exposed)
-            return Mathf.Max(Sub - Bevel, 1);
-
-        // Not exposed. A side facing soil would step this column up, but a
-        // node may not grow past its own ceiling — the cell above belongs to
-        // whatever is up there — so the rise is already at the cap.
-        return Sub;
+        // The deepest cut wins, so a column in an outer corner falls away in
+        // both directions at once rather than the two sides fighting over it.
+        //
+        // Never below one layer while the node holds soil: the generator
+        // placed it because there is ground here, and a node bevelled away on
+        // every side would leave a hole in the surface.
+        //
+        // Not exposed at all means full height. A side facing soil would step
+        // the column up, but a node may not grow past its own ceiling — the
+        // cell above belongs to whatever is up there — so the rise is already
+        // at the cap.
+        return Mathf.Max(Sub - drop, 1);
     }
 
     /// <summary>
-    /// Does a column standing `distance` quarter-cells in from `face` touch
-    /// that face, and does the neighbour there match `solid`?
+    /// How far one side pulls a column down, for a column standing `distance`
+    /// quarter-cells in from that face.
     ///
-    /// Only the outermost row counts, which is what keeps the bevel a lip
-    /// around the rim rather than a slope across the whole cell.
+    /// Zero when the side faces ground, or when the column is further in than
+    /// the bevel reaches. Otherwise it grades: deepest against the face and
+    /// one quarter-cell shallower per row inward, which is the gradient that
+    /// makes the edge read as a slope instead of a chamfer.
     /// </summary>
-    private static bool Touches(int distance, int face, int neighbours, bool solid) =>
-        distance < Bevel && NodeFace.Has(neighbours, face) == solid;
+    private static int DropFrom(int distance, int face, int neighbours)
+    {
+        if (distance >= BevelReach || NodeFace.Has(neighbours, face))
+            return 0;
+
+        return BevelReach - distance;
+    }
 
     /// <summary>Builds the mesh for one shape.</summary>
     private static NodeMesh Build(in Mask mask)
