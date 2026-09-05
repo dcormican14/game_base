@@ -209,13 +209,43 @@ public partial class NodeWorld : StaticBody3D
     public const int ChunkSize = NodeChunkStore.ChunkSize;
 
     /// <summary>One chunk's scene nodes, created on demand.</summary>
-    private sealed class ChunkNodes
+    /// <summary>
+    /// Cells per edge of a MESH SECTION — the unit geometry is rebuilt in.
+    ///
+    /// Deliberately smaller than a chunk. A chunk is the right size for
+    /// STREAMING, where the per-chunk overhead of a scene node, a dictionary
+    /// entry and a store lookup is what matters, and 32 keeps that overhead
+    /// 64x lower than the 8 it replaced. It is exactly the wrong size for
+    /// EDITING, where the cost is the volume rebuilt: mining one node meant
+    /// re-walking a 32-cell chunk and stamping the 36-cell occupancy window
+    /// around it, 46656 cells to change one.
+    ///
+    /// Sections separate the two. Storage and streaming still work in chunks;
+    /// geometry is rebuilt in 8-cell sections, so an edit touches a 12-cell
+    /// window — a twenty-seventh of the volume.
+    /// </summary>
+    public const int SectionSize = 8;
+
+    /// <summary>Sections per chunk edge.</summary>
+    private const int SectionsPerChunk = ChunkSize / SectionSize;
+
+    /// <summary>The section containing a cell, in section coordinates.</summary>
+    private static Vector3I SectionOf(Vector3I cell) => new(
+        FloorDiv(cell.X, SectionSize), FloorDiv(cell.Y, SectionSize),
+        FloorDiv(cell.Z, SectionSize));
+
+    /// <summary>The min corner of a section, in cells.</summary>
+    private static Vector3I SectionOrigin(Vector3I section) => new(
+        section.X * SectionSize, section.Y * SectionSize, section.Z * SectionSize);
+
+    /// <summary>One section's scene nodes, created on demand.</summary>
+    private sealed class SectionNodes
     {
         public readonly MeshInstance3D MeshInstance;
         public readonly CollisionShape3D CollisionShape;
         public ConcavePolygonShape3D Trimesh;
 
-        public ChunkNodes(Node parent, Vector3I coord)
+        public SectionNodes(Node parent, Vector3I coord)
         {
             MeshInstance = new MeshInstance3D { Name = $"Mesh{coord.X}_{coord.Y}_{coord.Z}" };
             CollisionShape = new CollisionShape3D { Name = $"Col{coord.X}_{coord.Y}_{coord.Z}" };
@@ -230,7 +260,9 @@ public partial class NodeWorld : StaticBody3D
         }
     }
 
-    private readonly Dictionary<Vector3I, ChunkNodes> _chunks = new();
+    private readonly Dictionary<Vector3I, SectionNodes> _sections = new();
+
+    /// <summary>Sections whose geometry no longer matches the store.</summary>
     private readonly HashSet<Vector3I> _dirty = new();
     private readonly List<Vector3I> _scratch = new();
 
@@ -278,22 +310,38 @@ public partial class NodeWorld : StaticBody3D
         }
     }
 
-    /// <summary>Frees the scene nodes of chunks whose data holds nothing.</summary>
+    /// <summary>Frees the scene nodes of sections whose chunk no longer holds
+    /// anything.</summary>
     private void DiscardEmptyChunks()
     {
         _scratch.Clear();
-        foreach (var kv in _chunks)
+        foreach (var kv in _sections)
         {
-            NodeChunkStore.Chunk data = _store.Find(kv.Key);
+            NodeChunkStore.Chunk data = _store.Find(ChunkOf(SectionOrigin(kv.Key)));
             if (data == null || data.SolidCount == 0)
                 _scratch.Add(kv.Key);
         }
 
         foreach (Vector3I dead in _scratch)
         {
-            _chunks[dead].Dispose();
-            _chunks.Remove(dead);
+            _sections[dead].Dispose();
+            _sections.Remove(dead);
         }
+    }
+
+    /// <summary>Queues every section of a chunk for meshing.</summary>
+    private void QueueChunkSections(Vector3I chunk)
+    {
+        Vector3I baseSection = new(
+            chunk.X * SectionsPerChunk,
+            chunk.Y * SectionsPerChunk,
+            chunk.Z * SectionsPerChunk);
+
+        for (int x = 0; x < SectionsPerChunk; x++)
+            for (int y = 0; y < SectionsPerChunk; y++)
+                for (int z = 0; z < SectionsPerChunk; z++)
+                    _dirty.Add(new Vector3I(
+                        baseSection.X + x, baseSection.Y + y, baseSection.Z + z));
     }
 
     /// <summary>
@@ -308,7 +356,7 @@ public partial class NodeWorld : StaticBody3D
         for (int dx = -2; dx <= 2; dx++)
             for (int dy = -2; dy <= 2; dy++)
                 for (int dz = -2; dz <= 2; dz++)
-                    _dirty.Add(ChunkOf(cell + new Vector3I(dx, dy, dz)));
+                    _dirty.Add(SectionOf(cell + new Vector3I(dx, dy, dz)));
     }
 
     private StandardMaterial3D _material;
@@ -361,8 +409,19 @@ public partial class NodeWorld : StaticBody3D
         _pending.Clear();
         foreach (var kv in _store.Chunks)
         {
-            if (kv.Value.SolidCount > 0)
-                _pending.Add(kv.Key);
+            if (kv.Value.SolidCount == 0)
+                continue;
+
+            Vector3I baseSection = new(
+                kv.Key.X * SectionsPerChunk,
+                kv.Key.Y * SectionsPerChunk,
+                kv.Key.Z * SectionsPerChunk);
+
+            for (int x = 0; x < SectionsPerChunk; x++)
+                for (int y = 0; y < SectionsPerChunk; y++)
+                    for (int z = 0; z < SectionsPerChunk; z++)
+                        _pending.Add(new Vector3I(
+                            baseSection.X + x, baseSection.Y + y, baseSection.Z + z));
         }
 
         _pendingIndex = 0;
@@ -402,7 +461,7 @@ public partial class NodeWorld : StaticBody3D
 
         while (_pendingIndex < _pending.Count)
         {
-            MeshChunk(_pending[_pendingIndex]);
+            MeshSection(_pending[_pendingIndex]);
             _pendingIndex++;
 
             // The floor is met first, so a frame always makes progress even if
@@ -662,6 +721,7 @@ public partial class NodeWorld : StaticBody3D
     public void Clear()
     {
         _store.Clear();
+        _meshed.Clear();
 
         _fullRebuildNeeded = true;
         RebuildOrDefer();
@@ -677,14 +737,29 @@ public partial class NodeWorld : StaticBody3D
     /// </summary>
     public void UnloadChunk(Vector3I chunk)
     {
-        if (_chunks.TryGetValue(chunk, out ChunkNodes scene))
-        {
-            scene.Dispose();
-            _chunks.Remove(chunk);
-        }
+        Vector3I baseSection = new(
+            chunk.X * SectionsPerChunk,
+            chunk.Y * SectionsPerChunk,
+            chunk.Z * SectionsPerChunk);
+
+        for (int x = 0; x < SectionsPerChunk; x++)
+            for (int y = 0; y < SectionsPerChunk; y++)
+                for (int z = 0; z < SectionsPerChunk; z++)
+                {
+                    var section = new Vector3I(
+                        baseSection.X + x, baseSection.Y + y, baseSection.Z + z);
+
+                    if (_sections.TryGetValue(section, out SectionNodes scene))
+                    {
+                        scene.Dispose();
+                        _sections.Remove(section);
+                    }
+
+                    _dirty.Remove(section);
+                }
 
         _store.Unload(chunk);
-        _dirty.Remove(chunk);
+        _meshed.Remove(chunk);
     }
 
     /// <summary>Is this chunk's data resident?</summary>
@@ -699,7 +774,18 @@ public partial class NodeWorld : StaticBody3D
     /// and the streamer needs to tell the two apart to know what still owes
     /// geometry when the player moves toward it.
     /// </summary>
-    public bool HasChunkMesh(Vector3I chunk) => _chunks.ContainsKey(chunk);
+    public bool HasChunkMesh(Vector3I chunk) => _meshed.Contains(chunk);
+
+    /// <summary>
+    /// Chunks whose sections have been built.
+    ///
+    /// Recorded rather than inferred from whether any scene node exists,
+    /// because a chunk can legitimately mesh to NOTHING — every section empty,
+    /// or every face buried by a neighbour. Judging by scene nodes told the
+    /// streamer such a chunk still owed geometry, so it re-queued it on every
+    /// rescan and the world never finished loading.
+    /// </summary>
+    private readonly HashSet<Vector3I> _meshed = new();
 
     /// <summary>
     /// Queues a chunk to be re-meshed. For the streamer, which installs chunk
@@ -707,7 +793,8 @@ public partial class NodeWorld : StaticBody3D
     /// </summary>
     public void QueueChunkMesh(Vector3I chunk)
     {
-        _dirty.Add(chunk);
+        QueueChunkSections(chunk);
+        _meshed.Add(chunk);
     }
 
     /// <summary>
@@ -777,8 +864,11 @@ public partial class NodeWorld : StaticBody3D
         foreach (var kv in _store.Chunks)
         {
             if (kv.Value.SolidCount > 0)
-                MeshChunk(kv.Key);
+                QueueChunkSections(kv.Key);
         }
+
+        foreach (Vector3I section in _dirty)
+            MeshSection(section);
 
         _dirty.Clear();
         _pending.Clear();
@@ -791,8 +881,14 @@ public partial class NodeWorld : StaticBody3D
     }
 
     /// <summary>
-    /// Re-meshes only the chunks marked dirty. A one-node edit touches its
-    /// own chunk plus any neighbour whose surface it changes.
+    /// Re-meshes only the sections marked dirty.
+    ///
+    /// A one-node edit reaches two cells, so it dirties the sections within
+    /// that radius — one when the edit is well inside a section, up to eight
+    /// when it sits on a corner. Each is an 8-cell cube rather than a 32-cell
+    /// chunk, which is what keeps mining a node cheap: the occupancy window
+    /// around a section is a twenty-seventh of the volume of one around a
+    /// chunk.
     /// </summary>
     private void RebuildDirty()
     {
@@ -801,22 +897,8 @@ public partial class NodeWorld : StaticBody3D
 
         WarmTypeCache();
 
-        foreach (Vector3I chunk in _dirty)
-        {
-            NodeChunkStore.Chunk data = _store.Find(chunk);
-            if (data == null || data.SolidCount == 0)
-            {
-                if (_chunks.TryGetValue(chunk, out ChunkNodes empty))
-                {
-                    empty.Dispose();
-                    _chunks.Remove(chunk);
-                }
-
-                continue;
-            }
-
-            MeshChunk(chunk);
-        }
+        foreach (Vector3I section in _dirty)
+            MeshSection(section);
 
         _dirty.Clear();
     }
@@ -828,11 +910,9 @@ public partial class NodeWorld : StaticBody3D
     /// array of its own cells — so the mesher walks it directly instead of
     /// being handed the result of bucketing every node in the world.
     /// </summary>
-    private void MeshChunk(Vector3I chunk)
+    private void MeshSection(Vector3I section)
     {
-        NodeChunkStore.Chunk data = _store.Find(chunk);
-        if (data == null || data.SolidCount == 0)
-            return;
+        Vector3I origin = SectionOrigin(section);
 
         _vertices.Clear();
         _normals.Clear();
@@ -841,27 +921,28 @@ public partial class NodeWorld : StaticBody3D
 
         if (_shaped)
         {
-            _occupancy.Reset(chunk);
+            _occupancy.Reset(origin);
             _occupancy.Fill(_store, _typeLookup ?? TypeOf);
         }
-
-        Vector3I origin = NodeChunkStore.OriginOf(chunk);
 
         // Allocated once outside the loop: a stackalloc per node would grow
         // the stack frame by every iteration and eventually overflow.
         Span<Vector3> corners = stackalloc Vector3[4];
 
-        for (int lx = 0; lx < ChunkSize; lx++)
+        for (int lx = 0; lx < SectionSize; lx++)
         {
-            for (int ly = 0; ly < ChunkSize; ly++)
+            for (int ly = 0; ly < SectionSize; ly++)
             {
-                for (int lz = 0; lz < ChunkSize; lz++)
+                for (int lz = 0; lz < SectionSize; lz++)
                 {
-                    byte raw = data.Get(NodeChunkStore.LocalIndex(lx, ly, lz));
+                    var cell = new Vector3I(origin.X + lx, origin.Y + ly, origin.Z + lz);
+
+                    // A section may straddle chunks that are not all resident,
+                    // so it reads through the store rather than one chunk's
+                    // array.
+                    byte raw = _store.Get(cell);
                     if (raw == NodeChunkStore.Air)
                         continue;
-
-                    var cell = new Vector3I(origin.X + lx, origin.Y + ly, origin.Z + lz);
 
                     // ENCLOSED — every neighbour that could expose a face is
                     // solid, so nothing this node emits can be seen.
@@ -911,10 +992,23 @@ public partial class NodeWorld : StaticBody3D
             }
         }
 
-        if (!_chunks.TryGetValue(chunk, out ChunkNodes target))
+        // Nothing to draw: drop the scene nodes rather than leaving an empty
+        // mesh behind, so a section carved away stops costing anything.
+        if (_vertices.Count == 0)
         {
-            target = new ChunkNodes(this, chunk);
-            _chunks[chunk] = target;
+            if (_sections.TryGetValue(section, out SectionNodes empty))
+            {
+                empty.Dispose();
+                _sections.Remove(section);
+            }
+
+            return;
+        }
+
+        if (!_sections.TryGetValue(section, out SectionNodes target))
+        {
+            target = new SectionNodes(this, section);
+            _sections[section] = target;
         }
 
         var mesh = new ArrayMesh();
@@ -935,7 +1029,7 @@ public partial class NodeWorld : StaticBody3D
         }
 
         target.MeshInstance.Mesh = mesh;
-        UpdateCollision(target, data, origin, mesh);
+        UpdateCollision(target, origin, mesh);
     }
 
     /// <summary>
@@ -1021,8 +1115,7 @@ public partial class NodeWorld : StaticBody3D
     /// given, and crystal rims multiply that count for relief no player can
     /// feel through a capsule — plain cube faces are ~10x fewer triangles.
     /// </summary>
-    private void UpdateCollision(ChunkNodes scene, NodeChunkStore.Chunk data,
-        Vector3I origin, ArrayMesh rendered)
+    private void UpdateCollision(SectionNodes scene, Vector3I origin, ArrayMesh rendered)
     {
         if (!_shaped)
         {
@@ -1033,16 +1126,15 @@ public partial class NodeWorld : StaticBody3D
         _collisionVertices.Clear();
         Span<Vector3> corners = stackalloc Vector3[4];
 
-        for (int lx = 0; lx < ChunkSize; lx++)
+        for (int lx = 0; lx < SectionSize; lx++)
         {
-            for (int ly = 0; ly < ChunkSize; ly++)
+            for (int ly = 0; ly < SectionSize; ly++)
             {
-                for (int lz = 0; lz < ChunkSize; lz++)
+                for (int lz = 0; lz < SectionSize; lz++)
                 {
-                    if (data.Get(NodeChunkStore.LocalIndex(lx, ly, lz)) == NodeChunkStore.Air)
-                        continue;
-
                     var cell = new Vector3I(origin.X + lx, origin.Y + ly, origin.Z + lz);
+                    if (!_store.Has(cell))
+                        continue;
 
                     // The hull is built from cube faces, so only the six face
                     // neighbours can hide one. Cheaper than the full enclosure

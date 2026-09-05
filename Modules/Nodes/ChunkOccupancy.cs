@@ -30,7 +30,8 @@ namespace GameBase.Nodes;
 ///
 /// THE MARGIN
 ///
-/// The window covers the chunk plus <see cref="Margin"/> cells on every side.
+/// The window covers one MESH SECTION plus <see cref="Margin"/> cells on every
+/// side.
 /// Two, because a quad's occlusion cells can lie one cell outside the node
 /// that owns them, and the node filling that space can itself be one cell
 /// further out — the same radius <c>RestampAround</c> used, and for the same
@@ -38,11 +39,19 @@ namespace GameBase.Nodes;
 /// </summary>
 public sealed class ChunkOccupancy
 {
-    /// <summary>Cells of context around the chunk. See the class remarks.</summary>
+    /// <summary>Cells of context around the region. See the class remarks.</summary>
     public const int Margin = 2;
 
-    /// <summary>Cells per edge of the window: the chunk plus both margins.</summary>
-    private const int Span = NodeChunkStore.ChunkSize + Margin * 2;
+    /// <summary>
+    /// Cells per edge of the largest window this can cover: one mesh section
+    /// plus both margins.
+    ///
+    /// Sized to a SECTION rather than a whole chunk. Meshing a 32-cell chunk
+    /// needed a 36-cell window — 46656 cells stamped to redraw one edit — and
+    /// that volume was the single largest cost of mining a node. A section is
+    /// small enough that the window around it is a fraction of the size.
+    /// </summary>
+    private const int Span = NodeWorld.SectionSize + Margin * 2;
 
     /// <summary>Sub-cells per edge of the window.</summary>
     private const int SubSpan = Span * RawNodeGeometry.Sub;
@@ -50,12 +59,10 @@ public sealed class ChunkOccupancy
     /// <summary>
     /// One bit per sub-cell in the window, as 64-bit words.
     ///
-    /// Dense rather than sparse: the window is a fixed 36x36x36 cells —
-    /// 144 sub-cells per edge, about 373 KB of bits — and a dense array is
-    /// both smaller and far faster to probe than the hashed blocks a sparse
-    /// set would need. It is also REUSED between jobs (see
-    /// <see cref="Reset"/>), so a worker allocates one of these for its
-    /// lifetime rather than one per chunk.
+    /// Dense rather than sparse: the window is a fixed size and a dense array
+    /// is both smaller and far faster to probe than the hashed blocks a sparse
+    /// set would need. It is REUSED between jobs (see <see cref="Reset"/>), so
+    /// a worker allocates one for its lifetime rather than one per region.
     /// </summary>
     private readonly ulong[] _bits = new ulong[SubSpan * SubSpan * SubSpan / 64];
 
@@ -63,15 +70,16 @@ public sealed class ChunkOccupancy
     private Vector3I _origin;
 
     /// <summary>
-    /// Points the window at a chunk and clears it.
+    /// Points the window at a region of cells and clears it.
     ///
-    /// Clearing 373 KB is a memset the CPU does at cache-fill speed, and it
-    /// buys a dense array's O(1) unhashed probe on every one of the millions
-    /// of culling queries a chunk's meshing makes.
+    /// `origin` is the region's min corner; the window covers it plus a margin
+    /// on every side. Clearing is a memset the CPU does at cache-fill speed,
+    /// and it buys a dense array's O(1) unhashed probe on every one of the
+    /// culling queries meshing makes.
     /// </summary>
-    public void Reset(Vector3I chunk)
+    public void Reset(Vector3I origin)
     {
-        _origin = NodeChunkStore.OriginOf(chunk) - Vector3I.One * Margin;
+        _origin = origin - Vector3I.One * Margin;
         System.Array.Clear(_bits, 0, _bits.Length);
     }
 
