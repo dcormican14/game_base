@@ -67,38 +67,52 @@ public sealed class TopsoilNode : INodeType
     /// </summary>
     public NodeShape ShapeAt(Vector3I cell) => ShapeAt(cell, 0);
 
-    public NodeShape ShapeAt(Vector3I cell, int neighbours)
+    public NodeShape ShapeAt(Vector3I cell, int neighbours) =>
+        ShapeAt(cell, neighbours, 0u, 0u);
+
+    public NodeShape ShapeAt(Vector3I cell, int neighbours, uint crystalLow, uint crystalHigh)
     {
         return new NodeShape(
             neighbours & (TopsoilGeometry.Masks - 1),
-            InternTaken(FloorTaken(cell), FloorTaken(cell + Vector3I.Up)));
+            InternTaken(
+                RimsInto(cell, crystalLow, crystalHigh),
+                RimsInto(cell + Vector3I.Up, crystalLow, crystalHigh, shifted: true)));
     }
 
     /// <summary>
-    /// Which sub-cells of this node the surrounding crystal already fills.
+    /// Which sub-cells of `cell` the surrounding CRYSTAL already fills.
     ///
-    /// All 26 neighbours are consulted. A rim reaches in from whichever
-    /// direction won the feature, and arbitrating against fewer left sub-cells
-    /// contested every time: 1059 against the cell directly below alone, 255
-    /// against the nine below.
+    /// Two things have to line up. Whether a rim reaches into a given sub-cell
+    /// is a pure function of position, so it is recomputed here rather than
+    /// looked up. Whether there is any rock there to grow one is not — that is
+    /// what the generator placed — so the mesher passes it in.
     ///
     /// Nothing is read from the world. Each mask is recomputed from its cell
     /// position, which is the same pure function the rock down there runs, so
     /// both sides agree about who owns the space without either having asked
     /// what is actually placed.
     /// </summary>
-    private ulong FloorTaken(Vector3I cell)
+    public NodeMesh MeshFor(NodeShape shape) => TopsoilGeometry.Get(ToMask(shape));
+
+    public int[] OccupiedCells(NodeShape shape) => TopsoilGeometry.OccupiedCells(ToMask(shape));
+
+    public bool Occupies(NodeShape shape, int i, int j, int k) =>
+        TopsoilGeometry.Occupies(ToMask(shape), i, j, k);
+
+    /// <summary>
+    /// Which sub-cells of `cell` the surrounding CRYSTAL already fills.
+    ///
+    /// Two things have to line up. Whether a rim reaches into a given sub-cell
+    /// is a pure function of position, so it is recomputed here rather than
+    /// looked up. Whether there is any rock there to grow one is not — that is
+    /// what the generator placed — so the mesher passes it in.
+    /// </summary>
+    private ulong RimsInto(Vector3I cell, uint crystalLow, uint crystalHigh,
+        bool shifted = false)
     {
         const int sub = RawNodeGeometry.Sub;
         ulong taken = 0UL;
 
-        // All 26 surrounding cells, not just the nine below.
-        //
-        // A rim reaches in from whatever direction won the feature: upward out
-        // of the rock beneath, sideways out of the rock alongside, diagonally
-        // out of a corner. Arbitrating against only the cells below left the
-        // floor clean but still collided 255 times on a slope, where soil and
-        // rock sit side by side at the same height.
         for (int dx = -1; dx <= 1; dx++)
         {
             for (int dy = -1; dy <= 1; dy++)
@@ -108,6 +122,32 @@ public sealed class TopsoilNode : INodeType
                     if (dx == 0 && dy == 0 && dz == 0)
                         continue;
 
+                    // Only cells that actually HOLD crystal. Recomputing what
+                    // rock would look like there says nothing about whether
+                    // any is present, and yielding to rock that is not there
+                    // carved every soil node against twenty-six imaginary
+                    // neighbours — indenting the whole field instead of the
+                    // boundary with real rock, and dropping mean fill from 62
+                    // of 64 to 37.
+                    //
+                    // The mask is built for THIS node, so a query about the
+                    // cell above shifts its own dy by one to read the right
+                    // entries; anything that falls outside is simply not
+                    // known to be rock and is left alone.
+                    int ny = shifted ? dy + 1 : dy;
+                    if (ny < -1 || ny > 1)
+                        continue;
+                    if (shifted && dx == 0 && ny == 0 && dz == 0)
+                        continue;
+
+                    int bit = NodeFace.NeighbourBit(dx, ny, dz);
+                    bool isCrystal = bit < 32
+                        ? (crystalLow & 1u << bit) != 0u
+                        : (crystalHigh & 1u << (bit - 32)) != 0u;
+
+                    if (!isCrystal)
+                        continue;
+
                     var at = new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz);
                     RawNodeGeometry.Mask mask = _raw.MaskFor(at);
 
@@ -115,7 +155,6 @@ public sealed class TopsoilNode : INodeType
                         for (int j = 0; j < sub; j++)
                             for (int k = 0; k < sub; k++)
                             {
-                                // This cell in that neighbour own frame.
                                 if (RawNodeGeometry.Occupies(mask,
                                         i - dx * sub, j - dy * sub, k - dz * sub))
                                     taken |= 1UL << TopsoilGeometry.CellBit(i, j, k);
@@ -126,13 +165,6 @@ public sealed class TopsoilNode : INodeType
 
         return taken;
     }
-
-    public NodeMesh MeshFor(NodeShape shape) => TopsoilGeometry.Get(ToMask(shape));
-
-    public int[] OccupiedCells(NodeShape shape) => TopsoilGeometry.OccupiedCells(ToMask(shape));
-
-    public bool Occupies(NodeShape shape, int i, int j, int k) =>
-        TopsoilGeometry.Occupies(ToMask(shape), i, j, k);
 
     // The taken-mask is 64 bits and will not fit in a NodeShape int, so
     // distinct ones are interned and the handle carries an index. Equal

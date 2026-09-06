@@ -86,6 +86,18 @@ public static class NodeFace
 
     /// <summary>Is the neighbour in this direction solid?</summary>
     public static bool Has(int mask, int face) => (mask & 1 << face) != 0;
+
+    /// <summary>
+    /// The bit index of one of the 26 surrounding cells, by its offset.
+    ///
+    /// Ordered as a plain 3x3x3 walk with the centre skipped, so the mesher
+    /// and the node type agree without either holding a table.
+    /// </summary>
+    public static int NeighbourBit(int dx, int dy, int dz)
+    {
+        int index = ((dx + 1) * 3 + (dy + 1)) * 3 + (dz + 1);
+        return index > 13 ? index - 1 : index;
+    }
 }
 
 public interface INodeType
@@ -132,6 +144,24 @@ public interface INodeType
     /// a type whose shape owes nothing to its surroundings needs no changes.
     /// </summary>
     NodeShape ShapeAt(Vector3I cell, int neighbours) => ShapeAt(cell);
+
+    /// <summary>
+    /// The shape of the node at `cell`, told which of its six face neighbours
+    /// hold ground AND which of the 26 cells around it hold CRYSTAL.
+    ///
+    /// The second mask matters for a material that has to step aside for
+    /// crystal rims. Whether a rim reaches into this cell is a pure function
+    /// of position and can be recomputed, but whether there is any rock there
+    /// to grow one is not — that is what the generator placed, and only the
+    /// mesher knows it. Deciding without it means carving against imaginary
+    /// crystal on every side, which indents the whole field instead of the
+    /// boundary with actual rock.
+    ///
+    /// `crystal` is indexed by <see cref="NodeFace.NeighbourBit"/>. The default
+    /// ignores it.
+    /// </summary>
+    NodeShape ShapeAt(Vector3I cell, int neighbours, uint crystalLow, uint crystalHigh) =>
+        ShapeAt(cell, neighbours);
 
     /// <summary>
     /// The meshed geometry for a shape, in sub-cell units relative to the

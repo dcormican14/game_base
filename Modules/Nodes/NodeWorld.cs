@@ -182,7 +182,8 @@ public partial class NodeWorld : StaticBody3D
     public int[] NodeSubCells(Vector3I cell)
     {
         INodeType type = TypeOf(MaterialAt(cell));
-        return type.OccupiedCells(type.ShapeAt(cell, NeighbourMask(cell)));
+        CrystalMask(cell, out uint low, out uint high);
+        return type.OccupiedCells(type.ShapeAt(cell, NeighbourMask(cell), low, high));
     }
 
     /// <summary>Nodes across every loaded chunk. Walks the chunk list rather
@@ -1197,7 +1198,9 @@ public partial class NodeWorld : StaticBody3D
     private void AddShapedNode(Vector3I cell, NodeMaterial material, Vector3 min, Color color)
     {
         INodeType type = TypeOf(material);
-        NodeMesh variant = type.MeshFor(type.ShapeAt(cell, NeighbourMask(cell)));
+        CrystalMask(cell, out uint crystalLow, out uint crystalHigh);
+        NodeMesh variant = type.MeshFor(
+            type.ShapeAt(cell, NeighbourMask(cell), crystalLow, crystalHigh));
         if (variant.Vertices.Length == 0)
             return;
 
@@ -1254,6 +1257,44 @@ public partial class NodeWorld : StaticBody3D
         }
 
         return mask;
+    }
+
+    /// <summary>
+    /// Which of the 26 cells around this one hold CRYSTAL, as 26 bits split
+    /// across two words.
+    ///
+    /// For materials that step aside where a crystal rim grows into them.
+    /// Whether a rim reaches in is a pure function of position and the node
+    /// type can recompute it, but whether there is rock there at all is what
+    /// the generator placed — only the mesher knows that. Without it a soil
+    /// node carves itself against imaginary crystal on every side and the
+    /// whole field is indented rather than just the rock boundary.
+    /// </summary>
+    private void CrystalMask(Vector3I cell, out uint low, out uint high)
+    {
+        low = 0u;
+        high = 0u;
+
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    if (dx == 0 && dy == 0 && dz == 0)
+                        continue;
+
+                    byte material = _store.Get(
+                        new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz));
+
+                    if (material == NodeChunkStore.Air
+                        || NodeMaterials.TypeIdOf((NodeMaterial)material) != "raw")
+                        continue;
+
+                    int bit = NodeFace.NeighbourBit(dx, dy, dz);
+                    if (bit < 32)
+                        low |= 1u << bit;
+                    else
+                        high |= 1u << (bit - 32);
+                }
     }
 
     /// <summary>
