@@ -86,7 +86,11 @@ public static class NodeTypes
         // Topsoil ignores every growth dial. Its shape comes from which of
         // its neighbours hold ground, not from the crystal contests — soil is
         // a surface, not a mineral.
-        ["topsoil"] = (seed, _, _, _) => new TopsoilNode(seed),
+        //
+        // It takes the world's terrain field all the same, because it has to
+        // work out what the rock BENEATH it looks like in order to leave that
+        // rock's rims alone, and it must reach the same verdict the rock does.
+        ["topsoil"] = (seed, _, _, _) => new TopsoilNode(seed, TerrainFor(seed)),
     };
 
     /// <summary>

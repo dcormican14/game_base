@@ -102,9 +102,40 @@ public static class TopsoilGeometry
     {
         public readonly int Neighbours;
 
-        public Mask(int neighbours)
+        /// <summary>
+        /// Which sub-cells of this node the surrounding crystal already
+        /// fills, one bit each.
+        ///
+        /// A raw rim grows UP out of the rock below into this node's floor.
+        /// Soil filling its own footprint regardless puts two materials in the
+        /// same sub-cell — measured at 1884 of them over a small block of soil
+        /// on rock, every one in this row — and each then draws an outward face
+        /// there, coplanar and facing the same way with air in front of both,
+        /// so neither is culled and the two z-fight.
+        ///
+        /// NINE cells are consulted, not one. A corner win takes the 2x2x2
+        /// straddling a lattice corner, so a rock node sitting diagonally below
+        /// reaches up AND sideways into this floor; arbitrating against only
+        /// the cell directly beneath still left 1059 sub-cells contested.
+        ///
+        /// Gathered by the node type, which recomputes each mask from its cell
+        /// position — no neighbour is read, only re-derived — and folded to a
+        /// bitmask so the geometry cache keys on something small.
+        /// </summary>
+        public readonly ulong Taken;
+
+        /// <summary>
+        /// The same, for the cell directly ABOVE — where a raised back grows.
+        /// That row is outside this node own cell, so it needs its own
+        /// arbitration or the bridging row collides with a rim up there.
+        /// </summary>
+        public readonly ulong TakenAbove;
+
+        public Mask(int neighbours, ulong taken = 0UL, ulong takenAbove = 0UL)
         {
             Neighbours = neighbours;
+            Taken = taken;
+            TakenAbove = takenAbove;
         }
     }
 
@@ -124,51 +155,58 @@ public static class TopsoilGeometry
     /// horizontal diagonals, and four cells above the horizontal faces.</summary>
     public const int Masks = 1 << NodeFace.Count;
 
-    // One shape per mask, built on demand and kept. Small enough to build up
-    // front; done lazily only to keep startup free of work a world may never
-    // need.
-    private static readonly NodeMesh[] _meshes = new NodeMesh[Masks];
-    private static readonly int[][] _occupancy = new int[Masks][];
-    private static readonly object _lock = new();
+    // One shape per (neighbour mask, rock below) pair, built on demand.
+    //
+    // A dictionary rather than a flat array now: the pair spans far more
+    // combinations than a world uses, and only the ones that actually occur
+    // are ever built. In practice a world reuses a modest set, since the rock
+    // below only matters through the handful of top features it can win.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<
+        (int, ulong, ulong), NodeMesh> _meshes = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<
+        (int, ulong, ulong), int[]> _occupancy = new();
 
     /// <summary>The meshed shape for a mask, built once and cached.</summary>
     public static NodeMesh Get(in Mask mask)
     {
-        int key = KeyOf(mask);
-        lock (_lock)
-        {
-            return _meshes[key] ??= Build(FromKey(key));
-        }
+        var key = KeyOf(mask);
+        if (_meshes.TryGetValue(key, out NodeMesh cached))
+            return cached;
+
+        NodeMesh built = Build(mask);
+        _meshes[key] = built;
+        return built;
     }
 
-    private static int KeyOf(in Mask mask) => mask.Neighbours & (Masks - 1);
+    /// <summary>The bit index of a sub-cell within <see cref="Mask.Taken"/>.</summary>
+    public static int CellBit(int i, int j, int k) => (i * Sub + j) * Sub + k;
 
-    private static Mask FromKey(int key) => new(key);
+    private static (int Neighbours, ulong Taken, ulong Above) KeyOf(in Mask mask) => (
+        mask.Neighbours & (Masks - 1), mask.Taken, mask.TakenAbove);
 
     /// <summary>The quarter-cells this shape fills, as flat (i,j,k) triples in
     /// node-local coordinates.</summary>
     public static int[] OccupiedCells(in Mask mask)
     {
-        int key = KeyOf(mask);
-        lock (_lock)
-        {
-            if (_occupancy[key] != null)
-                return _occupancy[key];
+        var key = KeyOf(mask);
+        if (_occupancy.TryGetValue(key, out int[] cached))
+            return cached;
 
-            var list = new List<int>(Sub * Sub * Sub * 3);
-            Mask local = FromKey(key);
-            for (int i = 0; i < Sub; i++)
-                for (int j = 0; j < Sub + RiseReach; j++)
-                    for (int k = 0; k < Sub; k++)
-                        if (Occupies(local, i, j, k))
-                        {
-                            list.Add(i);
-                            list.Add(j);
-                            list.Add(k);
-                        }
+        var list = new List<int>(Sub * Sub * Sub * 3);
+        Mask local = mask;
+        for (int i = 0; i < Sub; i++)
+            for (int j = 0; j < Sub + RiseReach; j++)
+                for (int k = 0; k < Sub; k++)
+                    if (Occupies(local, i, j, k))
+                    {
+                        list.Add(i);
+                        list.Add(j);
+                        list.Add(k);
+                    }
 
-            return _occupancy[key] = list.ToArray();
-        }
+        int[] built = list.ToArray();
+        _occupancy[key] = built;
+        return built;
     }
 
     /// <summary>
@@ -190,6 +228,31 @@ public static class TopsoilGeometry
         // raised back needs. That space is air — the node above is not soil,
         // or this one would be buried — so nothing else claims it.
         if (j < 0 || j >= Sub + RiseReach)
+            return false;
+
+        // THE FLOOR YIELDS TO THE ROCK BELOW.
+        //
+        // A crystal rim grows UP out of the node beneath, into this node's
+        // bottom row. Soil filling its own footprint regardless puts two
+        // materials in the same sub-cell, and each draws an outward face there
+        // — coplanar, facing the same way, air in front of both — so neither
+        // is culled and the two z-fight.
+        //
+        // The rock wins that space. It grew into it under the interlock rule,
+        // which the whole world tiles by; the soil is the newcomer and simply
+        // steps aside, so the crystal shows through and the soil silhouette
+        // breaks at every raw boundary rather than hovering over it.
+        //
+        // Anywhere in the node: a rim reaches in from whichever direction
+        // won the feature, not only from below.
+        if (j < Sub && (mask.Taken & 1UL << CellBit(i, j, k)) != 0UL)
+            return false;
+
+        // The raised back sits ABOVE this node's own cell, outside the mask
+        // above, and a rim from the rock beside the cell up there can reach
+        // into it just the same. Left unchecked that collided 83 times on a
+        // slope. Its own bit lives in TakenAbove.
+        if (j >= Sub && (mask.TakenAbove & 1UL << CellBit(i, j - Sub, k)) != 0UL)
             return false;
 
         // With ground above, this node is buried and has no surface to shape.
@@ -292,7 +355,13 @@ public static class TopsoilGeometry
         // Only where the bevel has not already cut this column. A column that
         // is falling away toward air is not also climbing toward a rise, and
         // adding to it would fill in the very lip the bevel just opened.
-        if (drop == 0)
+        //
+        // And never with ground directly overhead. The rise reaches one
+        // quarter-cell above this node's own cell, which is free only while
+        // that cell is air; growing into a node that is actually there put 255
+        // sub-cells in contention on a slope. A node with something above it
+        // is buried anyway and has no surface to bridge.
+        if (drop == 0 && !NodeFace.Has(mask.Neighbours, NodeFace.PosY))
             height += rise;
 
         return height;
