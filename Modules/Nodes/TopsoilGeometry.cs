@@ -255,6 +255,20 @@ public static class TopsoilGeometry
         if (j >= Sub && (mask.TakenAbove & 1UL << CellBit(i, j - Sub, k)) != 0UL)
             return false;
 
+        // THE RAISED BACK NEVER LEAVES AN OCCUPIED CELL.
+        //
+        // Rows at or above Sub sit in the cell ABOVE this one, which the node
+        // may only borrow while that cell is empty. With ground up there the
+        // space is already owned, and taking it anyway had every buried soil
+        // node overflow a row into its neighbour — 60252 doubly-claimed
+        // sub-cells over a block of real terrain, every one of them a node's
+        // floor row shared with the node beneath it.
+        //
+        // Checked before the buried short-circuit below, which returns solid
+        // for the whole range and would otherwise fill this row regardless.
+        if (j >= Sub && NodeFace.Has(mask.Neighbours, NodeFace.PosY))
+            return false;
+
         // With ground above, this node is buried and has no surface to shape.
         // Filling solid is what makes a stack of soil read as one mass rather
         // than as layers with a lid on each.
