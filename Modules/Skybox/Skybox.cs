@@ -81,15 +81,63 @@ public partial class Skybox : Node
     }
 
     /// <summary>
-    /// How much the sky lights the scene. Space is dark, so this is low by
-    /// default — raise it to let nebula colour spill onto your geometry.
+    /// How much ambient light the scene receives — which is to say, how bright
+    /// SHADOWS are, since ambient is all an unlit face gets.
+    ///
+    /// Raised from the 0.35 a pure-sky ambient wanted. Terrain albedo runs
+    /// dark (soil is around 0.10), and a dark albedo under a dim ambient has
+    /// nothing left to carry a hue: measured through the Filmic curve, soil in
+    /// shadow resolved to #090204 — black, whatever colour the ambient was.
+    /// At 0.70 the same face lands on #18060d, which reads as plum. Higher
+    /// washes the shadow out and costs contrast against the lit side: at 1.4
+    /// it is #2d111b against a #482f2b lit face.
     /// </summary>
-    private float _ambientEnergy = 0.35f;
+    private float _ambientEnergy = 0.70f;
     [Export(PropertyHint.Range, "0,4,0.05")]
     public float AmbientEnergy
     {
         get => _ambientEnergy;
         set { _ambientEnergy = value; Rebuild(); }
+    }
+
+    /// <summary>
+    /// The colour of the light that fills SHADOW.
+    ///
+    /// Ambient is the only light an unlit face receives, so this is what
+    /// decides what a shadow looks like. Taken from the nebula's plum rather
+    /// than left to the sky's own average: sampling the sky gives a shadow
+    /// that is merely dark, because the background is nearly black, and the
+    /// result reads as crushed rather than as coloured. A stated plum keeps
+    /// the shadow tied to the backdrop while staying light enough to see
+    /// shape in.
+    ///
+    /// Brighter and more saturated than <see cref="SpaceColor"/> on purpose.
+    /// It is competing with a directional light rather than being looked at
+    /// directly, and the Filmic tonemapper crushes darks hard.
+    /// </summary>
+    private Color _ambientColor = new(0.300f, 0.085f, 0.245f);
+    [Export]
+    public Color AmbientColor
+    {
+        get => _ambientColor;
+        set { _ambientColor = value; Rebuild(); }
+    }
+
+    /// <summary>
+    /// How much of the ambient comes from this stated colour rather than from
+    /// the sky itself. 1 is all sky (the old behaviour), 0 all
+    /// <see cref="AmbientColor"/>.
+    ///
+    /// Not zero: a little real sky keeps the nebula spilling onto surfaces
+    /// that face it, which is what sells the islands as being inside the
+    /// backdrop rather than composited over it.
+    /// </summary>
+    private float _skyAmbientShare = 0.25f;
+    [Export(PropertyHint.Range, "0,1,0.01")]
+    public float SkyAmbientShare
+    {
+        get => _skyAmbientShare;
+        set { _skyAmbientShare = value; Rebuild(); }
     }
 
     // The three layers the sky shader composites, in order: space, then
@@ -478,6 +526,8 @@ public partial class Skybox : Node
         _sky.SkyMaterial = material;
         _environment.BackgroundEnergyMultiplier = SkyEnergy;
         _environment.AmbientLightEnergy = AmbientEnergy;
+        _environment.AmbientLightColor = AmbientColor;
+        _environment.AmbientLightSkyContribution = SkyAmbientShare;
     }
 
     /// <summary>Creates the WorldEnvironment this module drives, once.</summary>
@@ -507,7 +557,8 @@ public partial class Skybox : Node
             // Light the scene from the sky itself: in space there is no
             // bounce light from ground, so the nebulae are the ambient source.
             AmbientLightSource = Godot.Environment.AmbientSource.Sky,
-            AmbientLightSkyContribution = 1f,
+            AmbientLightSkyContribution = SkyAmbientShare,
+            AmbientLightColor = AmbientColor,
             TonemapMode = Godot.Environment.ToneMapper.Filmic,
         };
 
