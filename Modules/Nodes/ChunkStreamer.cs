@@ -221,9 +221,33 @@ public abstract partial class ChunkStreamer : Node
 
         Vector3I centre = World.CellAt(Target.GlobalPosition);
 
-        // Only rescan once the target has actually moved somewhere that could
-        // change the answer.
-        if (!_hasScanned || Distance(centre, _lastScanCell) >= RescanAfterCells)
+        // Rescan when the target has moved somewhere that could change the
+        // answer, OR when generation has run dry while the world is still not
+        // ready.
+        //
+        // THE SECOND CASE IS A DEADLOCK FIX, NOT AN OPTIMISATION.
+        //
+        // Rescan queues the whole residency ball and Trim keeps only the
+        // nearest QueueLimit, un-marking the rest so a later scan can offer
+        // them again. At LoadRadius 3 the ball is 257 chunks against a limit of
+        // 64, so most of it is dropped every scan and only re-offered by the
+        // next one. Movement alone does not provide a next one: a player
+        // standing still at spawn never travels the cells that triggers it.
+        //
+        // What that left was a mesh queue full of chunks whose face neighbours
+        // had been dropped and would never be asked for again. Measured on the
+        // planet, the streamer settled at 85% ready with 29 chunks queued for
+        // meshing, each waiting on neighbours only two or three chunks away
+        // that were in no queue, in no worker, and not marked — unchanged from
+        // four seconds in to twenty.
+        //
+        // Generation running dry is the signal, NOT every queue being empty:
+        // the mesh queue is precisely what stays full in this state, so
+        // waiting for it to drain would wait forever.
+        bool starved = _toGenerate.Count == 0 && _inFlight.Count == 0;
+
+        if (!_hasScanned || (starved && !IsReady)
+            || Distance(centre, _lastScanCell) >= RescanAfterCells)
         {
             Rescan(NodeChunkStore.ChunkOf(centre));
             _lastScanCell = centre;
