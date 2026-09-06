@@ -108,8 +108,20 @@ public static class TopsoilGeometry
         }
     }
 
-    /// <summary>How many distinct neighbour masks there are: six faces plus
-    /// four horizontal diagonals.</summary>
+    /// <summary>
+    /// How far the back of a node is built up toward rising ground, in
+    /// quarter-cells.
+    ///
+    /// One, deliberately less than <see cref="BevelReach"/>. Two was tried and
+    /// overshoots: the node climbs as fast as the terrain does and the step
+    /// simply moves rather than closing, leaving the same two-sub-cell jump a
+    /// column further along. At one the profile across a staircase slope runs
+    /// evenly — every adjacent pair of sub-columns differs by at most one.
+    /// </summary>
+    public const int RiseReach = 1;
+
+    /// <summary>How many distinct neighbour masks there are: six faces, four
+    /// horizontal diagonals, and four cells above the horizontal faces.</summary>
     public const int Masks = 1 << NodeFace.Count;
 
     // One shape per mask, built on demand and kept. Small enough to build up
@@ -146,7 +158,7 @@ public static class TopsoilGeometry
             var list = new List<int>(Sub * Sub * Sub * 3);
             Mask local = FromKey(key);
             for (int i = 0; i < Sub; i++)
-                for (int j = 0; j < Sub; j++)
+                for (int j = 0; j < Sub + RiseReach; j++)
                     for (int k = 0; k < Sub; k++)
                         if (Occupies(local, i, j, k))
                         {
@@ -168,10 +180,16 @@ public static class TopsoilGeometry
     /// </summary>
     public static bool Occupies(in Mask mask, int i, int j, int k)
     {
-        // Never outside its own footprint. Soil grows no rims; a raw
-        // neighbour's rim may overhang it, which is what makes crystal read as
-        // growing over the ground rather than out of it.
-        if (i < 0 || i >= Sub || j < 0 || j >= Sub || k < 0 || k >= Sub)
+        // Horizontally the node never leaves its own footprint. Soil grows no
+        // rims sideways; a raw neighbour's rim may overhang it, which is what
+        // makes crystal read as growing over the ground rather than out of it.
+        if (i < 0 || i >= Sub || k < 0 || k >= Sub)
+            return false;
+
+        // Vertically it may reach a little ABOVE its cell, into the space a
+        // raised back needs. That space is air — the node above is not soil,
+        // or this one would be buried — so nothing else claims it.
+        if (j < 0 || j >= Sub + RiseReach)
             return false;
 
         // With ground above, this node is buried and has no surface to shape.
@@ -245,7 +263,59 @@ public static class TopsoilGeometry
         // the column up, but a node may not grow past its own ceiling — the
         // cell above belongs to whatever is up there — so the rise is already
         // at the cap.
-        return Mathf.Max(Sub - drop, 1);
+        int height = Mathf.Max(Sub - drop, 1);
+
+        // THE RAISED BACK, bridging the step up a slope.
+        //
+        // Bevelling alone makes a staircase of cliffs. On ground climbing to
+        // the +X, every node bevels its downhill edge and stops flat at its
+        // own ceiling, so the profile runs 2,3,4,4 and then jumps to 6 at the
+        // next node — a two-sub-cell cliff at every boundary.
+        //
+        // The material the bevel took off has to go somewhere, and uphill is
+        // where it belongs. A side whose ground rises builds its back up
+        // instead of stopping flat, so the profile becomes 2,3,4,5 and meets
+        // the neighbour's 6 with a single step. Measured across three nodes,
+        // the largest step between adjacent sub-columns falls from 2 to 1.
+        //
+        // A side RISES when its neighbour is solid AND the cell above that
+        // neighbour is solid too. The neighbour alone only says the ground
+        // continues; the cell above it says the ground continues higher.
+        int rise = 0;
+        rise = Mathf.Max(rise, RiseFrom(i, NodeFace.NegX, NodeFace.UpNegX, mask.Neighbours));
+        rise = Mathf.Max(rise,
+            RiseFrom(Sub - 1 - i, NodeFace.PosX, NodeFace.UpPosX, mask.Neighbours));
+        rise = Mathf.Max(rise, RiseFrom(k, NodeFace.NegZ, NodeFace.UpNegZ, mask.Neighbours));
+        rise = Mathf.Max(rise,
+            RiseFrom(Sub - 1 - k, NodeFace.PosZ, NodeFace.UpPosZ, mask.Neighbours));
+
+        // Only where the bevel has not already cut this column. A column that
+        // is falling away toward air is not also climbing toward a rise, and
+        // adding to it would fill in the very lip the bevel just opened.
+        if (drop == 0)
+            height += rise;
+
+        return height;
+    }
+
+    /// <summary>
+    /// How far one side lifts a column standing `distance` quarter-cells in
+    /// from that face.
+    ///
+    /// Only when the ground that way genuinely steps UP — the neighbour solid
+    /// and the cell above it solid as well. Zero otherwise, and zero beyond
+    /// <see cref="RiseReach"/>, so what is added is a lip along the uphill
+    /// edge rather than a ramp across the whole node.
+    /// </summary>
+    private static int RiseFrom(int distance, int face, int above, int neighbours)
+    {
+        if (distance >= RiseReach)
+            return 0;
+
+        if (!NodeFace.Has(neighbours, face) || !NodeFace.Has(neighbours, above))
+            return 0;
+
+        return RiseReach - distance;
     }
 
     /// <summary>
@@ -274,8 +344,11 @@ public static class TopsoilGeometry
         var solid = new bool[span, span, span];
         Mask local = mask;
 
+        // Up to Sub + RiseReach in y: a raised back reaches above the node's
+        // own cell, and stopping at Sub would drop exactly the row that
+        // bridges the step.
         for (int i = 0; i < Sub; i++)
-            for (int j = 0; j < Sub; j++)
+            for (int j = 0; j < Sub + RiseReach; j++)
                 for (int k = 0; k < Sub; k++)
                     if (Occupies(local, i, j, k))
                         solid[i - lo, j - lo, k - lo] = true;
