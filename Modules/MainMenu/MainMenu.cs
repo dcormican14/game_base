@@ -9,8 +9,15 @@ namespace GameBase.UI;
 /// </summary>
 public partial class MainMenu : Control
 {
+    /// <summary>
+    /// The scene Play launches.
+    ///
+    /// The floating-island levels are still in the project and still work —
+    /// point this at Game/IslandStreamLevel.tscn (endless islands) or
+    /// Game/IslandLevel.tscn (one fixed region) to go back to them.
+    /// </summary>
     [Export(PropertyHint.File, "*.tscn")]
-    public string GameScenePath { get; set; } = "res://Game/IslandLevel.tscn";
+    public string GameScenePath { get; set; } = "res://Game/PlanetLevel.tscn";
 
     [Export] public string GameTitle { get; set; } = "GAME BASE";
 
