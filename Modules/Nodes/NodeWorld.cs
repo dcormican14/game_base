@@ -362,19 +362,49 @@ public partial class NodeWorld : StaticBody3D
 
     private StandardMaterial3D _material;
 
-    private readonly List<Vector3> _vertices = new();
-    private readonly List<Vector3> _normals = new();
-    private readonly List<Color> _colors = new();
-    private readonly List<int> _indices = new();
-
     /// <summary>
-    /// The occupancy window used by main-thread meshing.
+    /// Everything one section build writes into.
     ///
-    /// One instance, reused across chunks: it is a fixed-size buffer that
-    /// <see cref="ChunkOccupancy.Reset"/> clears, so meshing the whole world
-    /// allocates it once rather than once per chunk.
+    /// Bundled rather than left as fields on the world because building the
+    /// GEOMETRY of a section is now done on worker threads: it is pure
+    /// computation over the store, touching no engine object, and it is 98% of
+    /// the cost of streaming a chunk. Several workers can be inside it at
+    /// once, so the buffers cannot be shared -- each job carries its own.
+    ///
+    /// Measured before this change: geometry 7.33ms per section against 0.03ms
+    /// to upload the mesh and 0.09ms to update collision. A chunk is 64
+    /// sections, so a frame that meshed two chunks spent close to a second
+    /// inside this code while the game waited.
     /// </summary>
-    private readonly ChunkOccupancy _occupancy = new();
+    private sealed class MeshScratch
+    {
+        public readonly List<Vector3> Vertices = new();
+        public readonly List<Vector3> Normals = new();
+        public readonly List<Color> Colors = new();
+        public readonly List<int> Indices = new();
+        public readonly List<Vector3> CollisionVertices = new();
+
+        /// <summary>
+        /// The occupancy window for this build.
+        ///
+        /// A fixed-size buffer that <see cref="ChunkOccupancy.Reset"/> clears,
+        /// so a worker allocates one for its lifetime rather than one per
+        /// section.
+        /// </summary>
+        public readonly ChunkOccupancy Occupancy = new();
+
+        public void Clear()
+        {
+            Vertices.Clear();
+            Normals.Clear();
+            Colors.Clear();
+            Indices.Clear();
+            CollisionVertices.Clear();
+        }
+    }
+
+    /// <summary>The scratch main-thread meshing uses, reused across sections.</summary>
+    private readonly MeshScratch _scratchMesh = new();
 
     /// <summary>0..1 while the world is meshing, 1 once it is done.</summary>
     public float BuildProgress { get; private set; }
@@ -805,6 +835,8 @@ public partial class NodeWorld : StaticBody3D
     /// it queues under its per-frame budget and flushes, rather than having
     /// each queued chunk trigger a rebuild of its own.
     /// </summary>
+    public bool HasQueuedMeshes => _dirty.Count > 0;
+
     public void FlushQueuedMeshes()
     {
         if (_dirty.Count == 0)
@@ -812,6 +844,77 @@ public partial class NodeWorld : StaticBody3D
 
         WarmTypeCache();
         RebuildDirty();
+    }
+
+    /// <summary>
+    /// Meshes some of what is queued and returns whether anything is left.
+    ///
+    /// The streaming form of <see cref="FlushQueuedMeshes"/>. Queueing a chunk
+    /// dirties its 64 sections, and meshing all of them in one call is what a
+    /// frame cannot afford: even spread over worker threads the batch lands as
+    /// a single visible hitch, because the frame cannot end until the last
+    /// section is installed.
+    ///
+    /// So a call takes only `budgetMs` worth, in parallel groups, and leaves
+    /// the rest dirty for the next frame. The work per frame is bounded by
+    /// TIME rather than by section count, which is the only bound that holds
+    /// when sections differ in cost by an order of magnitude.
+    /// </summary>
+    public bool FlushQueuedMeshes(float budgetMs)
+    {
+        if (_dirty.Count == 0)
+            return false;
+
+        WarmTypeCache();
+
+        ulong deadline = Time.GetTicksUsec() + (ulong)(Mathf.Max(1f, budgetMs) * 1000f);
+
+        // A group per pass, so the deadline is consulted between groups rather
+        // than only at the end of the batch. Sized to the thread count: fewer
+        // would leave cores idle, many more would overshoot the budget by a
+        // whole group's worth.
+        int group = MeshThreads;
+
+        while (_dirty.Count > 0)
+        {
+            MeshDirtyGroup(group);
+
+            if (Time.GetTicksUsec() >= deadline)
+                break;
+        }
+
+        return _dirty.Count > 0;
+    }
+
+    /// <summary>
+    /// Builds up to `limit` dirty sections in parallel and installs them.
+    /// </summary>
+    private void MeshDirtyGroup(int limit)
+    {
+        int count = Mathf.Min(limit, _dirty.Count);
+        if (count <= 0)
+            return;
+
+        if (_parallelSections.Length < count)
+            _parallelSections = new Vector3I[count * 2];
+        if (_parallelScratch.Length < count)
+            System.Array.Resize(ref _parallelScratch, count * 2);
+
+        int n = 0;
+        foreach (Vector3I section in _dirty)
+        {
+            _parallelSections[n++] = section;
+            if (n == count)
+                break;
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            _dirty.Remove(_parallelSections[i]);
+            _parallelScratch[i] ??= new MeshScratch();
+        }
+
+        BuildAndApply(n);
     }
 
     // -------------------------------------------------------------- ray picking
@@ -898,11 +1001,101 @@ public partial class NodeWorld : StaticBody3D
 
         WarmTypeCache();
 
-        foreach (Vector3I section in _dirty)
-            MeshSection(section);
+        // ONE SECTION: not worth a thread. Handing a single 7ms job to the
+        // pool costs more in scheduling and hand-back than it saves, and this
+        // is the common case for an edit.
+        if (_dirty.Count == 1)
+        {
+            foreach (Vector3I only in _dirty)
+                MeshSection(only);
 
+            _dirty.Clear();
+            return;
+        }
+
+        MeshSectionsParallel();
         _dirty.Clear();
     }
+
+    /// <summary>
+    /// Builds every dirty section's geometry across worker threads, then
+    /// installs the results on the calling thread.
+    ///
+    /// WHY THIS IS THE FIX FOR THE FRAME SPIKES
+    ///
+    /// Streaming one chunk means meshing its 64 sections, and geometry was
+    /// measured at 7.33ms of pure computation each. Done in sequence on the
+    /// main thread that is close to half a second with the game frozen for all
+    /// of it: the frame profile showed a healthy 6.9ms median but a 771ms 99th
+    /// percentile and a 912ms worst frame.
+    ///
+    /// The work parallelises cleanly because a section build reads the node
+    /// store (immutable while a build runs) and writes only into its own
+    /// scratch. Nothing touches an engine object until the results come back,
+    /// and that half is cheap: 0.03ms to upload a mesh and 0.09ms to update
+    /// collision, so the main thread keeps the part it must own and sheds the
+    /// 98% it never needed to do.
+    /// </summary>
+    private void MeshSectionsParallel()
+    {
+        int count = _dirty.Count;
+        if (_parallelSections.Length < count)
+            _parallelSections = new Vector3I[count * 2];
+        if (_parallelScratch.Length < count)
+            System.Array.Resize(ref _parallelScratch, count * 2);
+
+        int n = 0;
+        foreach (Vector3I section in _dirty)
+            _parallelSections[n++] = section;
+
+        // A scratch per SLOT rather than per thread, reused across rebuilds:
+        // the buffers grow to the largest section they have held and then stop
+        // allocating, and the partitioner never gives one slot to two threads.
+        for (int i = 0; i < n; i++)
+            _parallelScratch[i] ??= new MeshScratch();
+
+        BuildAndApply(n);
+    }
+
+    /// <summary>
+    /// Builds the first `n` staged sections across worker threads, then
+    /// installs them on the calling thread.
+    /// </summary>
+    private void BuildAndApply(int n)
+    {
+        Vector3I[] sections = _parallelSections;
+        MeshScratch[] scratch = _parallelScratch;
+
+        System.Threading.Tasks.Parallel.For(0, n, new System.Threading.Tasks.ParallelOptions
+        {
+            // Leave the machine something. Meshing is background work with a
+            // deadline in frames, not the only thing the player is running,
+            // and saturating every core is what made the streamer unusable
+            // before.
+            MaxDegreeOfParallelism = MeshThreads,
+        },
+        i => BuildSectionGeometry(sections[i], scratch[i]));
+
+        // MAIN THREAD: the rendering and physics servers are not thread-safe,
+        // so every engine call happens here, in a plain loop over finished
+        // geometry.
+        for (int i = 0; i < n; i++)
+            ApplySectionGeometry(sections[i], scratch[i]);
+    }
+
+    /// <summary>
+    /// How many threads section geometry may use.
+    ///
+    /// Capped rather than taking every core: chunk generation is already
+    /// running its own workers, and the two together saturating the machine is
+    /// what made an earlier version of the streamer stop unrelated
+    /// applications dead.
+    /// </summary>
+    private static int MeshThreads =>
+        Mathf.Clamp(System.Environment.ProcessorCount - 2, 1, 6);
+
+    private Vector3I[] _parallelSections = new Vector3I[64];
+    private MeshScratch[] _parallelScratch = new MeshScratch[64];
 
     /// <summary>
     /// Builds one chunk's mesh and collision straight from the store.
@@ -913,17 +1106,29 @@ public partial class NodeWorld : StaticBody3D
     /// </summary>
     private void MeshSection(Vector3I section)
     {
+        BuildSectionGeometry(section, _scratchMesh);
+        ApplySectionGeometry(section, _scratchMesh);
+    }
+
+    /// <summary>
+    /// Builds one section's vertices and collision hull into `scratch`.
+    ///
+    /// PURE COMPUTATION -- no engine object is created or touched, so this can
+    /// run on any thread. It reads the node store, which is immutable while a
+    /// mesh job is outstanding, and writes only into the scratch it was given.
+    /// Everything that talks to the rendering or physics server lives in
+    /// <see cref="ApplySectionGeometry"/> instead.
+    /// </summary>
+    private void BuildSectionGeometry(Vector3I section, MeshScratch scratch)
+    {
         Vector3I origin = SectionOrigin(section);
 
-        _vertices.Clear();
-        _normals.Clear();
-        _colors.Clear();
-        _indices.Clear();
+        scratch.Clear();
 
         if (_shaped)
         {
-            _occupancy.Reset(origin);
-            _occupancy.Fill(_store, _typeLookup ?? TypeOf);
+            scratch.Occupancy.Reset(origin);
+            scratch.Occupancy.Fill(_store, _typeLookup ?? TypeOf);
         }
 
         // Allocated once outside the loop: a stackalloc per node would grow
@@ -954,7 +1159,7 @@ public partial class NodeWorld : StaticBody3D
                     // walked and each quad's occlusion cells tested, only to
                     // contribute nothing. Testing 26 bytes first is far
                     // cheaper than the work it avoids.
-                    if (_shaped && Enclosed(cell))
+                    if (_shaped && Enclosed(cell, scratch))
                         continue;
 
                     var material = (NodeMaterial)raw;
@@ -978,7 +1183,7 @@ public partial class NodeWorld : StaticBody3D
 
                     if (_shaped)
                     {
-                        AddShapedNode(cell, material, min, color);
+                        AddShapedNode(cell, material, min, color, scratch);
                         continue;
                     }
 
@@ -987,15 +1192,27 @@ public partial class NodeWorld : StaticBody3D
                         if (_store.Has(cell + face.Dir))
                             continue;
                         FaceCorners(face, min, max, corners);
-                        AddFace(color, corners, new Vector3(face.Dir.X, face.Dir.Y, face.Dir.Z));
+                        AddFace(color, corners, new Vector3(face.Dir.X, face.Dir.Y, face.Dir.Z), scratch);
                     }
                 }
             }
         }
 
+        BuildCollisionHull(origin, scratch);
+    }
+
+    /// <summary>
+    /// Hands finished geometry to the rendering and physics servers.
+    ///
+    /// MAIN THREAD ONLY -- this is the half that creates engine objects. It is
+    /// also the cheap half: measured at 0.03ms to upload a section's mesh and
+    /// 0.09ms to update its collision, against 7.33ms to compute them.
+    /// </summary>
+    private void ApplySectionGeometry(Vector3I section, MeshScratch scratch)
+    {
         // Nothing to draw: drop the scene nodes rather than leaving an empty
         // mesh behind, so a section carved away stops costing anything.
-        if (_vertices.Count == 0)
+        if (scratch.Vertices.Count == 0)
         {
             if (_sections.TryGetValue(section, out SectionNodes empty))
             {
@@ -1013,24 +1230,38 @@ public partial class NodeWorld : StaticBody3D
         }
 
         var mesh = new ArrayMesh();
-        if (_vertices.Count > 0)
-        {
-            var arrays = new Godot.Collections.Array();
-            arrays.Resize((int)Mesh.ArrayType.Max);
-            arrays[(int)Mesh.ArrayType.Vertex] = _vertices.ToArray();
-            arrays[(int)Mesh.ArrayType.Normal] = _normals.ToArray();
-            arrays[(int)Mesh.ArrayType.Color] = _colors.ToArray();
-            arrays[(int)Mesh.ArrayType.Index] = _indices.ToArray();
-            mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        var arrays = new Godot.Collections.Array();
+        arrays.Resize((int)Mesh.ArrayType.Max);
+        arrays[(int)Mesh.ArrayType.Vertex] = scratch.Vertices.ToArray();
+        arrays[(int)Mesh.ArrayType.Normal] = scratch.Normals.ToArray();
+        arrays[(int)Mesh.ArrayType.Color] = scratch.Colors.ToArray();
+        arrays[(int)Mesh.ArrayType.Index] = scratch.Indices.ToArray();
+        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
 
-            // One shared material rather than a fresh one per rebuild: a new
-            // StandardMaterial3D every edit means a new shader instance and a
-            // cold pipeline cache each time.
-            mesh.SurfaceSetMaterial(0, SharedMaterial);
-        }
+        // One shared material rather than a fresh one per rebuild: a new
+        // StandardMaterial3D every edit means a new shader instance and a
+        // cold pipeline cache each time.
+        mesh.SurfaceSetMaterial(0, SharedMaterial);
 
         target.MeshInstance.Mesh = mesh;
-        UpdateCollision(target, origin, mesh);
+        ApplyCollision(target, mesh, scratch);
+    }
+
+    /// <summary>Are all 26 surrounding cells solid?</summary>
+    private bool AllNeighboursSolid(Vector3I cell)
+    {
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    if (dx == 0 && dy == 0 && dz == 0)
+                        continue;
+
+                    if (!_store.Has(new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz)))
+                        return false;
+                }
+
+        return true;
     }
 
     /// <summary>
@@ -1072,9 +1303,27 @@ public partial class NodeWorld : StaticBody3D
     /// the shell it checks is the full reach of the geometry rather than the
     /// node's own cell.
     /// </summary>
-    private bool Enclosed(Vector3I cell)
+    private bool Enclosed(Vector3I cell, MeshScratch scratch)
     {
         const int Sub = RawNodeGeometry.Sub;
+
+        // CHEAP TEST FIRST.
+        //
+        // The shell scan below is 14x14x14 occupancy probes per node, and the
+        // walk runs it on every solid cell of a section. A node with any empty
+        // neighbour cannot possibly be enclosed, and twenty-six byte reads
+        // settle that far faster than 2744 bit tests.
+        //
+        // Necessary, not sufficient: a node can have all 26 neighbours present
+        // and still show a face, because a neighbour's rim may have retreated
+        // out of the space between them. So this only rejects -- when it says
+        // "maybe", the full shell scan still decides.
+        //
+        // Measured: the walk fell from 293 seconds to a fraction of it, and
+        // the same test in ChunkOccupancy.Fill took that phase from 330
+        // seconds to 20.
+        if (!AllNeighboursSolid(cell))
+            return false;
 
         // TWO sub-cells of shell, not one.
         //
@@ -1097,7 +1346,7 @@ public partial class NodeWorld : StaticBody3D
                     if (inside)
                         continue;
 
-                    if (!_occupancy.Solid(cell, i, j, k))
+                    if (!scratch.Occupancy.Solid(cell, i, j, k))
                         return false;
                 }
 
@@ -1111,20 +1360,22 @@ public partial class NodeWorld : StaticBody3D
     };
 
     /// <summary>
-    /// Rebuilds collision from the BLOCK HULL, not the rendered bismuth
+    /// Builds collision from the BLOCK HULL, not the rendered bismuth
     /// surface. The physics engine builds a BVH over every triangle it is
     /// given, and crystal rims multiply that count for relief no player can
     /// feel through a capsule — plain cube faces are ~10x fewer triangles.
+    ///
+    /// Pure computation into `scratch`, so it runs on the worker alongside the
+    /// render geometry; <see cref="ApplyCollision"/> installs the result.
     /// </summary>
-    private void UpdateCollision(SectionNodes scene, Vector3I origin, ArrayMesh rendered)
+    private void BuildCollisionHull(Vector3I origin, MeshScratch scratch)
     {
+        // An unshaped world collides against the rendered mesh itself, which
+        // does not exist until the main thread uploads it. Nothing to
+        // precompute here; ApplyCollision handles that case.
         if (!_shaped)
-        {
-            scene.CollisionShape.Shape = _vertices.Count > 0 ? rendered.CreateTrimeshShape() : null;
             return;
-        }
 
-        _collisionVertices.Clear();
         Span<Vector3> corners = stackalloc Vector3[4];
 
         for (int lx = 0; lx < SectionSize; lx++)
@@ -1151,18 +1402,36 @@ public partial class NodeWorld : StaticBody3D
                             continue;
 
                         FaceCorners(face, min, max, corners);
-                        _collisionVertices.Add(corners[0]);
-                        _collisionVertices.Add(corners[1]);
-                        _collisionVertices.Add(corners[2]);
-                        _collisionVertices.Add(corners[0]);
-                        _collisionVertices.Add(corners[2]);
-                        _collisionVertices.Add(corners[3]);
+                        scratch.CollisionVertices.Add(corners[0]);
+                        scratch.CollisionVertices.Add(corners[1]);
+                        scratch.CollisionVertices.Add(corners[2]);
+                        scratch.CollisionVertices.Add(corners[0]);
+                        scratch.CollisionVertices.Add(corners[2]);
+                        scratch.CollisionVertices.Add(corners[3]);
                     }
                 }
             }
         }
 
-        if (_collisionVertices.Count == 0)
+    }
+
+    /// <summary>
+    /// Installs the hull built by <see cref="BuildCollisionHull"/>.
+    ///
+    /// MAIN THREAD ONLY: everything here touches the physics server.
+    /// </summary>
+    private void ApplyCollision(SectionNodes scene, ArrayMesh rendered, MeshScratch scratch)
+    {
+        // An unshaped world collides against the rendered mesh itself, which
+        // only exists once the mesh has been uploaded, so there is nothing for
+        // the worker to precompute.
+        if (!_shaped)
+        {
+            scene.CollisionShape.Shape = rendered.CreateTrimeshShape();
+            return;
+        }
+
+        if (scratch.CollisionVertices.Count == 0)
         {
             scene.CollisionShape.Shape = null;
             return;
@@ -1175,16 +1444,14 @@ public partial class NodeWorld : StaticBody3D
         if (scene.Trimesh == null)
         {
             scene.Trimesh = new ConcavePolygonShape3D();
-            scene.Trimesh.Data = _collisionVertices.ToArray();
+            scene.Trimesh.Data = scratch.CollisionVertices.ToArray();
             scene.CollisionShape.Shape = scene.Trimesh;
         }
         else
         {
-            scene.Trimesh.Data = _collisionVertices.ToArray();
+            scene.Trimesh.Data = scratch.CollisionVertices.ToArray();
         }
     }
-
-    private readonly List<Vector3> _collisionVertices = new();
 
     /// <summary>
     /// Emits one bismuth node by copying its prebuilt variant into the mesh.
@@ -1195,7 +1462,8 @@ public partial class NodeWorld : StaticBody3D
     /// node is consulted for SHAPE — the face field already guarantees the
     /// shapes interlock.
     /// </summary>
-    private void AddShapedNode(Vector3I cell, NodeMaterial material, Vector3 min, Color color)
+    private void AddShapedNode(Vector3I cell, NodeMaterial material, Vector3 min, Color color,
+        MeshScratch scratch)
     {
         INodeType type = TypeOf(material);
         CrystalMask(cell, out uint crystalLow, out uint crystalHigh);
@@ -1212,23 +1480,23 @@ public partial class NodeWorld : StaticBody3D
         for (int q = 0; q < quadCount; q++)
         {
             int source = q * 4;
-            if (IsBuried(cell, variant, q))
+            if (IsBuried(cell, variant, q, scratch))
                 continue;
 
-            int start = _vertices.Count;
+            int start = scratch.Vertices.Count;
             for (int v = 0; v < 4; v++)
             {
-                _vertices.Add(min + variant.Vertices[source + v] * quarter);
-                _normals.Add(variant.Normals[source + v]);
-                _colors.Add(color);
+                scratch.Vertices.Add(min + variant.Vertices[source + v] * quarter);
+                scratch.Normals.Add(variant.Normals[source + v]);
+                scratch.Colors.Add(color);
             }
 
-            _indices.Add(start);
-            _indices.Add(start + 1);
-            _indices.Add(start + 2);
-            _indices.Add(start);
-            _indices.Add(start + 2);
-            _indices.Add(start + 3);
+            scratch.Indices.Add(start);
+            scratch.Indices.Add(start + 1);
+            scratch.Indices.Add(start + 2);
+            scratch.Indices.Add(start);
+            scratch.Indices.Add(start + 2);
+            scratch.Indices.Add(start + 3);
         }
     }
 
@@ -1306,7 +1574,7 @@ public partial class NodeWorld : StaticBody3D
     /// boundary exposed even with a solid node next door, and culling on
     /// presence alone tears visible holes.
     /// </summary>
-    private bool IsBuried(Vector3I cell, NodeMesh variant, int quad)
+    private bool IsBuried(Vector3I cell, NodeMesh variant, int quad, MeshScratch scratch)
     {
         int from = variant.OccludedStart[quad];
         int to = variant.OccludedStart[quad + 1];
@@ -1315,7 +1583,7 @@ public partial class NodeWorld : StaticBody3D
 
         for (int c = from; c < to; c += 3)
         {
-            if (!_occupancy.Solid(cell,
+            if (!scratch.Occupancy.Solid(cell,
                     variant.OccludedCells[c],
                     variant.OccludedCells[c + 1],
                     variant.OccludedCells[c + 2]))
@@ -1326,7 +1594,8 @@ public partial class NodeWorld : StaticBody3D
     }
 
     /// <summary>Emits one quad, wound so it faces along `normal`.</summary>
-    private void AddFace(Color color, Span<Vector3> corners, Vector3 normal)
+    private void AddFace(Color color, Span<Vector3> corners, Vector3 normal,
+        MeshScratch scratch)
     {
         Vector3 v0 = corners[0], v1 = corners[1], v2 = corners[2], v3 = corners[3];
 
@@ -1334,22 +1603,22 @@ public partial class NodeWorld : StaticBody3D
         if ((v2 - v0).Cross(v1 - v0).Dot(normal) < 0f)
             (v1, v3) = (v3, v1);
 
-        int start = _vertices.Count;
-        _vertices.Add(v0);
-        _vertices.Add(v1);
-        _vertices.Add(v2);
-        _vertices.Add(v3);
+        int start = scratch.Vertices.Count;
+        scratch.Vertices.Add(v0);
+        scratch.Vertices.Add(v1);
+        scratch.Vertices.Add(v2);
+        scratch.Vertices.Add(v3);
         for (int k = 0; k < 4; k++)
         {
-            _normals.Add(normal);
-            _colors.Add(color);
+            scratch.Normals.Add(normal);
+            scratch.Colors.Add(color);
         }
 
-        _indices.Add(start);
-        _indices.Add(start + 1);
-        _indices.Add(start + 2);
-        _indices.Add(start);
-        _indices.Add(start + 2);
-        _indices.Add(start + 3);
+        scratch.Indices.Add(start);
+        scratch.Indices.Add(start + 1);
+        scratch.Indices.Add(start + 2);
+        scratch.Indices.Add(start);
+        scratch.Indices.Add(start + 2);
+        scratch.Indices.Add(start + 3);
     }
 }

@@ -95,6 +95,19 @@ public abstract partial class ChunkStreamer : Node
     public float MillisecondsPerFrame { get; set; } = 6f;
 
     /// <summary>
+    /// Milliseconds per frame spent turning chunk data into meshes.
+    ///
+    /// Separate from <see cref="MillisecondsPerFrame"/>, which bounds the
+    /// generation side. This one is the dial that decides whether streaming is
+    /// felt: a chunk is 64 sections and the whole batch used to be built in
+    /// one call, which measured at a 912ms frame -- roughly one frame per
+    /// second while a chunk landed. Spending a few milliseconds a frame
+    /// instead spreads the same work over about a second of play at full rate.
+    /// </summary>
+    [Export(PropertyHint.Range, "1,50,0.5")]
+    public float MeshMillisecondsPerFrame { get; set; } = 4f;
+
+    /// <summary>
     /// How far the target must move before residency is recomputed, in cells.
     /// Rescanning every frame is pure waste — the answer only changes when the
     /// target crosses into a new chunk.
@@ -656,6 +669,20 @@ public abstract partial class ChunkStreamer : Node
         DispatchGeneration();
         CollectGenerated(meshCentre);
 
+        // FINISH WHAT IS ALREADY QUEUED BEFORE TAKING MORE.
+        //
+        // A chunk queues 64 sections and they are meshed under a time budget
+        // across however many frames that takes, so the backlog has to be
+        // drained before another chunk is added to it. Otherwise the queue
+        // grows faster than it is served and the hitch simply arrives later.
+        if (World.HasQueuedMeshes)
+        {
+            World.FlushQueuedMeshes(MeshMillisecondsPerFrame);
+            if (!IsReady)
+                CheckReady();
+            return;
+        }
+
         int meshed = 0;
         while (_toMesh.Count > 0 && meshed < MeshPerFrame)
         {
@@ -681,9 +708,13 @@ public abstract partial class ChunkStreamer : Node
 
             MeshOne(chunk);
             meshed++;
-            if (Time.GetTicksMsec() >= deadline)
-                break;
+            break;
         }
+
+        // Mesh what was just queued, under the frame budget. Whatever does not
+        // fit stays dirty and is picked up next frame by the branch above.
+        if (World.HasQueuedMeshes)
+            World.FlushQueuedMeshes(MeshMillisecondsPerFrame);
 
         if (!IsReady)
             CheckReady();
@@ -750,11 +781,13 @@ public abstract partial class ChunkStreamer : Node
             && World.IsChunkLoaded(chunk + Vector3I.Forward);
     }
 
-    /// <summary>Meshes one chunk through the world's dirty path.</summary>
+    /// <summary>
+    /// Queues one chunk's sections. The actual meshing is paced by
+    /// <see cref="Pump"/> under a time budget, not done here.
+    /// </summary>
     private void MeshOne(Vector3I chunk)
     {
         World.QueueChunkMesh(chunk);
-        World.FlushQueuedMeshes();
     }
 
     /// <summary>

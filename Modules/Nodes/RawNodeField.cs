@@ -92,7 +92,15 @@ public sealed class RawNodeField
     // times; caching the verdict removes that redundancy outright. Purely an
     // optimisation — the answer is a pure function of position either way, so
     // dropping the cache changes nothing but speed.
-    private readonly System.Collections.Generic.Dictionary<(int, int, int, int), Vector3I> _winners = new();
+    //
+    // Concurrent because section geometry is now built on several worker
+    // threads at once, and they share one field instance. Every entry is a
+    // pure function of its key, so racing writers can only ever store the same
+    // value -- but a plain Dictionary corrupts its buckets when two threads
+    // insert together, which is exactly what it did when meshing was first
+    // parallelised.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int, int, int), Vector3I>
+        _winners = new();
 
     /// <summary>
     /// The shape mask for a node: which of its 12 edges and 8 corners it won.
@@ -115,7 +123,10 @@ public sealed class RawNodeField
     /// past <see cref="MaskCacheLimit"/>, since the world is endless and the
     /// player keeps moving.
     /// </summary>
-    private readonly System.Collections.Generic.Dictionary<Vector3I, RawNodeGeometry.Mask>
+    ///
+    /// Concurrent for the same reason as <see cref="_winners"/>: several
+    /// section builds run at once and share this field.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Vector3I, RawNodeGeometry.Mask>
         _masks = new();
 
     /// <summary>
