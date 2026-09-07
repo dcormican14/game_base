@@ -53,8 +53,28 @@ public static class CubedSphere
     /// so its arc is (pi/2) * radius and the count is that divided by the node
     /// size. Everything else is derived from it.
     /// </summary>
-    public static int FaceResolution(float radius, float nodeSize) =>
-        Mathf.Max(1, Mathf.RoundToInt(Mathf.Pi * 0.5f * radius / Mathf.Max(nodeSize, 0.0001f)));
+    /// <remarks>
+    /// ROUNDED UP TO A WHOLE NUMBER OF CHUNKS, so a face begins and ends on a
+    /// chunk boundary.
+    ///
+    /// Faces are stacked along the packed u axis, so a resolution that is not
+    /// a multiple of the chunk size leaves one chunk per face straddling the
+    /// fold -- half its cells on one face, half on the next. Measured, that
+    /// made the chunk at the end of a face report itself as belonging to the
+    /// NEXT face, and residency never crossed a seam: 265 resident chunks, all
+    /// on face 0 of 6.
+    ///
+    /// Rounding up makes cells very slightly smaller than one node rather than
+    /// slightly larger, which is the harmless direction.
+    /// </remarks>
+    public static int FaceResolution(float radius, float nodeSize)
+    {
+        int ideal = Mathf.Max(1,
+            Mathf.RoundToInt(Mathf.Pi * 0.5f * radius / Mathf.Max(nodeSize, 0.0001f)));
+
+        const int Chunk = NodeChunkStore.ChunkSize;
+        return (ideal + Chunk - 1) / Chunk * Chunk;
+    }
 
     /// <summary>
     /// The resolution of the face grid at a given shell.

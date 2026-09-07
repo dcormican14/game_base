@@ -356,6 +356,26 @@ public abstract partial class ChunkStreamer : Node
         // unless the player moves far enough to bring them inside the radius.
         int outer = load + 1;
 
+        // ARC CHUNKS ARE WALKED, NOT ENUMERATED.
+        //
+        // A chunk index on the cubed sphere is (u, v, shell) with the face
+        // folded into u, which is not a metric space: chunks touching across a
+        // face edge are 39 apart by index. Sweeping a ball of indices
+        // therefore never leaves the face the player is on -- measured, all
+        // 257 resident chunks sat on face 0 of 6, so the world simply ended at
+        // every seam.
+        //
+        // Flooding outward through real neighbours follows the surface instead,
+        // crossing seams because the grid knows what is over an edge. On a flat
+        // world the sweep below is kept, since a ball of indices IS the right
+        // answer there and enumerating beats walking.
+        if (World.Grid != null)
+        {
+            FloodResidency(centre, load, outer);
+            Sort(centre);
+            return;
+        }
+
         // A generator that knows its world is a thin structure inside a large
         // volume can narrow the sweep to a band of distances, so the scan cost
         // follows the structure rather than the cube of the radius.
@@ -413,6 +433,116 @@ public abstract partial class ChunkStreamer : Node
 
         Sort(centre);
     }
+
+    /// <summary>
+    /// Queues the chunks around the target by walking outward through
+    /// neighbours, for a world whose chunks are arcs.
+    ///
+    /// Breadth-first from the player's own chunk, so distance is travelled
+    /// rather than computed, and a face edge is just another step. The visited
+    /// set bounds the work; the queue is trimmed afterwards exactly as the
+    /// enumerated path's is.
+    /// </summary>
+    private void FloodResidency(Vector3I centre, int load, int outer)
+    {
+        _floodSeen.Clear();
+        _floodQueue.Clear();
+
+        _floodSeen.Add(centre);
+        _floodQueue.Enqueue(centre);
+
+        // Bounded so a pathological grid cannot spin: the ball of chunks a
+        // radius `outer` reaches, with room to spare for the seams where a
+        // face edge fans out.
+        int budget = (2 * outer + 1) * (2 * outer + 1) * (2 * outer + 1) * 2 + 64;
+
+        while (_floodQueue.Count > 0 && _floodSeen.Count < budget)
+        {
+            Vector3I chunk = _floodQueue.Dequeue();
+
+            int distance = ChunkDistance(chunk, centre);
+            if (distance > outer)
+                continue;
+
+            Offer(chunk, distance <= load);
+
+            // Step to the six neighbouring chunks THROUGH THE GRID, so a step
+            // off a face lands on the next one.
+            for (int face = 0; face < 6; face++)
+            {
+                Vector3I dir = NodeFace.Offsets[face];
+                if (!NeighbourChunk(chunk, dir, out Vector3I next))
+                    continue;
+
+                if (_floodSeen.Add(next))
+                    _floodQueue.Enqueue(next);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The chunk next to this one in a direction, found through the grid so
+    /// face edges are crossed correctly.
+    /// </summary>
+    private bool NeighbourChunk(Vector3I chunk, Vector3I direction, out Vector3I result)
+    {
+        const int Size = NodeChunkStore.ChunkSize;
+        Vector3I origin = NodeChunkStore.OriginOf(chunk);
+        int half = Size / 2;
+
+        // A cell just past this chunk's boundary in that direction. Stepping a
+        // whole chunk at once from the centre keeps the query on the grid even
+        // where a face's resolution changes.
+        var from = new Vector3I(origin.X + half, origin.Y + half, origin.Z + half);
+
+        if (!World.Grid.Neighbour(from,
+                direction.X * Size, direction.Y * Size, direction.Z * Size,
+                out Vector3I cell))
+        {
+            result = default;
+            return false;
+        }
+
+        result = NodeChunkStore.ChunkOf(cell);
+        return result != chunk;
+    }
+
+    /// <summary>
+    /// Queues one chunk for generation, or for meshing if its data is already
+    /// resident. Shared by both residency scans.
+    /// </summary>
+    private void Offer(Vector3I chunk, bool inside)
+    {
+        if (!CouldHoldAnything(chunk))
+        {
+            if (!World.IsChunkLoaded(chunk) || !World.HasChunkMesh(chunk))
+            {
+                World.Store.SetUniform(chunk, NodeChunkStore.Air);
+                World.MarkChunkMeshed(chunk);
+            }
+
+            _queued.Remove(chunk);
+            return;
+        }
+
+        if (World.IsChunkLoaded(chunk))
+        {
+            if (inside && !World.HasChunkMesh(chunk) && _queued.Add(chunk))
+                _toMesh.Add(chunk);
+
+            return;
+        }
+
+        if (!_queued.Add(chunk))
+            return;
+
+        _toGenerate.Add(chunk);
+    }
+
+    private readonly HashSet<Vector3I> _floodSeen = new();
+    private readonly Queue<Vector3I> _floodQueue = new();
+    private readonly HashSet<Vector3I> _readySeen = new();
+    private readonly Queue<Vector3I> _readyQueue = new();
 
     /// <summary>
     /// Queues one row of chunks, clipped to both the ball and the band.
@@ -566,16 +696,53 @@ public abstract partial class ChunkStreamer : Node
         hi = 0;
     }
 
-    private static int ChunkDistance(Vector3I chunk, Vector3I centre)
+    /// <summary>
+    /// How far apart two chunks are, in chunks.
+    ///
+    /// MEASURED IN THE WORLD, not in chunk indices, whenever the world has a
+    /// grid. On a cubed sphere the chunk coordinate is (u, v, shell) with the
+    /// face folded into u, which is not a metric space: two chunks touching
+    /// across a face edge are 39 chunks apart by index. Residency computed on
+    /// that never crosses a seam, so the world stopped at the edge of one face
+    /// -- measured, 257 resident chunks all on face 0 of 6.
+    ///
+    /// Comparing the chunks' actual positions fixes it, and costs one distance
+    /// per candidate rather than a subtraction. That is the price of chunks
+    /// being arcs rather than boxes.
+    /// </summary>
+    private int ChunkDistance(Vector3I chunk, Vector3I centre)
     {
-        Vector3I d = chunk - centre;
-        return Mathf.RoundToInt(Mathf.Sqrt(d.X * d.X + d.Y * d.Y + d.Z * d.Z));
+        if (World?.Grid == null)
+        {
+            Vector3I d = chunk - centre;
+            return Mathf.RoundToInt(Mathf.Sqrt(d.X * d.X + d.Y * d.Y + d.Z * d.Z));
+        }
+
+        float world = ChunkCentre(chunk).DistanceTo(ChunkCentre(centre));
+        return Mathf.RoundToInt(world / NodeChunkStore.ChunkSize);
     }
 
-    private static int SquareDistance(Vector3I chunk, Vector3I centre)
+    private int SquareDistance(Vector3I chunk, Vector3I centre)
     {
-        Vector3I d = chunk - centre;
-        return d.X * d.X + d.Y * d.Y + d.Z * d.Z;
+        if (World?.Grid == null)
+        {
+            Vector3I d = chunk - centre;
+            return d.X * d.X + d.Y * d.Y + d.Z * d.Z;
+        }
+
+        float world = ChunkCentre(chunk).DistanceSquaredTo(ChunkCentre(centre));
+        float scale = NodeChunkStore.ChunkSize * NodeChunkStore.ChunkSize;
+        return Mathf.RoundToInt(world / scale);
+    }
+
+    /// <summary>The world position a chunk sits at, for distance tests.</summary>
+    private Vector3 ChunkCentre(Vector3I chunk)
+    {
+        Vector3I origin = NodeChunkStore.OriginOf(chunk);
+        int half = NodeChunkStore.ChunkSize / 2;
+
+        return World.Grid.CentreOf(new Vector3I(
+            origin.X + half, origin.Y + half, origin.Z + half));
     }
 
     /// <summary>
@@ -878,15 +1045,50 @@ public abstract partial class ChunkStreamer : Node
         int wanted = 0;
         int have = 0;
 
-        for (int x = -radius; x <= radius; x++)
-            for (int y = -radius; y <= radius; y++)
-                for (int z = -radius; z <= radius; z++)
+        // WALKED, not enumerated, for the same reason residency is: a chunk
+        // offset is packed-index arithmetic, and on the sphere most of those
+        // offsets name chunks that do not exist. Counting them left readiness
+        // pinned at 33% -- one layer of the 3x3x3 was real and the other two
+        // never arrived.
+        if (World.Grid != null)
+        {
+            _readySeen.Clear();
+            _readyQueue.Clear();
+            _readySeen.Add(centre);
+            _readyQueue.Enqueue(centre);
+
+            while (_readyQueue.Count > 0)
+            {
+                Vector3I chunk = _readyQueue.Dequeue();
+                if (ChunkDistance(chunk, centre) > radius)
+                    continue;
+
+                wanted++;
+                if (World.IsChunkLoaded(chunk) && !_queued.Contains(chunk))
+                    have++;
+
+                for (int face = 0; face < 6; face++)
                 {
-                    var chunk = new Vector3I(centre.X + x, centre.Y + y, centre.Z + z);
-                    wanted++;
-                    if (World.IsChunkLoaded(chunk) && !_queued.Contains(chunk))
-                        have++;
+                    if (!NeighbourChunk(chunk, NodeFace.Offsets[face], out Vector3I next))
+                        continue;
+
+                    if (_readySeen.Add(next))
+                        _readyQueue.Enqueue(next);
                 }
+            }
+        }
+        else
+        {
+            for (int x = -radius; x <= radius; x++)
+                for (int y = -radius; y <= radius; y++)
+                    for (int z = -radius; z <= radius; z++)
+                    {
+                        var chunk = new Vector3I(centre.X + x, centre.Y + y, centre.Z + z);
+                        wanted++;
+                        if (World.IsChunkLoaded(chunk) && !_queued.Contains(chunk))
+                            have++;
+                    }
+        }
 
         if (_readyTotal == 0)
             _readyTotal = wanted;
@@ -912,12 +1114,33 @@ public abstract partial class ChunkStreamer : Node
     /// </summary>
     private bool NeighboursReady(Vector3I chunk)
     {
-        return World.IsChunkLoaded(chunk + Vector3I.Right)
-            && World.IsChunkLoaded(chunk + Vector3I.Left)
-            && World.IsChunkLoaded(chunk + Vector3I.Up)
-            && World.IsChunkLoaded(chunk + Vector3I.Down)
-            && World.IsChunkLoaded(chunk + Vector3I.Back)
-            && World.IsChunkLoaded(chunk + Vector3I.Forward);
+        if (World.Grid == null)
+        {
+            return World.IsChunkLoaded(chunk + Vector3I.Right)
+                && World.IsChunkLoaded(chunk + Vector3I.Left)
+                && World.IsChunkLoaded(chunk + Vector3I.Up)
+                && World.IsChunkLoaded(chunk + Vector3I.Down)
+                && World.IsChunkLoaded(chunk + Vector3I.Back)
+                && World.IsChunkLoaded(chunk + Vector3I.Forward);
+        }
+
+        // Asked through the grid, so a neighbour across a face edge is the
+        // chunk actually there rather than an index one step along u.
+        //
+        // A direction with NO neighbour does not block: past the outermost
+        // shell there is only sky, and waiting for it to load left every chunk
+        // meshless forever -- readiness sat at 36% with the world fully
+        // generated underneath it.
+        for (int face = 0; face < 6; face++)
+        {
+            if (!NeighbourChunk(chunk, NodeFace.Offsets[face], out Vector3I next))
+                continue;
+
+            if (!World.IsChunkLoaded(next))
+                return false;
+        }
+
+        return true;
     }
 
     /// <summary>

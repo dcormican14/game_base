@@ -1311,6 +1311,51 @@ public partial class NodeWorld : StaticBody3D
         return d.LengthSquared() < 0.0000001f ? up : d.Normalized();
     }
 
+    /// <summary>
+    /// The four corners of a cube face, as fractions of the cell.
+    ///
+    /// Written straight into `corners` in the same winding
+    /// <see cref="FaceCorners"/> uses, so the two paths produce the same
+    /// triangles and only differ in where they put them.
+    /// </summary>
+    private static void FaceLocalCorners(
+        (Vector3I Dir, int[] Xs, int[] Ys, int[] Zs) face, Span<Vector3> corners)
+    {
+        // A unit cube's face, picked by its outward direction.
+        Vector3I d = face.Dir;
+
+        if (d.X != 0)
+        {
+            float x = d.X > 0 ? 1f : 0f;
+            corners[0] = new Vector3(x, 0f, 0f);
+            corners[1] = new Vector3(x, 0f, 1f);
+            corners[2] = new Vector3(x, 1f, 1f);
+            corners[3] = new Vector3(x, 1f, 0f);
+        }
+        else if (d.Y != 0)
+        {
+            float y = d.Y > 0 ? 1f : 0f;
+            corners[0] = new Vector3(0f, y, 0f);
+            corners[1] = new Vector3(1f, y, 0f);
+            corners[2] = new Vector3(1f, y, 1f);
+            corners[3] = new Vector3(0f, y, 1f);
+        }
+        else
+        {
+            float z = d.Z > 0 ? 1f : 0f;
+            corners[0] = new Vector3(0f, 0f, z);
+            corners[1] = new Vector3(1f, 0f, z);
+            corners[2] = new Vector3(1f, 1f, z);
+            corners[3] = new Vector3(0f, 1f, z);
+        }
+
+        // Reversed for the negative faces, so every quad still winds outward.
+        if (d.X + d.Y + d.Z < 0)
+        {
+            (corners[1], corners[3]) = (corners[3], corners[1]);
+        }
+    }
+
     /// <summary>Are all 26 surrounding cells solid?</summary>
     private bool AllNeighboursSolid(Vector3I cell)
     {
@@ -1469,10 +1514,18 @@ public partial class NodeWorld : StaticBody3D
 
                         // Bent onto the shell too, so the surface the player
                         // stands on is the one they can see.
+                        //
+                        // The local coordinate is rebuilt from the FACE rather
+                        // than by subtracting `min`. On the sphere `min` is a
+                        // packed index scaled by the node size, not a corner in
+                        // world space, so the subtraction produced nonsense and
+                        // the hull landed nowhere near the visible surface --
+                        // the player fell straight through it.
                         if (Grid != null)
                         {
+                            FaceLocalCorners(face, corners);
                             for (int c = 0; c < 4; c++)
-                                corners[c] = Grid.PointIn(cell, (corners[c] - min) / _nodeSize);
+                                corners[c] = Grid.PointIn(cell, corners[c]);
                         }
 
                         scratch.CollisionVertices.Add(corners[0]);
