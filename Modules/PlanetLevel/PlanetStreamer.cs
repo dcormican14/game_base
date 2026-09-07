@@ -255,6 +255,120 @@ public partial class PlanetStreamer : ChunkStreamer
         CapThickness = _capThickness,
     };
 
+    private int _maxLoadRadius = 256;
+    /// <summary>
+    /// The furthest the view may reach when high above the planet, in chunks.
+    ///
+    /// Only reached from altitude, and only ever spent on chunks that survive
+    /// the sky reject -- so the cost is the planet's SURFACE in view, not the
+    /// volume of the ball.
+    /// </summary>
+    [Export(PropertyHint.Range, "4,120,1")]
+    public int MaxLoadRadius
+    {
+        get => _maxLoadRadius;
+        set { _maxLoadRadius = value; ForceRescan(); }
+    }
+
+    /// <summary>
+    /// View distance grows with height above the ground.
+    ///
+    /// A fixed radius is a fixed number of chunks in every direction. Standing
+    /// on the surface that is right; in the air it is not, because the ground
+    /// falls out of the ball entirely and every resident chunk is sky.
+    /// Measured while flying straight up, at 3500 nodes the nearest rock sat 97
+    /// chunks below a radius of 3, and the streamer was churning through
+    /// hundreds of guaranteed-empty chunks with nothing to show.
+    ///
+    /// Reaching just past the ground is what matters: the radius is the
+    /// altitude in chunks plus the ordinary ground-level radius, so the surface
+    /// stays inside the ball however high the player goes. It is affordable
+    /// only because CouldHoldAnything discards the sky first -- the ball itself
+    /// grows as the cube of this, while what is actually queued grows as the
+    /// visible area of a sphere.
+    /// </summary>
+    protected override int EffectiveLoadRadius(Vector3I centre)
+    {
+        PlanetDensity field = Field;
+        if (field == null)
+            return LoadRadius;
+
+        // Height above the mean surface, in chunks, from the scan centre.
+        var at = new Vector3(centre.X, centre.Y, centre.Z) * NodeChunkStore.ChunkSize;
+        float altitude = at.Length() - field.Radius;
+        if (altitude <= 0f)
+            return LoadRadius;
+
+        int reach = LoadRadius + Mathf.CeilToInt(altitude / NodeChunkStore.ChunkSize);
+        return Mathf.Min(reach, Mathf.Max(LoadRadius, MaxLoadRadius));
+    }
+
+    /// <summary>
+    /// The shell of chunk distances a planet's rock can occupy.
+    ///
+    /// Everything nearer than the deepest basin is inside the planet and
+    /// everything past the highest peak is space, so the scan only has to
+    /// consider chunks whose distance from the centre falls between. That
+    /// turns a radius-80 sweep from four million chunks into the few thousand
+    /// that make up the visible crust.
+    ///
+    /// Generous at both ends by a chunk, since a chunk is a box and its corners
+    /// reach further than its centre.
+    /// </summary>
+    protected override void ChunkBand(Vector3I centre, int radius, out int lo, out int hi)
+    {
+        PlanetDensity field = Field;
+        if (field == null)
+        {
+            lo = 1; hi = 0;
+            return;
+        }
+
+        const float Size = NodeChunkStore.ChunkSize;
+
+        // In chunks, with a chunk of slack for the box corners.
+        float inner = Mathf.Max(0f, (field.Radius - field.TerrainHeight) / Size - 1.8f);
+        float outer = field.MaxRadius / Size + 1.8f;
+
+        lo = Mathf.FloorToInt(inner * inner);
+        hi = Mathf.CeilToInt(outer * outer);
+    }
+
+    /// <summary>
+    /// Rejects chunks of open space before they are queued.
+    ///
+    /// Without this the residency ball has to be small, because its cost grows
+    /// with the cube of the radius and a planet sits inside an enormous volume
+    /// of sky. With it the scan can reach far enough to keep the planet in view
+    /// from altitude, since everything it skips is space that provably holds
+    /// nothing.
+    /// </summary>
+    protected override bool CouldHoldAnything(Vector3I chunk)
+    {
+        PlanetDensity field = Field;
+        if (field == null)
+            return true;
+
+        return SourceFor().CouldHoldRock(chunk);
+    }
+
+    /// <summary>A source on the calling thread, for the residency scan.</summary>
+    private PlanetChunkSource SourceFor()
+    {
+        PlanetDensity field = Field;
+        PlanetChunkSource source = _sources.GetOrAdd(
+            System.Environment.CurrentManagedThreadId,
+            _ => new PlanetChunkSource(field));
+
+        if (!ReferenceEquals(source.Field, field))
+        {
+            source = new PlanetChunkSource(field);
+            _sources[System.Environment.CurrentManagedThreadId] = source;
+        }
+
+        return source;
+    }
+
     /// <summary>
     /// Generates one chunk, on whichever worker thread is calling.
     ///

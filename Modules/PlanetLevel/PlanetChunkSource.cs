@@ -183,6 +183,32 @@ public sealed class PlanetChunkSource
     }
 
     /// <summary>
+    /// Could this chunk hold rock at all?
+    ///
+    /// The same bound Generate applies before sweeping, made available to the
+    /// streamer so a chunk of open space is never queued in the first place.
+    /// A planet is a thin shell inside a very large volume of sky -- the whole
+    /// surface is about 2000 chunks against over four million in a radius-100
+    /// ball -- so rejecting analytically is what makes a long view distance
+    /// affordable.
+    ///
+    /// Conservative: it only says no when the nearest point of the chunk is
+    /// beyond the highest peak the planet can raise.
+    /// </summary>
+    public bool CouldHoldRock(Vector3I chunk)
+    {
+        const int Size = NodeChunkStore.ChunkSize;
+        Vector3I origin = NodeChunkStore.OriginOf(chunk);
+
+        var min = new Vector3(origin.X + 0.5f, origin.Y + 0.5f, origin.Z + 0.5f);
+        var max = new Vector3(
+            origin.X + Size - 0.5f, origin.Y + Size - 0.5f, origin.Z + Size - 0.5f);
+
+        NearFar(min, max, out float near, out float _);
+        return near <= _field.MaxRadius;
+    }
+
+    /// <summary>
     /// The closest and furthest distances from the origin to any point in an
     /// axis-aligned box.
     ///

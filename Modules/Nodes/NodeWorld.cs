@@ -829,6 +829,16 @@ public partial class NodeWorld : StaticBody3D
     }
 
     /// <summary>
+    /// Records a chunk as meshed without building anything.
+    ///
+    /// For chunks a generator has rejected analytically: they hold nothing, so
+    /// there is no geometry to make, but everything downstream still has to see
+    /// them as done. Leaving one unrecorded makes it invisible to the readiness
+    /// check, which then waits on it forever.
+    /// </summary>
+    public void MarkChunkMeshed(Vector3I chunk) => _meshed.Add(chunk);
+
+    /// <summary>
     /// Meshes everything queued by <see cref="QueueChunkMesh"/>.
     ///
     /// Separate from the queueing so the streamer can decide its own pacing:

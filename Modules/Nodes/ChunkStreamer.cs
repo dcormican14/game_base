@@ -144,6 +144,27 @@ public abstract partial class ChunkStreamer : Node
     /// </summary>
     protected abstract int GenerateChunk(Vector3I chunk, byte[] cells);
 
+    /// <summary>
+    /// Could this chunk hold anything at all?
+    ///
+    /// Asked during the residency scan, before a chunk is queued. The default
+    /// says yes, which is the safe answer and what a generator with no cheap
+    /// bound should keep.
+    ///
+    /// It exists so view distance can be large without the scan being
+    /// hopeless. Residency is a ball, so its cost grows with the cube of the
+    /// radius -- but for a world with structure the interesting chunks are a
+    /// SURFACE inside that volume, and the rest is empty space that can be
+    /// rejected analytically. On a planet the whole surface is about 2000
+    /// chunks while a radius-100 ball is over four million, so rejecting is
+    /// the difference between a view distance that reaches the horizon and one
+    /// that cannot leave the ground.
+    ///
+    /// Must be conservative: returning false for a chunk that does hold
+    /// something punches a permanent hole in the world.
+    /// </summary>
+    protected virtual bool CouldHoldAnything(Vector3I chunk) => true;
+
     /// <summary>Chunks whose data exists but whose mesh does not.</summary>
     private readonly List<Vector3I> _toGenerate = new();
     private readonly List<Vector3I> _toMesh = new();
@@ -156,6 +177,9 @@ public abstract partial class ChunkStreamer : Node
 
     private Vector3I _lastScanCell;
     private bool _hasScanned;
+
+    /// <summary>The radius the last scan actually used, for the ready check.</summary>
+    private int _lastLoadRadius;
 
     /// <summary>
     /// Chunks around the target that must be meshed before the world counts as
@@ -282,12 +306,13 @@ public abstract partial class ChunkStreamer : Node
     /// </summary>
     private void Rescan(Vector3I centre)
     {
-        int load = Mathf.Max(1, LoadRadius);
+        int load = Mathf.Max(1, EffectiveLoadRadius(centre));
 
         // The unload radius has to clear the generate margin too, or the
         // margin chunks are dropped the moment they are made and the frontier
         // never gets the neighbours it is waiting on.
         int unload = Mathf.Max(load + 2, UnloadRadius);
+        _lastLoadRadius = load;
 
         // Drop first, so the memory the new chunks need is already free by the
         // time they are generated rather than after.
@@ -331,20 +356,100 @@ public abstract partial class ChunkStreamer : Node
         // unless the player moves far enough to bring them inside the radius.
         int outer = load + 1;
 
+        // A generator that knows its world is a thin structure inside a large
+        // volume can narrow the sweep to a band of distances, so the scan cost
+        // follows the structure rather than the cube of the radius.
+        ChunkBand(centre, outer, out int bandLo, out int bandHi);
+
         for (int x = -outer; x <= outer; x++)
         {
-            for (int y = -outer; y <= outer; y++)
-            {
-                for (int z = -outer; z <= outer; z++)
-                {
-                    var chunk = new Vector3I(centre.X + x, centre.Y + y, centre.Z + z);
+            // The ball bounds y for this slice, so rows outside it are never
+            // entered rather than entered and rejected.
+            int yReach = IntSqrt(outer * outer - x * x);
 
-                    // A ball, not a cube: the corners of a cube sit at
-                    // sqrt(3) times the radius of its axes, so loading them
-                    // costs nearly twice the view distance for terrain the
-                    // player is no more likely to look at.
-                    if (x * x + y * y + z * z > outer * outer)
+            for (int y = -yReach; y <= yReach; y++)
+            {
+                // And z is bounded twice over: by the ball, and by the band of
+                // distances the generator says its world occupies.
+                //
+                // SOLVING for z rather than scanning it is what lets the view
+                // distance reach a planet from orbit. The ball alone is cubic
+                // in the radius -- at 96 that is seven million cells to walk
+                // every rescan, at 256 it is 135 million -- while the chunks
+                // that survive are a shell whose area grows only as the square.
+                // Iterating the answer instead of filtering for it keeps the
+                // scan proportional to what it finds.
+                int ballZ = IntSqrt(outer * outer - x * x - y * y);
+
+                int zFrom = -ballZ;
+                int zTo = ballZ;
+
+                if (bandLo <= bandHi)
+                {
+                    // Chunk distance is measured from the WORLD origin, so the
+                    // slice's own offset has to be carried in.
+                    int wx = centre.X + x;
+                    int wy = centre.Y + y;
+                    int flat = wx * wx + wy * wy;
+
+                    // |wz| must satisfy bandLo <= flat + wz^2 <= bandHi.
+                    if (flat > bandHi)
                         continue;
+
+                    int zOuter = IntSqrt(bandHi - flat);
+                    int zInner = flat >= bandLo ? 0 : IntSqrt(bandLo - flat - 1) + 1;
+
+                    // Two arcs where the band is an annulus, one where the
+                    // slice passes through it. Emitting both halves keeps the
+                    // loop a single pass over what is wanted.
+                    EmitRow(centre, x, y, zFrom, zTo, -zOuter - centre.Z, -zInner - centre.Z, load, outer);
+                    EmitRow(centre, x, y, zFrom, zTo, zInner - centre.Z, zOuter - centre.Z, load, outer);
+                    continue;
+                }
+
+                EmitRow(centre, x, y, zFrom, zTo, zFrom, zTo, load, outer);
+            }
+        }
+
+        Sort(centre);
+    }
+
+    /// <summary>
+    /// Queues one row of chunks, clipped to both the ball and the band.
+    /// </summary>
+    private void EmitRow(Vector3I centre, int x, int y,
+        int ballFrom, int ballTo, int bandFrom, int bandTo, int load, int outer)
+    {
+        int from = Mathf.Max(ballFrom, bandFrom);
+        int to = Mathf.Min(ballTo, bandTo);
+
+        for (int z = from; z <= to; z++)
+        {
+            var chunk = new Vector3I(centre.X + x, centre.Y + y, centre.Z + z);
+            {
+                {
+                    // Nothing here to find, and the generator knows it without
+                    // sampling. Recording it keeps the queue full of chunks
+                    // that can actually contribute, which is what lets the
+                    // radius grow far enough to see a planet from orbit.
+                    //
+                    // RECORDED AS EMPTY, not merely skipped. A skipped chunk is
+                    // invisible to everything downstream: the readiness check
+                    // counts it and never sees it arrive, so a spawn with sky
+                    // overhead stalled at 67% forever. Storing the uniform air
+                    // byte is what the generator would have produced anyway,
+                    // for none of the cost.
+                    if (!CouldHoldAnything(chunk))
+                    {
+                        if (!World.IsChunkLoaded(chunk) || !World.HasChunkMesh(chunk))
+                        {
+                            World.Store.SetUniform(chunk, NodeChunkStore.Air);
+                            World.MarkChunkMeshed(chunk);
+                        }
+
+                        _queued.Remove(chunk);
+                        continue;
+                    }
 
                     if (World.IsChunkLoaded(chunk))
                     {
@@ -365,7 +470,14 @@ public abstract partial class ChunkStreamer : Node
                 }
             }
         }
+    }
 
+    /// <summary>Integer floor of the square root, for non-negative input.</summary>
+    private static int IntSqrt(int v) => v <= 0 ? 0 : (int)Mathf.Sqrt(v);
+
+    /// <summary>Orders the queues nearest-first and trims them.</summary>
+    private void Sort(Vector3I centre)
+    {
         // Nearest first, so the chunk the player is walking into is built
         // before the one at the edge of view.
         _toGenerate.Sort((a, b) =>
@@ -425,6 +537,33 @@ public abstract partial class ChunkStreamer : Node
             if (!_inFlight.Contains(chunk))
                 _queued.Remove(chunk);
         }
+    }
+
+    /// <summary>
+    /// The load radius to use right now, which a generator may widen.
+    ///
+    /// A fixed radius is a fixed number of chunks in every direction, which is
+    /// the right rule standing on the ground and the wrong one in the air. Fly
+    /// away from a planet and the ground leaves the ball entirely: measured,
+    /// at 3500 nodes up the nearest rock was 97 chunks below a radius of 3, and
+    /// every one of the 250-odd resident chunks held nothing but sky.
+    /// </summary>
+    protected virtual int EffectiveLoadRadius(Vector3I centre) => LoadRadius;
+
+    /// <summary>
+    /// The band of squared chunk-distances-from-the-origin that can hold
+    /// anything, or an empty range (lo > hi) for a world with no such bound.
+    ///
+    /// This is what makes a long view distance affordable for a planet. The
+    /// residency ball grows as the cube of its radius -- a radius of 80 is over
+    /// four million chunks to even LOOK at -- but a planet's rock lives in a
+    /// shell, so the scan can skip every chunk whose distance from the planet's
+    /// centre puts it inside the core or out in space.
+    /// </summary>
+    protected virtual void ChunkBand(Vector3I centre, int radius, out int lo, out int hi)
+    {
+        lo = 1;
+        hi = 0;
     }
 
     private static int ChunkDistance(Vector3I chunk, Vector3I centre)
