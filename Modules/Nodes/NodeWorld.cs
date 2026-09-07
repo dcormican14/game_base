@@ -1619,8 +1619,19 @@ public partial class NodeWorld : StaticBody3D
             int start = scratch.Vertices.Count;
             for (int v = 0; v < 4; v++)
             {
-                Vector3 shaped = NodeOrientation.ToWorld(
-                    orientation, RawNodeGeometry.Sub, variant.Vertices[source + v]);
+                // ON THE SPHERE the shape frame IS the cell frame.
+                //
+                // ToWorld exists to rotate a shape solved in a flat +Y-up frame
+                // onto whichever axis a cell faces. The grid already does that
+                // -- PointIn maps a cell-local coordinate onto the cell's own
+                // face and shell -- so rotating first applies the orientation
+                // twice. Measured, that left 25007 of 47470 triangles wound
+                // inward: half the surface was backwards, invisible from
+                // outside, showing the far side of the planet through it.
+                Vector3 shaped = Grid != null
+                    ? variant.Vertices[source + v]
+                    : NodeOrientation.ToWorld(
+                        orientation, RawNodeGeometry.Sub, variant.Vertices[source + v]);
 
                 Vector3 at;
                 Vector3 normal;
@@ -1631,7 +1642,17 @@ public partial class NodeWorld : StaticBody3D
                     // placed by the grid rather than offset from a corner: a
                     // sub-cell coordinate becomes a fraction across the cell
                     // and the grid turns that into a point on the shell.
-                    at = Grid.PointIn(cell, shaped / RawNodeGeometry.Sub);
+                    // MIRRORED IN v, to keep the winding.
+                    //
+                    // Shells count inward, so (u, v, outward) is left-handed
+                    // where the shape rule assumed right-handed (x, y, z), and
+                    // every quad comes out facing into the planet. Flipping one
+                    // axis restores the handedness; v is chosen because it is
+                    // the one the shape rules treat symmetrically.
+                    Vector3 local = shaped / RawNodeGeometry.Sub;
+                    local.Y = 1f - local.Y;
+
+                    at = Grid.PointIn(cell, local);
                     normal = SphereNormal(cell, shaped, variant.Normals[source + v]);
                 }
                 else

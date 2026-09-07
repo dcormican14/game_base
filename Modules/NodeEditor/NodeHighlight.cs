@@ -212,7 +212,12 @@ public partial class NodeHighlight : Node3D
         var st = new SurfaceTool();
         st.Begin(Mesh.PrimitiveType.Triangles);
         foreach ((Vector3I edge, int axis, Vector3 normal, int length) in MergeRuns(bars))
-            AddEdgeBar(st, origin, quarter, edge, axis, normal, bar, outward, length);
+        {
+            if (_world.Grid != null)
+                AddEdgeBarOnGrid(st, cell, edge, axis, normal, bar, outward, length);
+            else
+                AddEdgeBar(st, origin, quarter, edge, axis, normal, bar, outward, length);
+        }
 
         _mesh.Mesh = st.Commit();
         _mesh.MaterialOverride = Material;
@@ -387,6 +392,99 @@ public partial class NodeHighlight : Node3D
         extent[axis] = quarter * length * 0.5f + bar * 0.5f;
 
         AddBox(st, centre, extent);
+    }
+
+    /// <summary>
+    /// One bar of the outline, placed through the grid.
+    ///
+    /// The flat path builds the bar from a corner plus sub-cell offsets, which
+    /// on a cubed sphere describes a box floating in space near the node
+    /// rather than tracing it: the node is an ARC, and its edges curve. This
+    /// asks the grid where each end of the run actually is, so the outline sits
+    /// on the surface it is outlining.
+    ///
+    /// The bar is still a straight box between those two points. Over a run of
+    /// at most four quarter-cells the arc's deviation from a chord is far
+    /// smaller than the bar's own thickness, so bending it further would not
+    /// be visible.
+    /// </summary>
+    private void AddEdgeBarOnGrid(SurfaceTool st, Vector3I cell,
+        Vector3I edge, int axis, Vector3 normal, float bar, float outward, int length)
+    {
+        int sub = _world.Subdivision;
+
+        var lowLocal = new Vector3(edge.X, edge.Y, edge.Z) / sub;
+        Vector3 highLocal = lowLocal;
+        highLocal[axis] += (float)length / sub;
+
+        Vector3 low = _world.Grid.PointIn(cell, lowLocal);
+        Vector3 high = _world.Grid.PointIn(cell, highLocal);
+
+        // The fold direction has to be carried onto the sphere as well, or the
+        // bar is held clear of the surface in a world direction that no longer
+        // points away from it.
+        Vector3 nudged = _world.Grid.PointIn(cell, lowLocal + normal * (1f / sub));
+        Vector3 outwardDirection = (nudged - low);
+        outwardDirection = outwardDirection.LengthSquared() > 0.000001f
+            ? outwardDirection.Normalized()
+            : _world.Grid.UpAt(cell);
+
+        Vector3 centre = (low + high) * 0.5f + outwardDirection * outward;
+
+        Vector3 along = high - low;
+        float span = along.Length();
+        if (span < 0.000001f)
+        {
+            AddBox(st, centre, Vector3.One * (bar * 0.5f));
+            return;
+        }
+
+        AddOrientedBox(st, centre, along / span, outwardDirection,
+            span * 0.5f + bar * 0.5f, bar * 0.5f);
+    }
+
+    /// <summary>
+    /// A box aligned to an arbitrary direction rather than the world axes.
+    ///
+    /// Needed because a bar on the sphere runs along the surface, which is not
+    /// an axis anywhere but the six face centres.
+    /// </summary>
+    private static void AddOrientedBox(SurfaceTool st, Vector3 centre,
+        Vector3 along, Vector3 up, float halfLength, float halfThick)
+    {
+        Vector3 side = along.Cross(up);
+        if (side.LengthSquared() < 0.000001f)
+            side = along.Cross(Vector3.Up);
+
+        side = side.Normalized();
+        Vector3 fold = side.Cross(along).Normalized();
+
+        Vector3 a = along * halfLength;
+        Vector3 b = side * halfThick;
+        Vector3 c = fold * halfThick;
+
+        var corners = new Vector3[8];
+        for (int i = 0; i < 8; i++)
+        {
+            corners[i] = centre
+                + a * ((i & 1) != 0 ? 1f : -1f)
+                + b * ((i & 2) != 0 ? 1f : -1f)
+                + c * ((i & 4) != 0 ? 1f : -1f);
+        }
+
+        // The six faces, wound outward. Indices follow the bit pattern above.
+        AddQuad(st, corners[1], corners[3], corners[7], corners[5]);
+        AddQuad(st, corners[0], corners[4], corners[6], corners[2]);
+        AddQuad(st, corners[2], corners[6], corners[7], corners[3]);
+        AddQuad(st, corners[0], corners[1], corners[5], corners[4]);
+        AddQuad(st, corners[4], corners[5], corners[7], corners[6]);
+        AddQuad(st, corners[0], corners[2], corners[3], corners[1]);
+    }
+
+    private static void AddQuad(SurfaceTool st, Vector3 a, Vector3 b, Vector3 c, Vector3 d)
+    {
+        st.AddVertex(a); st.AddVertex(b); st.AddVertex(c);
+        st.AddVertex(a); st.AddVertex(c); st.AddVertex(d);
     }
 
     private StandardMaterial3D _material;
