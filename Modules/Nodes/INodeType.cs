@@ -106,6 +106,23 @@ public interface INodeType
     string Id { get; }
 
     /// <summary>
+    /// Does this type's shape have a TOP that should follow local gravity?
+    ///
+    /// True for a surface material like topsoil, whose whole rule is about
+    /// which way the sky is: on a planet it has to cap the face pointing away
+    /// from the core, not the one pointing along world +Y.
+    ///
+    /// False for a mineral like raw crystal, and that is not merely an
+    /// optimisation. Rock is isotropic -- it has no top -- and its rims
+    /// interlock only because every node computes the contest for a shared
+    /// edge in the SAME frame. Rotating one node's geometry makes it and its
+    /// neighbour both claim the space between them: measured over a block of
+    /// planet, orienting the crystal put 2.3 million sub-cells in contention
+    /// where leaving it alone gives none.
+    /// </summary>
+    bool FollowsGravity => false;
+
+    /// <summary>
     /// Sub-cells per node edge. Geometry is expressed on this finer lattice,
     /// so a node can have relief without leaving its cell's footprint.
     /// </summary>
@@ -162,6 +179,20 @@ public interface INodeType
     /// </summary>
     NodeShape ShapeAt(Vector3I cell, int neighbours, uint crystalLow, uint crystalHigh) =>
         ShapeAt(cell, neighbours);
+
+    /// <summary>
+    /// The same, told which way this node's local up points in world axes.
+    ///
+    /// Only types that reason about world-space neighbours AND declare
+    /// <see cref="FollowsGravity"/> need it. Topsoil does both: it yields its
+    /// floor to the crystal rims growing into it, and those rims are solved in
+    /// world coordinates while the soil's own shape is solved in a rotated
+    /// frame. Without the orientation the two describe the same space
+    /// differently, and the arbitration lands on the wrong sub-cells.
+    /// </summary>
+    NodeShape ShapeAt(Vector3I cell, int neighbours, uint crystalLow, uint crystalHigh,
+        int orientation) =>
+        ShapeAt(cell, neighbours, crystalLow, crystalHigh);
 
     /// <summary>
     /// The meshed geometry for a shape, in sub-cell units relative to the

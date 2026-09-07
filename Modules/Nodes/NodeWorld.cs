@@ -183,7 +183,20 @@ public partial class NodeWorld : StaticBody3D
     {
         INodeType type = TypeOf(MaterialAt(cell));
         CrystalMask(cell, out uint low, out uint high);
-        return type.OccupiedCells(type.ShapeAt(cell, NeighbourMask(cell), low, high));
+        int orientation = OrientationOf(cell, type);
+        int[] local = type.OccupiedCells(
+            type.ShapeAt(cell, LocalMask(cell, type), low, high, orientation));
+
+        // Rotated so the editor's highlight traces the shape actually drawn.
+        var world = new int[local.Length];
+        for (int c = 0; c < local.Length; c += 3)
+        {
+            NodeOrientation.ToWorld(orientation, RawNodeGeometry.Sub,
+                local[c], local[c + 1], local[c + 2],
+                out world[c], out world[c + 1], out world[c + 2]);
+        }
+
+        return world;
     }
 
     /// <summary>Nodes across every loaded chunk. Walks the chunk list rather
@@ -1138,7 +1151,7 @@ public partial class NodeWorld : StaticBody3D
         if (_shaped)
         {
             scratch.Occupancy.Reset(origin);
-            scratch.Occupancy.Fill(_store, _typeLookup ?? TypeOf);
+            scratch.Occupancy.Fill(_store, _typeLookup ?? TypeOf, _radialUp, _gravityCentre);
         }
 
         // Allocated once outside the loop: a stackalloc per node would grow
@@ -1477,8 +1490,15 @@ public partial class NodeWorld : StaticBody3D
     {
         INodeType type = TypeOf(material);
         CrystalMask(cell, out uint crystalLow, out uint crystalHigh);
+
+        // The shape is DECIDED in the node's own frame and DRAWN in the
+        // world's. Rebasing the mask picks the right shape for a node on the
+        // side of a planet; rotating the vertices below is what actually points
+        // it away from the core. Doing only the first would leave soil deciding
+        // as though it were on a wall while still bevelling toward world up.
+        int orientation = OrientationOf(cell, type);
         NodeMesh variant = type.MeshFor(
-            type.ShapeAt(cell, NeighbourMask(cell), crystalLow, crystalHigh));
+            type.ShapeAt(cell, LocalMask(cell, type), crystalLow, crystalHigh, orientation));
         if (variant.Vertices.Length == 0)
             return;
 
@@ -1490,14 +1510,16 @@ public partial class NodeWorld : StaticBody3D
         for (int q = 0; q < quadCount; q++)
         {
             int source = q * 4;
-            if (IsBuried(cell, variant, q, scratch))
+            if (IsBuried(cell, variant, q, scratch, orientation))
                 continue;
 
             int start = scratch.Vertices.Count;
             for (int v = 0; v < 4; v++)
             {
-                scratch.Vertices.Add(min + variant.Vertices[source + v] * quarter);
-                scratch.Normals.Add(variant.Normals[source + v]);
+                scratch.Vertices.Add(min + NodeOrientation.ToWorld(
+                    orientation, RawNodeGeometry.Sub, variant.Vertices[source + v]) * quarter);
+                scratch.Normals.Add(NodeOrientation.DirectionToWorld(
+                    orientation, variant.Normals[source + v]));
                 scratch.Colors.Add(color);
             }
 
@@ -1536,6 +1558,54 @@ public partial class NodeWorld : StaticBody3D
 
         return mask;
     }
+
+    /// <summary>
+    /// Treat "up" as pointing away from <see cref="GravityCentre"/> rather than
+    /// along world +Y.
+    ///
+    /// Off for a flat world, which is what every existing level wants. On for a
+    /// planet, where the surface has no single up and soil capping the wrong
+    /// face is the difference between ground you walk on and ground you walk
+    /// around.
+    /// </summary>
+    [ExportGroup("Gravity")]
+    [Export]
+    public bool RadialUp
+    {
+        get => _radialUp;
+        set { _radialUp = value; RebuildIfReady(); }
+    }
+
+    private bool _radialUp;
+
+    /// <summary>What node geometry falls toward when <see cref="RadialUp"/> is
+    /// on. The planet sits on the origin.</summary>
+    [Export]
+    public Vector3 GravityCentre
+    {
+        get => _gravityCentre;
+        set { _gravityCentre = value; RebuildIfReady(); }
+    }
+
+    private Vector3 _gravityCentre = Vector3.Zero;
+
+    /// <summary>Which of the six axis directions is up for this cell.</summary>
+    private int OrientationOf(Vector3I cell, INodeType type) =>
+        _radialUp && type.FollowsGravity
+            ? NodeOrientation.Facing(cell, _gravityCentre)
+            : NodeOrientation.PosY;
+
+    /// <summary>
+    /// The neighbour mask as the SHAPE RULE should read it: rewritten so the
+    /// direction pointing away from the planet plays the part of +Y.
+    ///
+    /// Every shape rule is written for a flat world and says "the cell above",
+    /// "the sides facing air". Rebasing the mask keeps that vocabulary intact
+    /// while changing which world directions it refers to, so the rules need no
+    /// changes and stay a table lookup.
+    /// </summary>
+    private int LocalMask(Vector3I cell, INodeType type) =>
+        NodeOrientation.Rebase(NeighbourMask(cell), OrientationOf(cell, type));
 
     /// <summary>
     /// Which of the 26 cells around this one hold CRYSTAL, as 26 bits split
@@ -1584,7 +1654,8 @@ public partial class NodeWorld : StaticBody3D
     /// boundary exposed even with a solid node next door, and culling on
     /// presence alone tears visible holes.
     /// </summary>
-    private bool IsBuried(Vector3I cell, NodeMesh variant, int quad, MeshScratch scratch)
+    private bool IsBuried(Vector3I cell, NodeMesh variant, int quad, MeshScratch scratch,
+        int orientation)
     {
         int from = variant.OccludedStart[quad];
         int to = variant.OccludedStart[quad + 1];
@@ -1593,10 +1664,17 @@ public partial class NodeWorld : StaticBody3D
 
         for (int c = from; c < to; c += 3)
         {
-            if (!scratch.Occupancy.Solid(cell,
-                    variant.OccludedCells[c],
-                    variant.OccludedCells[c + 1],
-                    variant.OccludedCells[c + 2]))
+            // The occlusion cells describe the shape in ITS frame, and the
+            // occupancy map is in the world's, so they have to be rotated the
+            // same way the vertices are. Probing the unrotated cells would test
+            // a quad against space on the wrong side of the node.
+            NodeOrientation.ToWorld(orientation, RawNodeGeometry.Sub,
+                variant.OccludedCells[c],
+                variant.OccludedCells[c + 1],
+                variant.OccludedCells[c + 2],
+                out int i, out int j, out int k);
+
+            if (!scratch.Occupancy.Solid(cell, i, j, k))
                 return false;
         }
 

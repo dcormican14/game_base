@@ -92,7 +92,8 @@ public sealed class ChunkOccupancy
     /// nothing outside the margin can fill a sub-cell any quad of this chunk
     /// tests.
     /// </summary>
-    public void Fill(NodeChunkStore store, System.Func<NodeMaterial, INodeType> typeOf)
+    public void Fill(NodeChunkStore store, System.Func<NodeMaterial, INodeType> typeOf,
+        bool radialUp = false, Vector3 gravityCentre = default)
     {
         for (int x = 0; x < Span; x++)
             for (int y = 0; y < Span; y++)
@@ -143,7 +144,11 @@ public sealed class ChunkOccupancy
                         continue;
                     }
 
-                    Stamp(store, cell, typeOf((NodeMaterial)material));
+                    INodeType type = typeOf((NodeMaterial)material);
+                    Stamp(store, cell, type,
+                        radialUp && type.FollowsGravity
+                            ? NodeOrientation.Facing(cell, gravityCentre)
+                            : NodeOrientation.PosY);
                 }
     }
 
@@ -197,7 +202,7 @@ public sealed class ChunkOccupancy
     }
 
     /// <summary>Marks one node's sub-cells filled.</summary>
-    private void Stamp(NodeChunkStore store, Vector3I cell, INodeType type)
+    private void Stamp(NodeChunkStore store, Vector3I cell, INodeType type, int orientation)
     {
         // The neighbour mask must match what the MESHER will use, or culling
         // and geometry disagree: a face would be tested against occupancy that
@@ -209,7 +214,10 @@ public sealed class ChunkOccupancy
                 neighbours |= 1 << face;
         }
 
-        int[] cells = type.OccupiedCells(type.ShapeAt(cell, neighbours));
+        // Rebased and rotated exactly as the mesher does, or the two disagree
+        // about a node's shape and culling tests faces against the wrong space.
+        int[] cells = type.OccupiedCells(
+            type.ShapeAt(cell, NodeOrientation.Rebase(neighbours, orientation)));
 
         // The node's min sub-cell, relative to the window.
         int baseX = (cell.X - _origin.X) * RawNodeGeometry.Sub;
@@ -218,9 +226,13 @@ public sealed class ChunkOccupancy
 
         for (int c = 0; c < cells.Length; c += 3)
         {
-            int i = baseX + cells[c];
-            int j = baseY + cells[c + 1];
-            int k = baseZ + cells[c + 2];
+            NodeOrientation.ToWorld(orientation, RawNodeGeometry.Sub,
+                cells[c], cells[c + 1], cells[c + 2],
+                out int lx, out int ly, out int lz);
+
+            int i = baseX + lx;
+            int j = baseY + ly;
+            int k = baseZ + lz;
 
             // A shape may reach outside its own cell, so the outermost nodes
             // of the window can stamp past its edge. Those sub-cells belong to

@@ -58,6 +58,12 @@ public sealed class TopsoilNode : INodeType
 
     public string Id => "topsoil";
 
+    /// <summary>
+    /// Soil is a SURFACE, so its top has to face the sky. On a planet that is
+    /// the direction away from the core rather than world up.
+    /// </summary>
+    public bool FollowsGravity => true;
+
     public int Subdivision => RawNodeGeometry.Sub;
 
     /// <summary>
@@ -71,12 +77,21 @@ public sealed class TopsoilNode : INodeType
         ShapeAt(cell, neighbours, 0u, 0u);
 
     public NodeShape ShapeAt(Vector3I cell, int neighbours, uint crystalLow, uint crystalHigh)
+        => ShapeAt(cell, neighbours, crystalLow, crystalHigh, NodeOrientation.PosY);
+
+    public NodeShape ShapeAt(Vector3I cell, int neighbours, uint crystalLow, uint crystalHigh,
+        int orientation)
     {
+        // "The cell above" means the one along this node's LOCAL up, which on a
+        // planet is a different world direction at every face of the globe.
+        Vector3I above = NodeOrientation.UpOf(orientation);
+
         return new NodeShape(
             neighbours & (TopsoilGeometry.Masks - 1),
             InternTaken(
-                RimsInto(cell, crystalLow, crystalHigh),
-                RimsInto(cell + Vector3I.Up, crystalLow, crystalHigh, shifted: true)));
+                RimsInto(cell, crystalLow, crystalHigh, orientation),
+                RimsInto(cell + above, crystalLow, crystalHigh, orientation,
+                    shifted: true, shift: above)));
     }
 
     /// <summary>
@@ -108,7 +123,7 @@ public sealed class TopsoilNode : INodeType
     /// what the generator placed — so the mesher passes it in.
     /// </summary>
     private ulong RimsInto(Vector3I cell, uint crystalLow, uint crystalHigh,
-        bool shifted = false)
+        int orientation, bool shifted = false, Vector3I shift = default)
     {
         const int sub = RawNodeGeometry.Sub;
         ulong taken = 0UL;
@@ -134,13 +149,18 @@ public sealed class TopsoilNode : INodeType
                     // cell above shifts its own dy by one to read the right
                     // entries; anything that falls outside is simply not
                     // known to be rock and is left alone.
-                    int ny = shifted ? dy + 1 : dy;
-                    if (ny < -1 || ny > 1)
+                    // The crystal mask describes the cells around THIS node,
+                    // so a query about the cell one step along local up shifts
+                    // its own offsets by that step to read the right entries.
+                    int nx = shifted ? dx + shift.X : dx;
+                    int ny = shifted ? dy + shift.Y : dy;
+                    int nz = shifted ? dz + shift.Z : dz;
+                    if (nx < -1 || nx > 1 || ny < -1 || ny > 1 || nz < -1 || nz > 1)
                         continue;
-                    if (shifted && dx == 0 && ny == 0 && dz == 0)
+                    if (shifted && nx == 0 && ny == 0 && nz == 0)
                         continue;
 
-                    int bit = NodeFace.NeighbourBit(dx, ny, dz);
+                    int bit = NodeFace.NeighbourBit(nx, ny, nz);
                     bool isCrystal = bit < 32
                         ? (crystalLow & 1u << bit) != 0u
                         : (crystalHigh & 1u << (bit - 32)) != 0u;
@@ -151,12 +171,20 @@ public sealed class TopsoilNode : INodeType
                     var at = new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz);
                     RawNodeGeometry.Mask mask = _raw.MaskFor(at);
 
+                    // Walked in LOCAL sub-cell coordinates and converted to
+                    // world before asking the rock, because the rock's shape is
+                    // solved in world axes while this node's is not. Recording
+                    // the answer against the local cell is what keeps the two
+                    // talking about the same space.
                     for (int i = 0; i < sub; i++)
                         for (int j = 0; j < sub; j++)
                             for (int k = 0; k < sub; k++)
                             {
+                                NodeOrientation.ToWorld(orientation, sub, i, j, k,
+                                    out int wi, out int wj, out int wk);
+
                                 if (RawNodeGeometry.Occupies(mask,
-                                        i - dx * sub, j - dy * sub, k - dz * sub))
+                                        wi - dx * sub, wj - dy * sub, wk - dz * sub))
                                     taken |= 1UL << TopsoilGeometry.CellBit(i, j, k);
                             }
                 }
