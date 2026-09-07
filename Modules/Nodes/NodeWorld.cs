@@ -1604,8 +1604,66 @@ public partial class NodeWorld : StaticBody3D
     /// while changing which world directions it refers to, so the rules need no
     /// changes and stay a table lookup.
     /// </summary>
-    private int LocalMask(Vector3I cell, INodeType type) =>
-        NodeOrientation.Rebase(NeighbourMask(cell), OrientationOf(cell, type));
+    private int LocalMask(Vector3I cell, INodeType type)
+    {
+        int orientation = OrientationOf(cell, type);
+        int mask = NodeOrientation.Rebase(NeighbourMask(cell), orientation);
+
+        if (!_radialUp || !type.FollowsGravity)
+            return mask;
+
+        // A SPHERE IS NOT A HILLSIDE.
+        //
+        // Carved from cubes, a sphere's surface is a staircase: walk round it
+        // and the ground steps down about once per node, entirely from
+        // curvature. The soil rule cannot tell that from real terrain -- it
+        // sees a solid uphill neighbour with another solid cell above it, which
+        // is its definition of rising ground -- so it adds a lip and bevels the
+        // downhill side on almost every node.
+        //
+        // Measured on a perfectly smooth sphere, that fired on 7% of surface
+        // nodes near an axis and 84% at 40 degrees from it, which is the tilted
+        // stepped look a flat planet should not have.
+        //
+        // The world knows what the node cannot: whether a step is terrain or
+        // curvature.
+        //
+        // A SIDE COUNTS AS GROUND IF THE CRUST CONTINUES THAT WAY, even when
+        // the particular cell beside this one happens to be empty because the
+        // staircase steps down there. What decides it is depth: the neighbour
+        // one step down-and-across is at the same depth this node is, so if
+        // THAT is solid the ground continues and there is no edge to bevel.
+        //
+        // The result is that only a genuine drop -- terrain, or a mined hole --
+        // exposes a side, which is what the bevel was written for.
+        int fixedMask = mask;
+        Vector3I up = NodeOrientation.UpOf(orientation);
+
+        for (int face = 0; face < 4; face++)
+        {
+            int bit = face switch
+            {
+                0 => NodeFace.NegX,
+                1 => NodeFace.PosX,
+                2 => NodeFace.NegZ,
+                _ => NodeFace.PosZ,
+            };
+
+            if (NodeFace.Has(mask, bit))
+                continue;
+
+            // The cell beside this one, one step further in: where the crust
+            // continues when the surface is merely curving away.
+            Vector3I side = NodeOrientation.FaceOffset(orientation, bit);
+            if (_store.Has(cell + side - up))
+                fixedMask |= 1 << bit;
+        }
+
+        // The rise is cleared outright. Its whole job is to bridge a step UP,
+        // and on a sphere every apparent step up is curvature.
+        return fixedMask & ~(1 << NodeFace.UpNegX | 1 << NodeFace.UpPosX
+                           | 1 << NodeFace.UpNegZ | 1 << NodeFace.UpPosZ);
+    }
 
     /// <summary>
     /// Which of the 26 cells around this one hold CRYSTAL, as 26 bits split

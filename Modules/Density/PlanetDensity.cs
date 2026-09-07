@@ -63,7 +63,7 @@ public sealed class PlanetDensity
     /// How far terrain departs from the mean radius, in nodes — the height
     /// between the deepest basin and the highest peak.
     /// </summary>
-    public float TerrainHeight { get; set; } = 34f;
+    public float TerrainHeight { get; set; } = 0f;
 
     /// <summary>Nodes per lobe of the coarsest terrain octave. Large, because
     /// this is continents rather than boulders.</summary>

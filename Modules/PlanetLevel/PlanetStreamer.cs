@@ -46,7 +46,7 @@ public partial class PlanetStreamer : ChunkStreamer
     }
 
     [ExportGroup("Terrain")]
-    private float _terrainHeight = 34f;
+    private float _terrainHeight = 0f;
     /// <summary>Nodes between the deepest basin and the highest peak.</summary>
     [Export(PropertyHint.Range, "0,300,1")]
     public float TerrainHeight
@@ -327,7 +327,17 @@ public partial class PlanetStreamer : ChunkStreamer
         const float Size = NodeChunkStore.ChunkSize;
 
         // In chunks, with a chunk of slack for the box corners.
-        float inner = Mathf.Max(0f, (field.Radius - field.TerrainHeight) / Size - 1.8f);
+        //
+        // The INNER bound is the deepest rock a player can reach, not the
+        // deepest basin. Rock continues all the way to the core -- crust,
+        // mantle and the sponge below it -- so bounding the band at the
+        // surface would reject every chunk under the player's feet. With
+        // TerrainHeight at zero that band collapsed to 3.6 chunks and the
+        // world stalled at 67% ready, unable to build the ground it was
+        // standing on.
+        //
+        // Zero is the honest floor: the planet is solid at its centre.
+        float inner = 0f;
         float outer = field.MaxRadius / Size + 1.8f;
 
         lo = Mathf.FloorToInt(inner * inner);

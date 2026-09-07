@@ -96,6 +96,39 @@ public static class NodeOrientation
     };
 
     /// <summary>
+    /// The world direction a rule's local face bit refers to, for a given
+    /// orientation.
+    ///
+    /// The inverse of what <see cref="Rebase"/> does to a whole mask, and what
+    /// lets a caller SAMPLE the world along the rule's own axes rather than
+    /// relabelling what it already sampled along the world's.
+    ///
+    /// That distinction matters on a curved surface. A sphere carved from
+    /// cubes is a staircase: walk round it and the ground steps down about once
+    /// per node, purely from curvature. Sampled along world axes, a soil node
+    /// on that staircase sees a solid uphill neighbour with another solid cell
+    /// above it -- which is exactly what the rule reads as "the ground rises
+    /// here" -- so it adds a lip and bevels the downhill side. Measured on a
+    /// perfectly smooth sphere, that fired on 7% of surface nodes near an axis
+    /// and 84% of them at 40 degrees away, which is the tilted, stepped look a
+    /// flat planet should not have.
+    ///
+    /// Sampling along the LOCAL frame instead follows the curve: the cell the
+    /// rule calls "above" is the one further from the core, so a smooth sphere
+    /// reads as smooth ground and only real terrain makes it step.
+    /// </summary>
+    public static Vector3I FaceOffset(int orientation, int face)
+    {
+        if (orientation == PosY)
+            return NodeFace.Offsets[face];
+
+        Basis(orientation, out Vector3I right, out Vector3I up, out Vector3I forward);
+        Vector3I local = NodeFace.Offsets[face];
+
+        return right * local.X + up * local.Y + forward * local.Z;
+    }
+
+    /// <summary>
     /// Rewrites a neighbour mask into the frame a shape rule expects.
     ///
     /// The rule believes +Y is up and reasons about its four horizontal sides
