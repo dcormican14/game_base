@@ -69,8 +69,23 @@ public sealed class PlanetChunkSource
         if (near > _field.MaxRadius)
             return 0;
 
-        // The cap needs to know what is above it, and a cell at the top of the
-        // chunk looks up to `lookahead` cells past its ceiling.
+        // ENTIRELY SOLID CRUST, with no noise evaluated at all.
+        //
+        // A chunk whose furthest corner is still inside the shallowest ground
+        // the planet can have is completely underground, and if its nearest
+        // corner is also above the depth where hollowing starts then nothing
+        // in it can be anything but solid rock. That is the whole mantle
+        // above the caverns, which is a large share of the chunks a player
+        // digging down will ask for -- and it costs two lengths instead of
+        // 32768 noise evaluations.
+        float shallowest = _field.Radius - _field.TerrainHeight;
+        if (far < shallowest && _field.Radius - near < _field.SolidDepth)
+        {
+            System.Array.Fill(cells, (byte)NodeMaterial.Raw);
+            return cells.Length;
+        }
+
+        // How many cells the cap walk steps outward.
         int lookahead = Mathf.CeilToInt(Mathf.Max(_field.CapThickness, 0f)) + 1;
 
         int solid = 0;
@@ -84,10 +99,39 @@ public sealed class PlanetChunkSource
                     var at = new Vector3(
                         origin.X + lx + 0.5f, origin.Y + ly + 0.5f, origin.Z + lz + 0.5f);
 
-                    if (!_field.IsSolid(at))
+                    float distance = at.Length();
+                    if (distance < 0.0001f)
                         continue;
 
-                    NodeMaterial material = IsCapped(at, lookahead)
+                    // ONE ground-radius evaluation per cell, reused for both
+                    // the density test and the cap.
+                    //
+                    // GroundRadius is a domain warp plus several octaves of
+                    // noise and depends only on DIRECTION, so the old code
+                    // paid for it up to five times per cell -- once inside
+                    // IsSolid and once per step of the cap walk -- for what is
+                    // the same answer along a ray. Measured, that was most of
+                    // the 144ms a chunk cost to generate.
+                    float ground = _field.GroundRadius(at / distance);
+
+                    if (_field.AtWithGround(at, distance, ground) <= 0f)
+                        continue;
+
+                    // The cap WALKS outward, unchanged.
+                    //
+                    // Two shortcuts were tried and both were wrong. Deciding
+                    // it from radial depth alone missed the topsoil on steep
+                    // faces, where a cell sits well below its own ground
+                    // radius and still has air a step sideways-and-out.
+                    // Skipping the walk for deep cells missed it again: "air"
+                    // to this test is not only sky, it is also a CAVERN, and
+                    // the hollow core is full of them. Both left 93 cells of
+                    // bare rock that should have been soil.
+                    //
+                    // The saving comes from the ground radius above being
+                    // computed once instead of once per step, not from
+                    // walking less.
+                    NodeMaterial material = IsCapped(at, distance, ground, lookahead)
                         ? NodeMaterial.Dark
                         : NodeMaterial.Raw;
 
@@ -101,35 +145,35 @@ public sealed class PlanetChunkSource
     }
 
     /// <summary>
-    /// Is this cell within the topsoil cap â€” that is, close enough to open sky
-    /// along the OUTWARD direction?
+    /// Is this cell within the topsoil cap — close enough to open sky along
+    /// the OUTWARD direction?
     ///
     /// Outward, not up. On a planet "up" is away from the centre, and a cell
     /// on the equator has its sky along +X. Walking world-up there would test
-    /// sideways through the crust and cap the wrong faces, which is exactly
-    /// the difference between a planet and a flat world.
+    /// sideways through the crust and cap the wrong faces.
     ///
-    /// Only `limit` cells are ever examined: the cap is at most that thick, so
-    /// anything deeper is uncapped whatever lies beyond.
+    /// Only called for cells already known to be near the surface, so the
+    /// steps it takes are paid on a thin shell rather than on every cell of
+    /// the chunk.
     /// </summary>
-    private bool IsCapped(Vector3 at, int limit)
+    private bool IsCapped(Vector3 at, float distance, float ground, int limit)
     {
-        float distance = at.Length();
-        if (distance < 0.0001f)
-            return false;
-
         Vector3 outward = at / distance;
 
         for (int d = 1; d <= limit; d++)
         {
             Vector3 above = at + outward * d;
+            float aboveDistance = distance + d;
 
             // Past the highest ground this planet reaches: certainly sky, so
             // the cell is d-1 below the surface.
-            if (above.Length() > _field.MaxRadius)
+            if (aboveDistance > _field.MaxRadius)
                 return d - 1 < _field.CapThickness;
 
-            if (!_field.IsSolid(above))
+            // The ground radius is the same along this ray, so the sample
+            // reuses the caller's rather than recomputing the warp and noise
+            // that produced it.
+            if (_field.AtWithGround(above, aboveDistance, ground) <= 0f)
                 return d - 1 < _field.CapThickness;
         }
 

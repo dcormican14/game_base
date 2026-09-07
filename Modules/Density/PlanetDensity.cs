@@ -190,6 +190,29 @@ public sealed class PlanetDensity
     /// <summary>Convenience for callers holding loose coordinates.</summary>
     public float At(float x, float y, float z) => At(new Vector3(x, y, z));
 
+    /// <summary>
+    /// The density at a point whose ground radius is already known.
+    ///
+    /// <see cref="GroundRadius"/> is the expensive half of the field -- a
+    /// domain warp plus several octaves of noise -- and it depends only on
+    /// DIRECTION. A generator walking a column therefore computes the same
+    /// value over and over: measured, 32768 calls cost 48ms, and a chunk made
+    /// up to five of them per cell, which was most of the 144ms it took to
+    /// generate one.
+    ///
+    /// Passing the radius in makes the rest arithmetic. This is exact, not an
+    /// approximation: `ground` is precisely what At would have computed for
+    /// any point along the same ray.
+    /// </summary>
+    public float AtWithGround(Vector3 p, float distance, float ground)
+    {
+        float depth = ground - distance;
+        if (depth <= 0f)
+            return depth;
+
+        return depth - Hollow(p, depth) * depth;
+    }
+
     /// <summary>Is this point inside rock?</summary>
     public bool IsSolid(Vector3 p) => At(p) > 0f;
 
