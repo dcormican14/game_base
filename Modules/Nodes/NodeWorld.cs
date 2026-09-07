@@ -406,6 +406,12 @@ public partial class NodeWorld : StaticBody3D
         /// </summary>
         public readonly ChunkOccupancy Occupancy = new();
 
+        /// <summary>
+        /// The occupancy used on a curved world, where the dense box the flat
+        /// path uses is not a neighbourhood. See <see cref="SphereOccupancy"/>.
+        /// </summary>
+        public readonly SphereOccupancy Sphere = new();
+
         public void Clear()
         {
             Vertices.Clear();
@@ -1162,8 +1168,16 @@ public partial class NodeWorld : StaticBody3D
 
         if (_shaped)
         {
-            scratch.Occupancy.Reset(origin);
-            scratch.Occupancy.Fill(_store, _typeLookup ?? TypeOf, _radialUp, _gravityCentre);
+            if (Grid != null)
+            {
+                scratch.Sphere.Reset(Grid);
+                scratch.Sphere.Fill(origin, SectionSize, _store, _typeLookup ?? TypeOf);
+            }
+            else
+            {
+                scratch.Occupancy.Reset(origin);
+                scratch.Occupancy.Fill(_store, _typeLookup ?? TypeOf, _radialUp, _gravityCentre);
+            }
         }
 
         // Allocated once outside the loop: a stackalloc per node would grow
@@ -1356,6 +1370,12 @@ public partial class NodeWorld : StaticBody3D
         }
     }
 
+    /// <summary>One occupancy probe, against whichever map this world uses.</summary>
+    private bool SolidAt(MeshScratch scratch, Vector3I cell, int i, int j, int k) =>
+        Grid != null
+            ? scratch.Sphere.Solid(cell, i, j, k)
+            : scratch.Occupancy.Solid(cell, i, j, k);
+
     /// <summary>Are all 26 surrounding cells solid?</summary>
     private bool AllNeighboursSolid(Vector3I cell)
     {
@@ -1365,6 +1385,15 @@ public partial class NodeWorld : StaticBody3D
                 {
                     if (dx == 0 && dy == 0 && dz == 0)
                         continue;
+
+                    if (Grid != null)
+                    {
+                        if (!Grid.Neighbour(cell, dx, dy, dz, out Vector3I at)
+                            || !_store.Has(at))
+                            return false;
+
+                        continue;
+                    }
 
                     if (!_store.Has(new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz)))
                         return false;
@@ -1455,7 +1484,7 @@ public partial class NodeWorld : StaticBody3D
                     if (inside)
                         continue;
 
-                    if (!scratch.Occupancy.Solid(cell, i, j, k))
+                    if (!SolidAt(scratch, cell, i, j, k))
                         return false;
                 }
 
@@ -1909,7 +1938,7 @@ public partial class NodeWorld : StaticBody3D
                 variant.OccludedCells[c + 2],
                 out int i, out int j, out int k);
 
-            if (!scratch.Occupancy.Solid(cell, i, j, k))
+            if (!SolidAt(scratch, cell, i, j, k))
                 return false;
         }
 
