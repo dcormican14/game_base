@@ -171,12 +171,21 @@ public partial class PlanetStreamer : ChunkStreamer
     /// the two streamers stay comparable, and it costs one small object per
     /// core.
     /// </summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, PlanetChunkSource>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, SphereChunkSource>
         _sources = new();
 
     /// <summary>The field being streamed, for anything that wants to sample it
     /// (spawn logic, a horizon, a minimap).</summary>
     public PlanetDensity Field { get; private set; }
+
+    /// <summary>
+    /// The cubed-sphere grid the world's cells live on.
+    ///
+    /// Rebuilt with the field, since its resolution follows the planet's
+    /// radius. Handed to the NodeWorld, which is what turns cells from cubes
+    /// into arcs.
+    /// </summary>
+    public SphereGrid Grid { get; private set; }
 
     protected override NodeWorld World => _world;
 
@@ -204,14 +213,16 @@ public partial class PlanetStreamer : ChunkStreamer
     /// </summary>
     public Vector3 SurfacePoint(Vector3 direction, float clearance = 3f)
     {
-        PlanetDensity field = Field;
-        if (field == null)
+        SphereGrid grid = Grid;
+        if (grid == null)
             return Vector3.Zero;
 
         Vector3 unit = direction.LengthSquared() > 0.0001f
             ? direction.Normalized() : Vector3.Up;
 
-        return unit * (field.GroundRadius(unit) + clearance);
+        // Shell 0 is the surface by definition, so the ground is exactly one
+        // radius away -- no field evaluation, and no relief to allow for.
+        return unit * (grid.SurfaceRadius + clearance);
     }
 
     /// <summary>
@@ -228,6 +239,8 @@ public partial class PlanetStreamer : ChunkStreamer
             return;
 
         Field = BuildField();
+        Grid = new SphereGrid(Field.Radius, 1f, Vector3.Zero);
+        _world.Grid = Grid;
 
         // The old sources describe the old field. Dropping them makes the next
         // job on each thread build one against the field now in force.
@@ -289,18 +302,12 @@ public partial class PlanetStreamer : ChunkStreamer
     /// </summary>
     protected override int EffectiveLoadRadius(Vector3I centre)
     {
-        PlanetDensity field = Field;
-        if (field == null)
-            return LoadRadius;
-
-        // Height above the mean surface, in chunks, from the scan centre.
-        var at = new Vector3(centre.X, centre.Y, centre.Z) * NodeChunkStore.ChunkSize;
-        float altitude = at.Length() - field.Radius;
-        if (altitude <= 0f)
-            return LoadRadius;
-
-        int reach = LoadRadius + Mathf.CeilToInt(altitude / NodeChunkStore.ChunkSize);
-        return Mathf.Min(reach, Mathf.Max(LoadRadius, MaxLoadRadius));
+        // Cell space has no altitude to scale by: a chunk coordinate is
+        // (u, v, shell), and flying away from the planet moves the player off
+        // the grid entirely rather than to a larger shell index. What decides
+        // how much surface is in view is the plain load radius, in cells
+        // across the face.
+        return LoadRadius;
     }
 
     /// <summary>
@@ -316,6 +323,16 @@ public partial class PlanetStreamer : ChunkStreamer
     /// reach further than its centre.
     /// </summary>
     protected override void ChunkBand(Vector3I centre, int radius, out int lo, out int hi)
+    {
+        // In cell space the band is meaningless: a chunk's shell range already
+        // says whether it can hold rock, and CouldHoldAnything checks it for
+        // the price of two integers. The band existed to avoid walking a huge
+        // Cartesian ball, and the ball is gone.
+        lo = 1;
+        hi = 0;
+    }
+
+    private void UnusedChunkBand(Vector3I centre, int radius, out int lo, out int hi)
     {
         PlanetDensity field = Field;
         if (field == null)
@@ -363,16 +380,18 @@ public partial class PlanetStreamer : ChunkStreamer
     }
 
     /// <summary>A source on the calling thread, for the residency scan.</summary>
-    private PlanetChunkSource SourceFor()
+    private SphereChunkSource SourceFor()
     {
         PlanetDensity field = Field;
-        PlanetChunkSource source = _sources.GetOrAdd(
-            System.Environment.CurrentManagedThreadId,
-            _ => new PlanetChunkSource(field));
+        SphereGrid grid = Grid;
 
-        if (!ReferenceEquals(source.Field, field))
+        SphereChunkSource source = _sources.GetOrAdd(
+            System.Environment.CurrentManagedThreadId,
+            _ => new SphereChunkSource(field, grid));
+
+        if (!ReferenceEquals(source.Field, field) || !ReferenceEquals(source.Grid, grid))
         {
-            source = new PlanetChunkSource(field);
+            source = new SphereChunkSource(field, grid);
             _sources[System.Environment.CurrentManagedThreadId] = source;
         }
 
@@ -391,18 +410,6 @@ public partial class PlanetStreamer : ChunkStreamer
         if (field == null)
             return 0;
 
-        PlanetChunkSource source = _sources.GetOrAdd(
-            System.Environment.CurrentManagedThreadId,
-            _ => new PlanetChunkSource(field));
-
-        // A source built against a superseded field would generate terrain
-        // that disagrees with its neighbours.
-        if (!ReferenceEquals(source.Field, field))
-        {
-            source = new PlanetChunkSource(field);
-            _sources[System.Environment.CurrentManagedThreadId] = source;
-        }
-
-        return source.Generate(chunk, cells);
+        return SourceFor().Generate(chunk, cells);
     }
 }

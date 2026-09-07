@@ -130,6 +130,46 @@ public sealed class SphereGrid
     }
 
     /// <summary>
+    /// Where a point inside a cell lands in world space.
+    ///
+    /// `local` runs 0..1 across the cell in each axis: u across the face, v
+    /// across it the other way, and w outward through the shell. This is what
+    /// makes a node an ARC rather than a cube -- its eight corners land on two
+    /// concentric spherical caps, and the faces between them curve with the
+    /// planet.
+    ///
+    /// Coordinates outside 0..1 are allowed and meaningful, because node
+    /// geometry reaches past its own cell: a crystal rim spans the lattice
+    /// edge it won, and the topsoil's raised back stands a quarter-cell above
+    /// its ceiling.
+    /// </summary>
+    public Vector3 PointIn(Vector3I cell, Vector3 local)
+    {
+        Unpack(cell, out int face, out int u, out int v, out int shell);
+
+        int resolution = CubedSphere.ResolutionAt(shell, _surfaceRadius, _nodeSize);
+
+        // Fractional grid position, so a point halfway across a cell is
+        // halfway across its arc.
+        float fu = u + local.X;
+        float fv = v + local.Y;
+
+        // Outward is -w: shells count inward, so a point at the top of a cell
+        // (local.Z = 1) is one node further out than its base.
+        float radius = CubedSphere.RadiusOf(shell, _surfaceRadius, _nodeSize)
+            - _nodeSize * (1f - local.Z);
+
+        // The same tangent warp CubedSphere uses, evaluated off the grid.
+        float su = fu / resolution * 2f - 1f;
+        float sv = fv / resolution * 2f - 1f;
+
+        float au = Mathf.Tan(Mathf.Clamp(su, -1.5f, 1.5f) * Mathf.Pi * 0.25f);
+        float av = Mathf.Tan(Mathf.Clamp(sv, -1.5f, 1.5f) * Mathf.Pi * 0.25f);
+
+        return _origin + CubedSphere.FaceDirection(face, au, av).Normalized() * radius;
+    }
+
+    /// <summary>
     /// The cell one step from this one, in the local frame.
     ///
     /// `du` and `dv` step across the face, `dShell` steps radially (positive

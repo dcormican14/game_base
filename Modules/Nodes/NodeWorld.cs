@@ -626,9 +626,18 @@ public partial class NodeWorld : StaticBody3D
 
     public bool HasNode(Vector3I cell) => _store.Has(cell);
 
-    /// <summary>Grid cell containing a world-space point.</summary>
+    /// <summary>
+    /// Grid cell containing a world-space point.
+    ///
+    /// The bridge every part of the engine that still thinks in world space
+    /// crosses: the player's position, a ray hit, an edit, and the streamer's
+    /// idea of where to centre residency.
+    /// </summary>
     public Vector3I CellAt(Vector3 worldPoint)
     {
+        if (Grid != null)
+            return Grid.CellAt(ToLocal(worldPoint));
+
         Vector3 local = ToLocal(worldPoint) / _nodeSize;
         return new Vector3I(
             Mathf.FloorToInt(local.X),
@@ -639,6 +648,9 @@ public partial class NodeWorld : StaticBody3D
     /// <summary>World-space centre of a cell.</summary>
     public Vector3 CellCentre(Vector3I cell)
     {
+        if (Grid != null)
+            return ToGlobal(Grid.CentreOf(cell));
+
         return ToGlobal((new Vector3(cell.X, cell.Y, cell.Z) + Vector3.One * 0.5f) * _nodeSize);
     }
 
@@ -1212,7 +1224,7 @@ public partial class NodeWorld : StaticBody3D
 
                     foreach (var face in CubeFaces)
                     {
-                        if (_store.Has(cell + face.Dir))
+                        if (HasNeighbour(cell, face.Dir))
                             continue;
                         FaceCorners(face, min, max, corners);
                         AddFace(color, corners, new Vector3(face.Dir.X, face.Dir.Y, face.Dir.Z), scratch);
@@ -1270,6 +1282,35 @@ public partial class NodeWorld : StaticBody3D
         ApplyCollision(target, mesh, scratch);
     }
 
+    /// <summary>
+    /// A node's surface normal on the sphere.
+    ///
+    /// The shape rules produce normals in a flat frame, where a face's normal
+    /// is one of six axis directions. Bent onto a shell those faces curve, so
+    /// a top or bottom face points radially and a side points along the
+    /// surface. Keeping the flat normal would light every node as though it
+    /// faced the same way, which on a globe reads as a faceted ball.
+    /// </summary>
+    private Vector3 SphereNormal(Vector3I cell, Vector3 shaped, Vector3 flat)
+    {
+        Vector3 up = Grid.UpAt(cell);
+
+        // A face normal is a single axis, so its local-up component says
+        // whether this is a top, a bottom, or a side.
+        if (Mathf.Abs(flat.Y) > 0.9f)
+            return flat.Y > 0f ? up : -up;
+
+        // A side. Its direction is found by stepping along the flat normal and
+        // seeing where the grid puts that step, which is where the curvature
+        // enters.
+        Vector3 here = Grid.PointIn(cell, shaped / RawNodeGeometry.Sub);
+        Vector3 along = Grid.PointIn(cell,
+            (shaped + flat * 0.5f) / RawNodeGeometry.Sub);
+
+        Vector3 d = along - here;
+        return d.LengthSquared() < 0.0000001f ? up : d.Normalized();
+    }
+
     /// <summary>Are all 26 surrounding cells solid?</summary>
     private bool AllNeighboursSolid(Vector3I cell)
     {
@@ -1296,12 +1337,12 @@ public partial class NodeWorld : StaticBody3D
     /// </summary>
     private bool FaceEnclosed(Vector3I cell)
     {
-        return _store.Has(cell + Vector3I.Right)
-            && _store.Has(cell + Vector3I.Left)
-            && _store.Has(cell + Vector3I.Up)
-            && _store.Has(cell + Vector3I.Down)
-            && _store.Has(cell + Vector3I.Back)
-            && _store.Has(cell + Vector3I.Forward);
+        return HasNeighbour(cell, Vector3I.Right)
+            && HasNeighbour(cell, Vector3I.Left)
+            && HasNeighbour(cell, Vector3I.Up)
+            && HasNeighbour(cell, Vector3I.Down)
+            && HasNeighbour(cell, Vector3I.Back)
+            && HasNeighbour(cell, Vector3I.Forward);
     }
 
     /// <summary>
@@ -1421,10 +1462,19 @@ public partial class NodeWorld : StaticBody3D
 
                     foreach (var face in CubeFaces)
                     {
-                        if (_store.Has(cell + face.Dir))
+                        if (HasNeighbour(cell, face.Dir))
                             continue;
 
                         FaceCorners(face, min, max, corners);
+
+                        // Bent onto the shell too, so the surface the player
+                        // stands on is the one they can see.
+                        if (Grid != null)
+                        {
+                            for (int c = 0; c < 4; c++)
+                                corners[c] = Grid.PointIn(cell, (corners[c] - min) / _nodeSize);
+                        }
+
                         scratch.CollisionVertices.Add(corners[0]);
                         scratch.CollisionVertices.Add(corners[1]);
                         scratch.CollisionVertices.Add(corners[2]);
@@ -1516,10 +1566,30 @@ public partial class NodeWorld : StaticBody3D
             int start = scratch.Vertices.Count;
             for (int v = 0; v < 4; v++)
             {
-                scratch.Vertices.Add(min + NodeOrientation.ToWorld(
-                    orientation, RawNodeGeometry.Sub, variant.Vertices[source + v]) * quarter);
-                scratch.Normals.Add(NodeOrientation.DirectionToWorld(
-                    orientation, variant.Normals[source + v]));
+                Vector3 shaped = NodeOrientation.ToWorld(
+                    orientation, RawNodeGeometry.Sub, variant.Vertices[source + v]);
+
+                Vector3 at;
+                Vector3 normal;
+
+                if (Grid != null)
+                {
+                    // ON A SPHERE the node is an ARC, so its vertices are
+                    // placed by the grid rather than offset from a corner: a
+                    // sub-cell coordinate becomes a fraction across the cell
+                    // and the grid turns that into a point on the shell.
+                    at = Grid.PointIn(cell, shaped / RawNodeGeometry.Sub);
+                    normal = SphereNormal(cell, shaped, variant.Normals[source + v]);
+                }
+                else
+                {
+                    at = min + shaped * quarter;
+                    normal = NodeOrientation.DirectionToWorld(
+                        orientation, variant.Normals[source + v]);
+                }
+
+                scratch.Vertices.Add(at);
+                scratch.Normals.Add(normal);
                 scratch.Colors.Add(color);
             }
 
@@ -1552,7 +1622,7 @@ public partial class NodeWorld : StaticBody3D
         int mask = 0;
         for (int face = 0; face < NodeFace.Offsets.Length; face++)
         {
-            if (_store.Has(cell + NodeFace.Offsets[face]))
+            if (HasNeighbour(cell, NodeFace.Offsets[face]))
                 mask |= 1 << face;
         }
 
@@ -1588,6 +1658,39 @@ public partial class NodeWorld : StaticBody3D
     }
 
     private Vector3 _gravityCentre = Vector3.Zero;
+
+    /// <summary>
+    /// The cubed-sphere grid this world's cells live on, or null for a flat
+    /// Cartesian world.
+    ///
+    /// When set, a cell coordinate means (u, v, shell) rather than (x, y, z),
+    /// and "the cell that way" becomes a grid query instead of an addition --
+    /// because stepping off a face lands on another face where the axes may be
+    /// swapped. Everything else about the world is unchanged: storage, chunking
+    /// and streaming still key on the same Vector3I.
+    /// </summary>
+    public SphereGrid Grid { get; set; }
+
+    /// <summary>
+    /// The cell one step from `cell` in a world direction.
+    ///
+    /// On a flat world this is the addition it always was. On a sphere it asks
+    /// the grid, which knows what lies over a face edge.
+    /// </summary>
+    private bool Step(Vector3I cell, Vector3I direction, out Vector3I result)
+    {
+        if (Grid == null)
+        {
+            result = cell + direction;
+            return true;
+        }
+
+        return Grid.Neighbour(cell, direction.X, direction.Y, direction.Z, out result);
+    }
+
+    /// <summary>Is the cell one step away solid?</summary>
+    private bool HasNeighbour(Vector3I cell, Vector3I direction) =>
+        Step(cell, direction, out Vector3I at) && _store.Has(at);
 
     /// <summary>Which of the six axis directions is up for this cell.</summary>
     private int OrientationOf(Vector3I cell, INodeType type) =>
