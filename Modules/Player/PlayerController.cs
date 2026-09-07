@@ -160,6 +160,60 @@ public partial class PlayerController : CharacterBody3D
         _characterRig.Visible = thirdPerson || (!IsSandbox && !HideBodyInFirstPerson);
     }
 
+    /// <summary>
+    /// Which way is down, at the player's feet.
+    ///
+    /// Defaults to world -Y, so a level with no planet in it behaves exactly as
+    /// it did. A planet level installs a <see cref="RadialGravity"/> and every
+    /// axis below follows from it.
+    /// </summary>
+    public IGravityField GravityField { get; set; } = new FlatGravity();
+
+    /// <summary>The current down direction, sampled once per physics step.</summary>
+    private Vector3 _down = Vector3.Down;
+
+    /// <summary>
+    /// Turns the body so its own up axis matches the local up.
+    ///
+    /// This is what makes a planet walkable rather than a boulder to slide off.
+    /// The controller works in ITS OWN basis -- input is pushed along the body's
+    /// forward and right, gravity along its down -- so re-aligning the body is
+    /// the only place the sphere has to be accounted for. Everything downstream
+    /// is the flat-world arithmetic it always was.
+    ///
+    /// The yaw is preserved by rotating the existing basis onto the new up by
+    /// the shortest arc, rather than rebuilding it from scratch: building a
+    /// fresh basis each frame would snap the player's facing to an arbitrary
+    /// reference direction every time they crossed a pole.
+    /// </summary>
+    private void AlignToGravity()
+    {
+        Vector3 up = -_down;
+        Vector3 currentUp = GlobalTransform.Basis.Y;
+
+        Vector3 axis = currentUp.Cross(up);
+        float sin = axis.Length();
+        float cos = currentUp.Dot(up);
+
+        Basis basis;
+        if (sin < 0.000001f)
+        {
+            // Already aligned, or exactly inverted. Inverted cannot be reached
+            // by walking -- it would need the player to pass through the centre
+            // -- so treating it as aligned is safe and avoids a divide by zero.
+            if (cos > 0f)
+                return;
+
+            basis = GlobalTransform.Basis;
+        }
+        else
+        {
+            basis = new Basis(axis / sin, Mathf.Atan2(sin, cos)) * GlobalTransform.Basis;
+        }
+
+        GlobalTransform = new Transform3D(basis.Orthonormalized(), GlobalPosition);
+    }
+
     public override void _UnhandledInput(InputEvent @event)
     {
         if (@event is not InputEventMouseMotion motion || Input.MouseMode != Input.MouseModeEnum.Captured)
@@ -167,7 +221,10 @@ public partial class PlayerController : CharacterBody3D
 
         float sensitivity = SettingsService.Instance?.MouseSensitivity ?? FallbackMouseSensitivity;
 
-        RotateY(Mathf.DegToRad(-motion.Relative.X * sensitivity));
+        // Yaw about the body's OWN up, not the world's. On the far side of a
+        // planet world +Y is straight down, and yawing about it would roll the
+        // camera instead of turning it.
+        RotateObjectLocal(Vector3.Up, Mathf.DegToRad(-motion.Relative.X * sensitivity));
         _pitchDegrees = Mathf.Clamp(
             _pitchDegrees - motion.Relative.Y * sensitivity,
             MinPitchDegrees,
@@ -178,11 +235,28 @@ public partial class PlayerController : CharacterBody3D
     public override void _PhysicsProcess(double delta)
     {
         float dt = (float)delta;
+
+        // WHICH WAY IS DOWN, asked once and used for everything below.
+        //
+        // On a planet this changes as the player walks, so it cannot be the
+        // constant -Y the rest of this method was written against. Aligning the
+        // body to it first is what lets the movement code keep working in the
+        // body's own axes without ever knowing it is on a sphere.
+        _down = GravityField.DownAt(GlobalPosition);
+        UpDirection = -_down;
+        AlignToGravity();
+
+        Vector3 up = -_down;
         Vector3 velocity = Velocity;
 
         Vector2 input = Input.GetVector(MoveLeftAction, MoveRightAction, MoveForwardAction, MoveBackAction);
         Vector3 direction = Transform.Basis * new Vector3(input.X, 0, input.Y);
-        float horizontalSpeed = new Vector2(velocity.X, velocity.Z).Length();
+
+        // Velocity split along the local frame rather than the world axes: the
+        // part along gravity, and the part across it.
+        float verticalSpeed = velocity.Dot(up);
+        Vector3 horizontal = velocity - up * verticalSpeed;
+        float horizontalSpeed = horizontal.Length();
 
         // The double-tap is read BEFORE the jump below consumes the press, but
         // the first tap still jumps normally — only the second one within the
@@ -198,16 +272,20 @@ public partial class PlayerController : CharacterBody3D
 
         if (!IsOnFloor())
         {
-            velocity.Y -= Gravity * dt;
+            verticalSpeed -= Gravity * dt;
         }
         else if (Input.IsActionJustPressed(JumpAction) && (!IsCrouching && !IsSliding || CanStand()))
         {
-            velocity.Y = JumpVelocity;
+            verticalSpeed = JumpVelocity;
             if (IsSliding)
                 EndSlide(keepCrouched: false);
             else
                 SetCrouching(false);
         }
+
+        // Reassembled so the slide code below, which works on a whole velocity,
+        // sees the vertical change made above.
+        velocity = horizontal + up * verticalSpeed;
 
         if (IsSliding)
         {
@@ -229,12 +307,22 @@ public partial class PlayerController : CharacterBody3D
                 float targetSpeed = IsCrouching && IsOnFloor() ? CrouchSpeed
                     : Input.IsActionPressed(SprintAction) ? SprintSpeed
                     : WalkSpeed;
-                Vector3 targetHorizontal = direction * targetSpeed;
+
+                // Steered ACROSS gravity rather than across world XZ. The
+                // direction already comes from the body basis, which is aligned
+                // to local up, but projecting again keeps a walk from gaining a
+                // vertical component when the camera is pitched.
+                Vector3 wish = direction - up * direction.Dot(up);
+                Vector3 targetHorizontal = wish.LengthSquared() > 0.000001f
+                    ? wish.Normalized() * targetSpeed
+                    : Vector3.Zero;
 
                 float acceleration = IsOnFloor() ? GroundAcceleration : GroundAcceleration * AirControl;
                 float weight = 1f - Mathf.Exp(-acceleration * dt);
-                velocity.X = Mathf.Lerp(velocity.X, targetHorizontal.X, weight);
-                velocity.Z = Mathf.Lerp(velocity.Z, targetHorizontal.Z, weight);
+
+                float along = velocity.Dot(up);
+                Vector3 across = velocity - up * along;
+                velocity = across.Lerp(targetHorizontal, weight) + up * along;
             }
         }
 
@@ -322,10 +410,13 @@ public partial class PlayerController : CharacterBody3D
         Basis look = GlobalTransform.Basis * new Basis(new Vector3(1, 0, 0), Mathf.DegToRad(_pitchDegrees));
         Vector3 wish = look * new Vector3(input.X, 0, input.Y);
 
+        // Away from and toward the planet, not world up and down -- otherwise
+        // ascending on the far side of a globe flies you into it.
+        Vector3 flyUp = -GravityField.DownAt(GlobalPosition);
         if (Input.IsActionPressed(JumpAction))
-            wish += Vector3.Up;
+            wish += flyUp;
         if (Input.IsActionPressed(CrouchAction))
-            wish += Vector3.Down;
+            wish -= flyUp;
 
         if (wish.LengthSquared() > 1f)
             wish = wish.Normalized();
@@ -414,7 +505,13 @@ public partial class PlayerController : CharacterBody3D
         var query = new PhysicsShapeQueryParameters3D
         {
             Shape = _standTestShape,
-            Transform = new Transform3D(Basis.Identity, GlobalPosition + Vector3.Up * (StandCapsuleHeight * 0.5f + 0.03f)),
+            // Oriented and offset along LOCAL up: the capsule stands away from
+            // the planet's centre, so testing along world +Y would sweep
+            // sideways through the crust anywhere but the north pole.
+            Transform = new Transform3D(
+                GlobalTransform.Basis.Orthonormalized(),
+                GlobalPosition + GlobalTransform.Basis.Y.Normalized()
+                    * (StandCapsuleHeight * 0.5f + 0.03f)),
             Exclude = new Godot.Collections.Array<Rid> { GetRid() },
             CollisionMask = CollisionMask,
         };

@@ -4,24 +4,16 @@ using GameBase.Levels;
 namespace GameBase.PlanetLevel;
 
 /// <summary>
-/// Puts the player on the planet's surface at start.
+/// Puts the player on the planet's surface and makes down point at its core.
 ///
 /// A planet has no constant spawn point: the ground is at whatever radius the
 /// terrain reaches along a given direction, so where to stand has to be asked
 /// of the field rather than written into the scene.
 ///
-/// WHY THE NORTH POLE
-///
-/// <see cref="GameBase.Player.PlayerController"/> falls along world -Y. On a
-/// sphere that is only "down" where the outward direction happens to be +Y —
-/// the north pole — and anywhere else the player would slide off sideways as
-/// though the planet were a boulder sitting in a flat world.
-///
-/// Spawning at the pole makes the planet walkable with the controller as it
-/// stands. Free movement over the whole globe needs gravity that points at the
-/// planet's centre and a player basis that rotates with it, which is a change
-/// to the controller rather than to the world, and is deliberately not made
-/// here.
+/// It also installs the gravity the controller uses. Without that the player
+/// falls along world -Y, which points at the planet's centre only at the north
+/// pole -- anywhere else they slide off as though the planet were a boulder
+/// sitting in a flat world.
 /// </summary>
 public partial class PlanetSpawn : Node
 {
@@ -32,9 +24,8 @@ public partial class PlanetSpawn : Node
     [Export] public NodePath PlayerPath { get; set; } = "";
 
     /// <summary>
-    /// Which way from the centre to spawn. Up is the north pole, the one
-    /// direction where the controller's world-axis gravity points at the
-    /// planet's centre.
+    /// Which way from the centre to spawn. Any direction now works, since
+    /// gravity follows the surface rather than the world axes.
     /// </summary>
     [Export] public Vector3 Direction { get; set; } = Vector3.Up;
 
@@ -63,6 +54,30 @@ public partial class PlanetSpawn : Node
         if (streamer.Field == null)
             return;
 
-        player.GlobalPosition = streamer.SurfacePoint(Direction, Clearance);
+        Vector3 at = streamer.SurfacePoint(Direction, Clearance);
+        player.GlobalPosition = at;
+
+        // DOWN IS TOWARD THE CORE, from here on.
+        //
+        // The planet is centred on the origin, so the field is just "fall
+        // toward zero". Handing it to the controller is the whole of spherical
+        // gravity: the body re-aligns to it each step, and every axis the
+        // movement code uses comes from the body.
+        if (player is GameBase.Player.PlayerController controller)
+        {
+            controller.GravityField = new GameBase.Player.RadialGravity(Vector3.Zero);
+
+            // Stand the player up along the local vertical straight away, so
+            // the first frame is not spent toppling from world-up to
+            // surface-up.
+            Vector3 up = at.Normalized();
+            Vector3 forward = up.Cross(Vector3.Right);
+            if (forward.LengthSquared() < 0.0001f)
+                forward = up.Cross(Vector3.Forward);
+
+            forward = forward.Normalized();
+            var basis = new Basis(forward.Cross(up).Normalized(), up, -forward);
+            controller.GlobalTransform = new Transform3D(basis.Orthonormalized(), at);
+        }
     }
 }

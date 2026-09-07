@@ -57,7 +57,7 @@ public sealed class PlanetDensity
     /// The planet's headline dial. Everything else is expressed relative to it
     /// or in absolute nodes, so this can be changed alone.
     /// </summary>
-    public float Radius { get; set; } = 400f;
+    public float Radius { get; set; } = 800f;
 
     /// <summary>
     /// How far terrain departs from the mean radius, in nodes — the height
@@ -67,7 +67,7 @@ public sealed class PlanetDensity
 
     /// <summary>Nodes per lobe of the coarsest terrain octave. Large, because
     /// this is continents rather than boulders.</summary>
-    public float TerrainScale { get; set; } = 420f;
+    public float TerrainScale { get; set; } = 840f;
 
     /// <summary>Octaves of surface terrain. Each costs a noise evaluation per
     /// sample; three gives continents, ranges and hills.</summary>

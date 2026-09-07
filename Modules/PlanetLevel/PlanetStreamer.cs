@@ -36,7 +36,7 @@ public partial class PlanetStreamer : ChunkStreamer
         set { _seed = value; Reset(); }
     }
 
-    private float _radius = 400f;
+    private float _radius = 800f;
     /// <summary>Distance from the centre to mean sea level, in nodes.</summary>
     [Export(PropertyHint.Range, "60,4000,1")]
     public float Radius
@@ -55,7 +55,7 @@ public partial class PlanetStreamer : ChunkStreamer
         set { _terrainHeight = value; Reset(); }
     }
 
-    private float _terrainScale = 420f;
+    private float _terrainScale = 840f;
     /// <summary>Nodes per lobe of the coarsest terrain octave — continent size.</summary>
     [Export(PropertyHint.Range, "40,3000,5")]
     public float TerrainScale
