@@ -43,15 +43,6 @@ public partial class LoadingScreen : CanvasLayer
     private NodeWorld _world;
     private Node3D _player;
 
-    /// <summary>
-    /// The generator, when it builds over several frames.
-    ///
-    /// Two phases sit behind this screen: walking the density field to decide
-    /// which cells are rock, then meshing them. Only the second reports
-    /// through the world, so without the generator the bar would sit at zero
-    /// for the whole first half and then sweep across — which reads as a hang.
-    /// </summary>
-    private IslandLevel _generator;
 
     /// <summary>
     /// The streamer, when the world is endless rather than a fixed region.
@@ -91,7 +82,6 @@ public partial class LoadingScreen : CanvasLayer
         _player = !PlayerPath.IsEmpty ? GetNodeOrNull<Node3D>(PlayerPath) : null;
         _player ??= NodeSearch.FindByType<CharacterBody3D>(GetTree().CurrentScene ?? GetParent());
 
-        _generator = NodeSearch.FindByType<IslandLevel>(GetTree().CurrentScene ?? GetParent());
         _streamer = NodeSearch.FindByType<ChunkStreamer>(GetTree().CurrentScene ?? GetParent());
 
         _pauseMenu = NodeSearch.FindByType<PauseMenu>(GetTree().CurrentScene ?? GetParent());
@@ -145,7 +135,19 @@ public partial class LoadingScreen : CanvasLayer
     public override void _Process(double delta)
     {
         if (_world != null && !_released)
+        {
             _bar.Value = Progress() * 100.0;
+
+            // RE-ASSERTED EVERY FRAME, not set once.
+            //
+            // The player captures the mouse in its own _Ready, and which of the
+            // two runs first depends on where each sits in the scene -- so
+            // releasing the cursor once here wins or loses by accident. Holding
+            // it each frame while the screen is up does not care about the
+            // order, and stops the moment the world is handed over.
+            if (Input.MouseMode == Input.MouseModeEnum.Captured)
+                Input.MouseMode = Input.MouseModeEnum.Visible;
+        }
 
         if (_fade < 0f)
             return;
@@ -176,18 +178,65 @@ public partial class LoadingScreen : CanvasLayer
         // A streamed world's progress is toward being PLAYABLE — the chunks
         // around the spawn — rather than toward an end of work that never
         // arrives.
+        //
+        // PACED AGAINST THE WORLD'S OWN HISTORY, not against a fixed fraction.
+        //
+        // The streamer measures its whole backlog, and a world becomes playable
+        // well before that empties -- the rest is scenery arriving behind the
+        // player. How far before varies enormously: measured at readiness, the
+        // cube planet had cleared 6.5% of its queue, the icosphere 15.1%, the
+        // organic planet 59.5%. Dividing by any one constant would leave two of
+        // the three visibly wrong.
+        //
+        // So the bar is paced on TIME instead, with the streamer's own figure
+        // as the guarantee of honesty: it may never exceed what has actually
+        // been built plus the share of the wait already spent, and it stops
+        // short of the end until the world really is ready. What the player
+        // sees is a bar that moves steadily from the first frame and arrives as
+        // the world does.
         if (_streamer != null)
-            return _streamer.ReadyProgress;
+        {
+            float built = _streamer.ReadyProgress;
 
-        if (_generator != null && _generator.IsGenerating)
-            return _generator.GenerateProgress * GenerateShare;
+            // Time-based pacing, easing off as it approaches the end so it
+            // cannot run out before the world arrives.
+            _waited += (float)GetProcessDeltaTime();
+            float paced = 1f - Mathf.Exp(-_waited / ExpectedSeconds);
+
+            return Mathf.Clamp(Mathf.Max(built, paced), 0f, 0.99f);
+        }
 
         return GenerateShare + _world.BuildProgress * (1f - GenerateShare);
     }
 
-    /// <summary>Freezes the player. Physics is what has to stop: a
-    /// CharacterBody3D left processing falls through a world with no
-    /// collision yet.</summary>
+    /// <summary>
+    /// Roughly how long a world takes to become playable, in seconds.
+    ///
+    /// Only sets the PACE of the bar between real milestones; it never decides
+    /// when the player is released, which waits on the streamer. Chosen from
+    /// the measured spread -- under a second for the cube planet, about four
+    /// and a half for the organic one -- so the bar neither crawls on the fast
+    /// worlds nor stalls on the slow ones.
+    /// </summary>
+    [Export(PropertyHint.Range, "0.5,20,0.5")]
+    public float ExpectedSeconds { get; set; } = 3f;
+
+    /// <summary>How long this screen has been up.</summary>
+    private float _waited;
+
+    /// <summary>
+    /// Freezes the player, and gives the mouse back.
+    ///
+    /// Physics is what has to stop: a CharacterBody3D left processing falls
+    /// through a world with no collision yet.
+    ///
+    /// THE CURSOR MATTERS TOO. The player captures the mouse the moment it
+    /// enters the tree, which is well before the world exists -- so a build
+    /// that takes several seconds left the pointer locked to a frozen camera
+    /// with nothing to do and no way to reach anything else on the desktop.
+    /// Holding the player and holding the cursor are the same decision, so
+    /// they are made in the same place.
+    /// </summary>
     private void HoldPlayer(bool held)
     {
         if (_player == null)
@@ -200,6 +249,56 @@ public partial class LoadingScreen : CanvasLayer
 
         if (_player is CharacterBody3D body && held)
             body.Velocity = Vector3.Zero;
+
+        // Released to the desktop while waiting, captured when the world is
+        // handed over. Not forced on release if something else has already
+        // taken it -- the pause menu, most likely -- since overriding that
+        // would trap the pointer in a menu the player opened on purpose.
+        if (held)
+            Input.MouseMode = Input.MouseModeEnum.Visible;
+        else if (Input.MouseMode == Input.MouseModeEnum.Visible)
+            Input.MouseMode = Input.MouseModeEnum.Captured;
+    }
+
+    /// <summary>
+    /// Stands the player on the outermost solid shell along their own radius.
+    ///
+    /// The sphere's answer to the column walk: the spawn direction picks a
+    /// column of cells, and the first solid one going INWARD is the ground.
+    /// Placing them on its outer face -- rather than at a cell centre -- is
+    /// what stops the drop starting half a block inside the rock.
+    /// </summary>
+    private void PlaceOnSphere(Vector3 spawn)
+    {
+        INodeGrid grid = _world.Grid;
+
+        Vector3 outward = spawn.LengthSquared() > 0.0001f
+            ? spawn.Normalized()
+            : Vector3.Up;
+
+        // Walk inward from the outermost shell. The surface is shell 0 on a
+        // full planet, but a carved or partly-streamed world may not have it,
+        // so this searches rather than assuming.
+        int shells = Mathf.Max(1,
+            Mathf.RoundToInt(grid.SurfaceRadius / grid.NodeSize));
+
+        for (int shell = 0; shell < shells; shell++)
+        {
+            float radius = grid.SurfaceRadius - (shell + 0.5f) * grid.NodeSize;
+            Vector3I cell = grid.CellAt(outward * radius);
+
+            if (!_world.HasNode(cell))
+                continue;
+
+            // The cell's OUTER face, which is the surface being stood on, plus
+            // the drop margin.
+            float top = grid.SurfaceRadius - shell * grid.NodeSize;
+            _player.GlobalPosition = outward * (top + DropHeight);
+            return;
+        }
+
+        // Nothing solid along this direction: leave the authored position
+        // rather than moving the player somewhere arbitrary.
     }
 
     /// <summary>Drops the player in and starts the fade.</summary>
@@ -230,6 +329,20 @@ public partial class LoadingScreen : CanvasLayer
             return;
 
         Vector3 spawn = _player.GlobalPosition;
+
+        // ON A SPHERE, DOWN IS INWARD.
+        //
+        // The flat search below walks the Y axis, which is the world's vertical
+        // only on a flat world. On the cubed sphere a cell is (u, v, shell) and
+        // "the node under this one" is the next shell IN, so searching Y walks
+        // sideways across the face instead of downward and finds nothing --
+        // leaving the player at the authored spawn, in mid-air, to fall.
+        if (_world.Grid != null)
+        {
+            PlaceOnSphere(spawn);
+            return;
+        }
+
         Vector3I cell = _world.CellAt(spawn);
 
         // Search down from well above the spawn for the first solid node.

@@ -259,13 +259,16 @@ public sealed class NodeChunkStore
     /// The material at a cell, or <see cref="Air"/> if it is empty or its
     /// chunk is not loaded.
     ///
-    /// An unloaded chunk reading as air is deliberate and load-bearing for the
-    /// mesher: a chunk at the edge of the loaded region has neighbours that do
-    /// not exist yet, and treating those as empty draws the boundary faces.
-    /// Drawing a face that a later-loaded neighbour hides is a wasted
-    /// triangle; SKIPPING one that should have been drawn is a hole in the
-    /// world. The streamer avoids both by meshing only chunks whose
-    /// neighbours are loaded.
+    /// An unloaded chunk reads as air because a caller asking what is THERE
+    /// gets the same answer either way — nothing it can dig, walk on or hit.
+    ///
+    /// The mesher must NOT use this. It asks a different question: whether a
+    /// face is covered, where "empty" and "not loaded yet" call for opposite
+    /// answers. It uses <see cref="Has(Vector3I, out bool)"/>, which keeps the
+    /// two apart. This overload folding them together is why the planet's core
+    /// was visible through its own surface: the shells below the loaded region
+    /// exist on the grid but hold no chunk, so every inward face at the bottom
+    /// of the loaded region was drawn as though it opened onto sky.
     /// </summary>
     public byte Get(Vector3I cell)
     {
@@ -278,6 +281,35 @@ public sealed class NodeChunkStore
 
     /// <summary>Is there a node at this cell?</summary>
     public bool Has(Vector3I cell) => Get(cell) != Air;
+
+    /// <summary>
+    /// Is there a node at this cell, or is the answer not known yet?
+    ///
+    /// The distinction <see cref="Has"/> cannot draw. Has folds "empty" and
+    /// "not loaded" together into false, which is right for anything asking
+    /// what is THERE and wrong for the mesher, which is asking whether a face
+    /// is COVERED. An unloaded neighbour reported as air makes the mesher draw
+    /// a face into a chunk that is about to arrive and hide it — and where the
+    /// unloaded neighbour is inward, that face is a window into the planet's
+    /// core.
+    ///
+    /// Returns false with <paramref name="known"/> false for a cell whose
+    /// chunk is not resident, so the caller can decide for itself which way to
+    /// resolve the unknown.
+    /// </summary>
+    public bool Has(Vector3I cell, out bool known)
+    {
+        Chunk chunk = Find(ChunkOf(cell));
+
+        if (chunk == null)
+        {
+            known = false;
+            return false;
+        }
+
+        known = true;
+        return (chunk.Cells == null ? chunk.Uniform : chunk.Cells[IndexOf(cell)]) != Air;
+    }
 
     /// <summary>
     /// Writes a cell, creating its chunk if needed. Returns whether anything

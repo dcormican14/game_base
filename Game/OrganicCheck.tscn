@@ -1,0 +1,11 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Modules/Stats/OrganicCheck.cs" id="1_check"]
+
+[node name="OrganicCheck" type="Node"]
+
+[node name="OrganicCheck" type="Node" parent="."]
+script = ExtResource("1_check")
+Radius = 120.0
+NodeSize = 2.0
+Jitter = 0.5

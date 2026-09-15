@@ -1,0 +1,48 @@
+[gd_scene load_steps=10 format=3]
+
+[ext_resource type="PackedScene" path="res://Modules/Player/Player.tscn" id="1_player"]
+[ext_resource type="PackedScene" path="res://Modules/PauseMenu/PauseMenu.tscn" id="2_pause"]
+[ext_resource type="PackedScene" path="res://Modules/Filters/StylizedFilter.tscn" id="3_filter"]
+[ext_resource type="PackedScene" path="res://Modules/Stats/PerfStats.tscn" id="4_stats"]
+[ext_resource type="PackedScene" path="res://Modules/Crosshair/Crosshair.tscn" id="5_crosshair"]
+[ext_resource type="PackedScene" path="res://Modules/PlanetLevel/CubePlanetStream.tscn" id="6_planet"]
+[ext_resource type="PackedScene" path="res://Modules/Skybox/Skybox.tscn" id="7_skybox"]
+[ext_resource type="PackedScene" path="res://Modules/LoadingScreen/LoadingScreen.tscn" id="8_loading"]
+[ext_resource type="Script" path="res://Modules/PlanetLevel/CubePlanetSpawn.cs" id="9_spawn"]
+
+[node name="CubePlanetLevel" type="Node3D"]
+
+[node name="Skybox" parent="." instance=ExtResource("7_skybox")]
+AmbientEnergy = 0.85
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-0.8979, 0.4401, 0, -0.1773, -0.3617, 0.9153, 0.4028, 0.8219, 0.4028, 0, 0, 0)
+light_color = Color(1, 0.964, 0.921, 1)
+light_energy = 1.5
+light_specular = 0.2
+shadow_enabled = true
+shadow_opacity = 0.6
+shadow_blur = 1.0
+directional_shadow_mode = 1
+directional_shadow_blend_splits = true
+
+[node name="CubePlanet" parent="." instance=ExtResource("6_planet")]
+
+[node name="Player" parent="." instance=ExtResource("1_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 123, 0)
+
+[node name="CubePlanetSpawn" type="Node" parent="."]
+script = ExtResource("9_spawn")
+StreamerPath = NodePath("../CubePlanet/Streamer")
+PlayerPath = NodePath("../Player")
+
+[node name="PauseMenu" parent="." instance=ExtResource("2_pause")]
+
+
+[node name="StylizedFilter" parent="." instance=ExtResource("3_filter")]
+
+[node name="PerfStats" parent="." instance=ExtResource("4_stats")]
+
+[node name="Crosshair" parent="." instance=ExtResource("5_crosshair")]
+
+[node name="LoadingScreen" parent="." instance=ExtResource("8_loading")]

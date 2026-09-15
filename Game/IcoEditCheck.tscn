@@ -1,0 +1,21 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="PackedScene" path="res://Modules/Player/Player.tscn" id="1_player"]
+[ext_resource type="PackedScene" path="res://Modules/PlanetLevel/IcoPlanetStream.tscn" id="2_planet"]
+[ext_resource type="Script" path="res://Modules/PlanetLevel/CubePlanetSpawn.cs" id="3_spawn"]
+[ext_resource type="Script" path="res://Modules/Stats/EditCheck.cs" id="4_edit"]
+
+[node name="IcoEditCheck" type="Node3D"]
+
+[node name="Planet" parent="." instance=ExtResource("2_planet")]
+
+[node name="Player" parent="." instance=ExtResource("1_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 123, 0)
+
+[node name="Spawn" type="Node" parent="."]
+script = ExtResource("3_spawn")
+StreamerPath = NodePath("../Planet/Streamer")
+PlayerPath = NodePath("../Player")
+
+[node name="EditCheck" type="Node" parent="."]
+script = ExtResource("4_edit")

@@ -1,0 +1,10 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Modules/Stats/NodeGridCheck.cs" id="1_check"]
+
+[node name="NodeGridCheck" type="Node"]
+
+[node name="NodeGridCheck" type="Node" parent="."]
+script = ExtResource("1_check")
+Radius = 120.0
+NodeSize = 1.0

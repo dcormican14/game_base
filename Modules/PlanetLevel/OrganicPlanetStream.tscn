@@ -1,0 +1,18 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="PackedScene" path="res://Modules/Nodes/NodeWorld.tscn" id="1_world"]
+[ext_resource type="Script" path="res://Modules/PlanetLevel/OrganicPlanetStreamer.cs" id="2_streamer"]
+
+[node name="OrganicPlanetStream" instance=ExtResource("1_world")]
+
+[node name="Streamer" type="Node" parent="."]
+script = ExtResource("2_streamer")
+Radius = 120.0
+NodeSize = 2.0
+Jitter = 0.5
+SoilLayers = 3.0
+ShellDepth = 40.0
+LoadRadius = 8
+AlwaysRadius = 64.0
+ViewMargin = 0.6
+CullToView = true
