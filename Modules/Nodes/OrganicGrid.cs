@@ -376,62 +376,113 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
     /// </summary>
     private int BuildCell(Vector3I cell, Span<Vector3I> walls, Span<OrganicFace> faces)
     {
-        // SERVED FROM A ONE-ENTRY CACHE, PER THREAD.
+        // SERVED FROM A PER-THREAD CACHE OF MANY CELLS.
         //
         // Building a cell means clipping thirty-three planes against each
         // other, which is the most expensive thing in this grid by a wide
-        // margin -- measured at 93 microseconds a call. The mesher then asks
-        // for the same cell several times over: once for the wall count, once
-        // per cap, once per wall to find what is behind it.
+        // margin -- measured at 93 microseconds a call.
         //
-        // Caching the last cell collapses those into one build, because they
-        // arrive back to back. Per thread, since sections mesh on workers and a
-        // shared cache would need a lock costing more than the hit saves.
+        // A CELL'S GEOMETRY DEPENDS ONLY ON ITS ADDRESS. Build reads the site
+        // hash of the cell and of its twenty-six neighbours, the radius and the
+        // node size -- and nothing from the store. So a built cell is valid for
+        // the life of the world and an entry never needs invalidating, however
+        // much digging happens around it. That is what makes a cache this
+        // simple correct.
+        //
+        // The win is on edits. A dig re-meshes about three sections, some
+        // sixteen hundred cells, to change the sixteen faces that actually
+        // moved; with a one-entry cache every one of those paid the full clip,
+        // which measured 131 ms a dig against a 16.67 ms frame.
+        //
+        // Per thread, since sections mesh on workers and a shared cache would
+        // need a lock costing more than the hit saves. Bounded, and cleared
+        // wholesale when full: the access pattern is a section at a time, so
+        // the working set is a section's worth of cells and a plain capacity
+        // check keeps the memory flat without the bookkeeping of an LRU.
         CellCache cached = _cellCache;
 
-        if (cached == null)
+        if (cached == null || cached.Owner != this)
         {
-            cached = new CellCache();
+            cached = new CellCache { Owner = this };
             _cellCache = cached;
         }
 
-        if (cached.Owner == this && cached.Valid && cached.Cell == cell)
+        if (cached.Entries.TryGetValue(cell, out CellGeometry hit))
         {
-            for (int n = 0; n < cached.Count; n++)
+            for (int n = 0; n < hit.Count; n++)
             {
-                walls[n] = cached.Walls[n];
-                faces[n] = cached.Faces[n];
+                walls[n] = hit.Walls[n];
+                faces[n] = hit.Faces[n];
             }
 
-            return cached.Count;
+            return hit.Count;
         }
 
         int built = Build(cell, walls, faces);
 
-        cached.Owner = this;
-        cached.Cell = cell;
-        cached.Count = built;
-        cached.Valid = true;
+        if (cached.Entries.Count >= CellCacheCapacity)
+            cached.Entries.Clear();
+
+        var store = new CellGeometry
+        {
+            Count = built,
+            Walls = new Vector3I[built],
+            Faces = new OrganicFace[built],
+        };
 
         for (int n = 0; n < built; n++)
         {
-            cached.Walls[n] = walls[n];
-            cached.Faces[n] = faces[n];
+            store.Walls[n] = walls[n];
+            store.Faces[n] = faces[n];
         }
+
+        cached.Entries[cell] = store;
 
         return built;
     }
 
-    /// <summary>The last cell built on one thread.</summary>
+    /// <summary>
+    /// How many built cells one thread keeps.
+    ///
+    /// A section is 8^3 = 512 cells and the mesher walks a section at a time,
+    /// asking for each cell's neighbours as it goes -- so a section's working
+    /// set is its own cells plus the shell around them, about 1,700. This holds
+    /// one of those with room to spare.
+    ///
+    /// SIZED AGAINST MEMORY, WHICH IS THE BINDING CONSTRAINT. An entry is
+    /// about fifteen faces at 148 bytes each, some 2.4 KB, and the cache is PER
+    /// THREAD across a mesh worker per core -- so the capacity is multiplied by
+    /// the core count, and 8,192 would reserve close to half a gigabyte on a
+    /// 24-core machine.
+    ///
+    /// It cannot simply be made small either: the cache is cleared wholesale
+    /// when full, so a capacity below the working set thrashes. Measured over
+    /// 57 digs, by frames until the hole is drawn --
+    ///
+    ///   2,048   median 13   <-- clears mid-section, every neighbour rebuilt
+    ///   4,096   median  2
+    ///   6,144   median  2
+    ///
+    /// 4,096 is the knee: it holds a section and the shell around it, and caps
+    /// the same 24-core machine near 240 MB.
+    /// </summary>
+    private const int CellCacheCapacity = 4096;
+
+    /// <summary>One cell's built geometry. Immutable once stored.</summary>
+    private sealed class CellGeometry
+    {
+        public int Count;
+        public Vector3I[] Walls;
+        public OrganicFace[] Faces;
+    }
+
+    /// <summary>The cells built on one thread.</summary>
     private sealed class CellCache
     {
         public OrganicGrid Owner;
-        public Vector3I Cell;
-        public int Count;
-        public bool Valid;
 
-        public readonly Vector3I[] Walls = new Vector3I[Hull.MaxFaces];
-        public readonly OrganicFace[] Faces = new OrganicFace[Hull.MaxFaces];
+        public readonly System.Collections.Generic.Dictionary<Vector3I, CellGeometry>
+            Entries = new();
     }
 
     [ThreadStatic]

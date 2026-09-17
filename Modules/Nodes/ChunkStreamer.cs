@@ -1106,6 +1106,12 @@ public abstract partial class ChunkStreamer : Node
         ulong deadline = Time.GetTicksMsec()
             + (ulong)Mathf.Max(1f, MillisecondsPerFrame);
 
+        // The world no longer meshes its own edits: this pump does, under the
+        // same budget as everything else here. Said every frame, because the
+        // credit lapses -- a world whose pump goes away must go back to
+        // meshing its own edits rather than queueing them for nobody.
+        World.DriveMeshingExternally();
+
         // Hand out generation work and take back what finished. Generating a
         // chunk is by far the most expensive thing the streamer does —
         // hundreds of milliseconds of density-field evaluation — and none of
@@ -1114,6 +1120,27 @@ public abstract partial class ChunkStreamer : Node
         // finished arrays, which is a dictionary write.
         DispatchGeneration();
         CollectGenerated(meshCentre);
+
+        // AN EDIT IS MESHED AHEAD OF THE STREAMING BACKLOG.
+        //
+        // The player is looking at the node they just mined, and the queue in
+        // front of it may be a newly streamed chunk's worth of sections -- tens
+        // of frames at this budget. Serving edits first is what makes a dig
+        // feel immediate while still costing only a budgeted slice of a frame.
+        //
+        // AFTER generation is dispatched, though, and without returning: a
+        // player who mines while walking would otherwise stall chunk
+        // generation for as long as they kept digging, and the world would
+        // stop arriving around them.
+        if (World.EditPending)
+        {
+            World.FlushEdits(MeshMillisecondsPerFrame);
+
+            if (!IsReady)
+                CheckReady();
+
+            return;
+        }
 
         // FINISH WHAT IS ALREADY QUEUED BEFORE TAKING MORE.
         //

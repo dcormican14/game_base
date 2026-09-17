@@ -467,6 +467,56 @@ public partial class NodeWorld : StaticBody3D
         }
     }
 
+    /// <summary>
+    /// How many sections an edit at this cell would mark dirty. Diagnostic
+    /// only -- it runs MarkDirty's enumeration without touching the dirty set.
+    /// </summary>
+    /// <summary>
+    /// Triangles currently uploaded across every section. Diagnostic: it is
+    /// what proves an edit reached the GEOMETRY and not just the store.
+    /// </summary>
+    public int TriangleCount
+    {
+        get
+        {
+            int total = 0;
+
+            foreach (var kv in _sections)
+            {
+                Mesh mesh = kv.Value.MeshInstance.Mesh;
+
+                if (mesh == null || mesh.GetSurfaceCount() == 0)
+                    continue;
+
+                total += mesh.SurfaceGetArrays(0)[(int)Mesh.ArrayType.Index]
+                    .AsInt32Array().Length / 3;
+            }
+
+            return total;
+        }
+    }
+
+    public int DirtyCountFor(Vector3I cell)
+    {
+        var seen = new HashSet<Vector3I> { SectionOf(cell) };
+
+        if (Grid.RadialNeighbour(cell, 1, out Vector3I above))
+            seen.Add(SectionOf(above));
+
+        if (Grid.RadialNeighbour(cell, -1, out Vector3I below))
+            seen.Add(SectionOf(below));
+
+        int walls = Grid.WallCount(cell);
+
+        for (int w = 0; w < walls; w++)
+        {
+            if (Grid.WallNeighbour(cell, w, out Vector3I at))
+                seen.Add(SectionOf(at));
+        }
+
+        return seen.Count;
+    }
+
     // ------------------------------------------------------------ ray picking
 
     /// <summary>
@@ -978,7 +1028,167 @@ public partial class NodeWorld : StaticBody3D
             return;
         }
 
-        RebuildDirty();
+        // QUEUE THE WORK; DO NOT DO IT HERE.
+        //
+        // An edit dirties about three sections, some sixteen hundred cells, to
+        // change the dozen-odd faces that actually moved. Meshing that inline
+        // put the whole cost between two frames: measured at 131 ms a dig
+        // against a 16.67 ms frame, with a worst case near two seconds.
+        //
+        // The streaming path already solves this -- workers build off the
+        // frame and FlushQueuedMeshes uploads under a time budget -- and an
+        // edit's sections are the same kind of work. Leaving them dirty hands
+        // them to that path, so a dig costs the store write and nothing else.
+        //
+        // WHEN NOTHING DRIVES THE FLUSH, mesh inline as before. The editor
+        // rebuild and the headless checks have no streamer calling them back,
+        // and a dig that merely queued would never be drawn.
+        if (DrivesOwnMeshing)
+        {
+            RebuildDirty();
+            return;
+        }
+
+        EditPending = true;
+    }
+
+    /// <summary>
+    /// Is something calling <see cref="FlushEdits"/> every frame?
+    ///
+    /// An edit only queues its meshing when someone will come back for it. The
+    /// streamer says so each frame it pumps; when it stops -- or was never
+    /// there, as in the editor and the headless checks -- this lapses and edits
+    /// go back to building their own geometry inline.
+    ///
+    /// A LAPSE RATHER THAN A FLAG SET ONCE, because the failure it prevents is
+    /// silent: an edit queued against a pump that has gone away leaves a hole
+    /// you can walk into and cannot see. Measured directly -- with the flag
+    /// latched, 25 of 25 self-driven digs left the mesh untouched.
+    /// </summary>
+    public bool DrivesOwnMeshing => _externalDriveFrames <= 0;
+
+    /// <summary>
+    /// Frames of external pumping still credited.
+    ///
+    /// A couple, so a pump that skips a frame does not bounce meshing back
+    /// inline, while a pump that stops for good is noticed almost at once.
+    /// </summary>
+    private int _externalDriveFrames;
+
+    /// <summary>
+    /// Says a caller will flush this world's meshing this frame.
+    ///
+    /// Called every frame by whoever pumps; the credit expires if they stop.
+    /// </summary>
+    public void DriveMeshingExternally() => _externalDriveFrames = 2;
+
+    /// <summary>
+    /// Spends one frame of the external-drive credit.
+    ///
+    /// Called from the world's own frame tick rather than from the flush, so
+    /// the credit lapses whether or not there were edits to serve -- a pump
+    /// that stops while the world is quiet must still be noticed.
+    /// </summary>
+    public override void _Process(double delta)
+    {
+        if (_externalDriveFrames > 0)
+            _externalDriveFrames--;
+    }
+
+    /// <summary>
+    /// Drops the external-drive credit at once. For tests, which run a whole
+    /// scenario inside one frame and cannot wait for it to tick away.
+    /// </summary>
+    public void ForgetExternalDrive() => _externalDriveFrames = 0;
+
+    /// <summary>
+    /// Has an edit left sections dirty that the flush has not reached yet?
+    ///
+    /// The streamer drains its own backlog before taking more work, and an
+    /// edit must not wait behind a queue of streamed chunks -- the player is
+    /// looking at the hole they just made.
+    /// </summary>
+    public bool EditPending { get; private set; }
+
+    /// <summary>
+    /// Meshes the sections an edit dirtied, ahead of any streaming backlog.
+    ///
+    /// Same budget and the same workers as the streaming flush; what differs is
+    /// only that this runs first, so a dig appears on the next frame rather
+    /// than behind however many chunks are queued.
+    /// </summary>
+    public bool FlushEdits(float budgetMs)
+    {
+        if (!EditPending)
+            return false;
+
+
+        // A QUARTER OF THE BUDGET FOR THE WAIT, NOT ALL OF IT.
+        //
+        // The dispatch below can itself spend the full budget, so waiting for
+        // the workers afterwards must be bounded well inside it or the frame
+        // overshoots. The share trades frame time against how soon the hole
+        // appears, and both were measured over 57 digs:
+        //
+        //   share   worst frame   frames to draw (median / p90)
+        //   1/4      3.08 ms       2 / 21
+        //   1/2      7.33 ms       2 / 15
+        //   3/4      8.66 ms       1 / 13
+        //   all      9.82 ms       1 / 10
+        //
+        // A QUARTER, because a steady frame rate is worth more than the tail
+        // of the draw latency: the typical dig draws in two frames at every
+        // setting, while the worst frame triples across them. At a quarter the
+        // whole flush stays inside the 4 ms it was given.
+        ulong deadline = Time.GetTicksUsec()
+            + (ulong)(Mathf.Max(1f, budgetMs) * 250f);
+
+        FlushQueuedMeshes(budgetMs);
+
+        // KEEP COLLECTING UNTIL THE BUDGET IS SPENT.
+        //
+        // An edit dirties about four sections and they are dispatched in one
+        // go, so what remains is waiting for workers rather than doing work.
+        // The streaming flush collects once per frame and returns, which is
+        // right for a backlog of hundreds of sections and wrong for four: the
+        // sections were finished within a millisecond and the hole still took
+        // twenty-odd frames to appear, every one of them nearly empty.
+        //
+        // Collecting in place spends the frame's own budget -- already
+        // reserved for meshing -- on the tail of the edit, which is what turns
+        // a third of a second of latency into a frame or two. The budget is
+        // still the ceiling, so a pathological edit degrades to the old
+        // behaviour rather than stalling the frame.
+        while (HasQueuedMeshes && Time.GetTicksUsec() < deadline)
+        {
+            CollectMeshed();
+
+            if (_dirty.Count > 0)
+            {
+                FlushQueuedMeshes(budgetMs);
+                continue;
+            }
+
+            // Nothing left to start: what remains is a worker still running.
+            // YIELD rather than spin -- burning the rest of the budget in a
+            // tight loop measured a 10.5 ms worst frame against a 4 ms budget,
+            // because the spin competes with the very workers it waits on.
+            // Handing the core over lets them finish and costs nothing.
+            if (_building > 0)
+                System.Threading.Thread.Yield();
+        }
+
+        // HasQueuedMeshes, not what the flush returned. The flush reports
+        // dirty and in-flight work only; a section a worker has finished sits
+        // in the upload queue counted by neither, and clearing the flag there
+        // would leave the last of the geometry uncollected -- the hole stays
+        // shut until something else happens to flush.
+        bool more = HasQueuedMeshes;
+
+        if (!more)
+            EditPending = false;
+
+        return more;
     }
 
     private void RebuildIfReady()
@@ -1008,7 +1218,14 @@ public partial class NodeWorld : StaticBody3D
         if (_rebuildPending)
         {
             _rebuildPending = false;
-            RebuildDirty();
+
+            // Through the same path a single edit takes: a batch is the case
+            // that most needs the budget, since it has dirtied more sections
+            // than one edit ever does.
+            if (DrivesOwnMeshing)
+                RebuildDirty();
+            else
+                EditPending = true;
         }
     }
 
