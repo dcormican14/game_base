@@ -131,9 +131,118 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         if (distance > _radius + reach)
             return false;
 
-        // Straddling. Only keep it if something is left after the cut.
-        return HasVolumeInside(cell);
+        // Straddling. Keep it only if a NODE is left after the cut, not merely
+        // a scrap of one.
+        //
+        // WHY A THICKNESS AND NOT "ANY VOLUME AT ALL". A site a hair inside the
+        // radius keeps the thin wedge below the surface: a real node that
+        // stores, meshes and can be mined, but a few centimetres thick. Those
+        // are the slivers -- measured at 18.8% of surface nodes under half a
+        // node thick, the thinnest at 4.7% -- and they are what makes the
+        // surface read as shattered and makes a node hard to put a crosshair
+        // on.
+        //
+        // Dropping them costs almost nothing, because a sliver's territory is
+        // not "owned by nobody": the rock beneath and beside it already
+        // reaches the surface. Measured over 200 slivers, the surface drops
+        // 0.04 nodes on average and 0.35 at worst, and every one of them had a
+        // solid wall neighbour no higher than itself -- so none became a hole.
+        return ThickEnough(cell);
     }
+
+    /// <summary>
+    /// Does enough of this cell survive the surface to be worth a node?
+    ///
+    /// Measured as RADIAL EXTENT -- lowest corner to highest along the outward
+    /// direction -- because that is the thickness the player sees and aims at.
+    /// </summary>
+    private bool ThickEnough(Vector3I cell)
+    {
+        // CACHED AS A VERDICT, not recomputed from the geometry.
+        //
+        // Contains is asked constantly -- by the mesher, the picker, the
+        // streamer and the divot -- and only the thin shell at the surface ever
+        // reaches this far. Answering from the built cell each time means
+        // copying some fifteen faces per call even on a cache hit, which
+        // measured a rise in draw latency from 2 frames to 20. The verdict is
+        // one bit and, like the geometry it comes from, depends only on the
+        // address, so it is good for the life of the world.
+        ThickCache thick = _thickCache;
+
+        if (thick == null || thick.Owner != this)
+        {
+            thick = new ThickCache { Owner = this };
+            _thickCache = thick;
+        }
+
+        if (thick.Entries.TryGetValue(cell, out bool known))
+            return known;
+
+        bool verdict = MeasureThickness(cell);
+
+        if (thick.Entries.Count >= CellCacheCapacity)
+            thick.Entries.Clear();
+
+        thick.Entries[cell] = verdict;
+
+        return verdict;
+    }
+
+    /// <summary>The verdicts reached on one thread.</summary>
+    private sealed class ThickCache
+    {
+        public OrganicGrid Owner;
+
+        public readonly System.Collections.Generic.Dictionary<Vector3I, bool>
+            Entries = new();
+    }
+
+    [ThreadStatic]
+    private static ThickCache _thickCache;
+
+    /// <summary>Works out whether a cell is thick enough, from its geometry.</summary>
+    private bool MeasureThickness(Vector3I cell)
+    {
+        Span<Vector3I> walls = stackalloc Vector3I[MaxWalls];
+        Span<OrganicFace> faces = stackalloc OrganicFace[MaxWalls];
+
+        int count = BuildCell(cell, walls, faces);
+
+        Vector3 site = SiteOffset(cell);
+
+        float lo = float.MaxValue;
+        float hi = float.MinValue;
+
+        for (int n = 0; n < count; n++)
+        {
+            if (faces[n].Count < 3)
+                continue;
+
+            for (int c = 0; c < faces[n].Count; c++)
+            {
+                float radius = (site + faces[n][c]).Length();
+
+                if (radius < lo) lo = radius;
+                if (radius > hi) hi = radius;
+            }
+        }
+
+        if (lo > hi)
+            return false;
+
+        return hi - lo >= _nodeSize * MinSurfaceThickness;
+    }
+
+    /// <summary>
+    /// How thin a surface node may be before it is dropped, as a fraction of a
+    /// node.
+    ///
+    /// HALF, because that is where the distribution thins out: of 400 surface
+    /// nodes, 18.8% fell below half a node but only 3.5% below a quarter, so a
+    /// lower bar leaves most of the slivers in place. The cost of the cut is
+    /// the surface dropping 0.04 nodes on average where one is removed.
+    /// </summary>
+    private const float MinSurfaceThickness = 0.5f;
 
 
     /// <summary>
@@ -146,31 +255,6 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
     /// </summary>
     public bool IsGround(Vector3I cell) => Contains(cell);
 
-
-    /// <summary>
-    /// Does any of this cell survive the planet's surface?
-    ///
-    /// Asked only of the thin shell of cells whose site sits outside the radius
-    /// while their territory may not, so the cost is paid on a boundary layer
-    /// rather than on the world.
-    /// </summary>
-    private bool HasVolumeInside(Vector3I cell)
-    {
-        Span<Vector3I> walls = stackalloc Vector3I[MaxWalls];
-        Span<OrganicFace> faces = stackalloc OrganicFace[MaxWalls];
-
-        int count = BuildCell(cell, walls, faces);
-
-        // A cell cut to nothing has no faces; one that survives has at least a
-        // cap and the walls around it.
-        for (int n = 0; n < count; n++)
-        {
-            if (faces[n].Count >= 3)
-                return true;
-        }
-
-        return false;
-    }
 
     /// <summary>
     /// Is this node part of the planet's SKIN?
@@ -991,7 +1075,241 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
                 corners[written++] = at + face[c];
         }
 
+        // The divot, applied to the copy handed out rather than to the cached
+        // geometry -- see Depress.
+        Depress(cell, walls, sides, corners, count);
+
         return count;
+    }
+
+    /// <summary>
+    /// Is this cell empty? Supplied by the world, which owns the store.
+    /// </summary>
+    public delegate bool AirTest(Vector3I cell);
+
+    /// <summary>
+    /// How the grid asks whether a node has been mined out.
+    ///
+    /// Set by the world once. Null on a grid with no world behind it -- the
+    /// checks build one directly -- and then nothing is ever depressed, which
+    /// is the correct answer for a planet nobody has dug.
+    /// </summary>
+    public AirTest IsAir { get; set; }
+
+    /// <summary>
+    /// How far a cap corner sinks when the ground beside it is mined away, as
+    /// a fraction of a node, per adjoining empty cell.
+    ///
+    /// Small, and capped below: the divot should read as ground slumping into
+    /// a hole, not as a funnel. Three empty neighbours -- a corner on the lip
+    /// of a real pit -- reaches the cap.
+    /// </summary>
+    private const float DivotPerAirCell = 0.42f;
+
+    /// <summary>The most a corner may sink, however many neighbours are air.</summary>
+    private const float DivotCap = 0.45f;
+
+    /// <summary>
+    /// How near an empty cell's site must be to a corner to pull it down, in
+    /// nodes.
+    ///
+    /// A little over half a node: far enough that a hole beside a corner
+    /// reaches it, close enough that the divot stays one node wide -- which is
+    /// the rim-only slope this is meant to be.
+    /// </summary>
+    private const float DivotReach = 1.15f;
+
+    /// <summary>
+    /// Lowers the cap corners of a node whose neighbours have been mined out,
+    /// so the ground slopes into the hole instead of ending at a cliff.
+    ///
+    /// KEYED ON THE CORNER, NOT ON THE CELL. This is the whole reason it is
+    /// safe. A cap corner is where the surface meets a Voronoi edge, and that
+    /// edge is shared -- measured, 39.6% of cap corners are placed at the same
+    /// point by two or three cells, the rest being patch-boundary artifacts of
+    /// the sampling. A corner's new height is computed from which cells touch
+    /// THAT POINT and whether they are air, so every cell sharing the corner
+    /// runs identical arithmetic on identical inputs and arrives at the same
+    /// height. The surface bends without opening.
+    ///
+    /// A per-cell rule -- tilt this node toward its own empty neighbours --
+    /// fails exactly here, and has: two cells sharing a wall computed different
+    /// heights for its ends and the wall split open.
+    ///
+    /// APPLIED OUTSIDE THE CACHE. Build stays a pure function of the address,
+    /// which is what lets its geometry be cached for the life of the world;
+    /// this runs afterwards, on the copy handed to the caller.
+    /// </summary>
+    private void Depress(Vector3I cell, Span<Vector3I> walls, Span<int> sides,
+        Span<Vector3> corners, int count)
+    {
+        AirTest air = IsAir;
+
+        if (air == null)
+            return;
+
+        // DOES THIS CELL EVEN HAVE A CAP?
+        //
+        // Only the surface slumps, and the walls list already says whether
+        // there is a cap -- a face the cell names itself. Asked before anything
+        // else because Faces is called for EVERY solid cell a section holds,
+        // and the twenty-six store lookups below, run for buried rock that can
+        // never show a cap, took the median draw latency from 2 frames to 18.
+        bool capped = false;
+
+        for (int n = 0; n < count && !capped; n++)
+            capped = sides[n] >= 3 && walls[n] == cell;
+
+        if (!capped)
+            return;
+
+        // THE LATTICE BLOCK AROUND THIS CELL, not its wall neighbours.
+        //
+        // The wall list is the wrong set twice over. It holds whatever the hull
+        // kept as a face, which for a surface cell is mostly rock sideways and
+        // below -- measured at 0 or 1 capped neighbour in eleven. And it is
+        // built from the CACHED geometry, so a cell that was dug out is still
+        // listed as a wall while a cell that never shared a wall can still sit
+        // right beside a corner.
+        //
+        // The 26 lattice neighbours are the honest candidate set: every site
+        // that can come within reach of one of this cell's corners is in there,
+        // because a site sits within half a cell of its lattice point.
+        // RESOLVED ONCE, NOT PER CORNER. Whether a neighbour is empty and
+        // where its site sits do not change from one corner to the next, and
+        // asking per corner meant 26 store lookups and 26 Contains calls for
+        // every corner of every cap -- which took the median draw latency from
+        // 2 frames to 22.
+        Span<Vector3> emptySites = stackalloc Vector3[27];
+        int near = 0;
+
+        for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++)
+        {
+            if (dx == 0 && dy == 0 && dz == 0)
+                continue;
+
+            var at2 = new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz);
+
+            // AIR FIRST: it is a dictionary lookup, while Contains can build a
+            // cell to measure its thickness. On an undug planet this rejects
+            // every candidate before the expensive test is reached.
+            if (!air(at2))
+                continue;
+
+            if (!Contains(at2))
+                continue;
+
+            emptySites[near++] = _origin + SiteOffset(at2);
+        }
+
+        // Nothing mined nearby: the common case, and it costs one pass.
+        if (near == 0)
+            return;
+
+        int at = 0;
+
+        for (int n = 0; n < count; n++)
+        {
+            int span = sides[n];
+
+            // THE CAP ONLY. A wall is shared geometry and moving it would tear
+            // the node away from its neighbour; the cap is the surface, which
+            // is what the player sees slump.
+            if (span < 3 || walls[n] != cell)
+            {
+                at += span;
+                continue;
+            }
+
+            for (int c = 0; c < span; c++)
+            {
+                Vector3 corner = corners[at + c];
+
+                // How many empty cells sit AT this corner.
+                //
+                // Measured by distance to the cell's site rather than by an
+                // exact corner match. Requiring the air cell to own this very
+                // corner is geometrically pure and visually useless: it only
+                // fires when the dug cell was itself at the surface with
+                // exposed corners, which was 4 digs in 40. A hole beside the
+                // corner should pull it down whether or not the two polygons
+                // happened to meet at a point.
+                //
+                // STILL KEYED ON THE CORNER, which is what keeps it safe: the
+                // test is "how far is this world point from that cell's site",
+                // and any two cells looking at the same point and the same
+                // neighbour compute the same distance.
+                float empty = 0;
+
+                for (int k = 0; k < near; k++)
+                {
+                    float reach = emptySites[k].DistanceTo(corner) / _nodeSize;
+
+                    if (reach >= DivotReach)
+                        continue;
+
+                    // WEIGHTED BY NEARNESS, not counted. A plain count gave
+                    // every corner the same drop, because at a reach narrow
+                    // enough to keep the divot one node wide exactly one air
+                    // cell qualifies -- measured, every one of 515 corners
+                    // sank by the same 0.36. Weighting lets a corner with rock
+                    // still beside it sink less than one standing over a pit,
+                    // which is what makes the result read as a slope.
+                    empty += 1f - reach / DivotReach;
+                }
+
+                if (empty <= 0f)
+                    continue;
+
+                float drop = Mathf.Min(empty * DivotPerAirCell, DivotCap) * _nodeSize;
+
+                Vector3 outward = corner - _origin;
+                float radius = outward.Length();
+
+                if (radius < 0.0001f)
+                    continue;
+
+                corners[at + c] = _origin + outward * ((radius - drop) / radius);
+            }
+
+            at += span;
+        }
+    }
+
+    /// <summary>
+    /// Does this cell have a corner at this point?
+    ///
+    /// Asked of the cell's own geometry rather than inferred, so the answer is
+    /// the same whichever cell is asking.
+    /// </summary>
+    private bool TouchesCorner(Vector3I cell, Vector3 point)
+    {
+        if (!Contains(cell))
+            return false;
+
+        Span<Vector3I> walls = stackalloc Vector3I[MaxWalls];
+        Span<OrganicFace> faces = stackalloc OrganicFace[MaxWalls];
+
+        int count = BuildCell(cell, walls, faces);
+        Vector3 site = _origin + SiteOffset(cell);
+
+        // A CENTIMETRE, matching what the sharing test measured agreement at:
+        // far below a node, far above the float noise of two cells computing
+        // the same crossing from the same numbers at a radius of 120.
+        const float Same = 0.01f;
+
+        for (int n = 0; n < count; n++)
+        {
+            for (int c = 0; c < faces[n].Count; c++)
+            {
+                if ((site + faces[n][c]).DistanceSquaredTo(point) <= Same * Same)
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

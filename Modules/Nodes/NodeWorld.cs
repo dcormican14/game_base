@@ -77,7 +77,28 @@ public partial class NodeWorld : StaticBody3D
     /// Nothing below here knows which -- a node is a polygon swept between two
     /// radii either way.
     /// </summary>
-    public INodeGrid Grid { get; set; }
+    /// <summary>
+    /// The grid the world is built on.
+    ///
+    /// Setting it hands the organic grid a way to ask what has been mined out,
+    /// which is what lets the surface slump into a hole. Done here rather than
+    /// where the grid is constructed so that every caller gets it -- the
+    /// streamer, the editor and the headless checks alike.
+    /// </summary>
+    public INodeGrid Grid
+    {
+        get => _grid;
+
+        set
+        {
+            _grid = value;
+
+            if (value is OrganicGrid organic)
+                organic.IsAir = cell => !_store.Has(cell);
+        }
+    }
+
+    private INodeGrid _grid;
 
     // ---------------------------------------------------------------- store
 
@@ -465,6 +486,33 @@ public partial class NodeWorld : StaticBody3D
             if (Grid.WallNeighbour(cell, w, out Vector3I at))
                 _dirty.Add(SectionOf(at));
         }
+
+        // THE LATTICE BLOCK AS WELL, on a grid whose surface slumps.
+        //
+        // The organic planet lowers a cap corner when a cell near it is mined,
+        // and "near" there means any of the 26 lattice neighbours -- a wider
+        // set than the walls, because a cell can sit beside a corner without
+        // sharing a face with this one. Rebuilding only the wall neighbours
+        // left such a cell holding geometry that no longer matched the cells
+        // around it, which is the seam that opens up as ground that visibly
+        // shifts away from a neighbour that was not updated.
+        //
+        // Measured before this: 1 reshaped cell in 202 sat outside the dirtied
+        // sections. Cheap to close -- these are the same few sections in all
+        // but the corner cases, so the dirty count barely moves.
+        if (Grid is not IPolyhedralGrid)
+            return;
+
+        for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++)
+        {
+            if (dx == 0 && dy == 0 && dz == 0)
+                continue;
+
+            _dirty.Add(SectionOf(new Vector3I(
+                cell.X + dx, cell.Y + dy, cell.Z + dz)));
+        }
     }
 
     /// <summary>
@@ -496,7 +544,19 @@ public partial class NodeWorld : StaticBody3D
         }
     }
 
-    public int DirtyCountFor(Vector3I cell)
+    /// <summary>Which section a cell belongs to. Diagnostic.</summary>
+    public Vector3I SectionOfCell(Vector3I cell) => SectionOf(cell);
+
+    public int DirtyCountFor(Vector3I cell) => SectionsDirtiedBy(cell).Count;
+
+    /// <summary>
+    /// The sections an edit at this cell would mark dirty.
+    ///
+    /// Runs MarkDirty's own enumeration without touching the dirty set, so a
+    /// test asks the world what it would rebuild rather than reimplementing the
+    /// rule and proving only that the copy agrees with itself.
+    /// </summary>
+    public HashSet<Vector3I> SectionsDirtiedBy(Vector3I cell)
     {
         var seen = new HashSet<Vector3I> { SectionOf(cell) };
 
@@ -514,7 +574,18 @@ public partial class NodeWorld : StaticBody3D
                 seen.Add(SectionOf(at));
         }
 
-        return seen.Count;
+        if (Grid is IPolyhedralGrid)
+        {
+            for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+            for (int dz = -1; dz <= 1; dz++)
+            {
+                seen.Add(SectionOf(new Vector3I(
+                    cell.X + dx, cell.Y + dy, cell.Z + dz)));
+            }
+        }
+
+        return seen;
     }
 
     // ------------------------------------------------------------ ray picking
