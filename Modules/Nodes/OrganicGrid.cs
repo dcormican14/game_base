@@ -156,17 +156,30 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
     /// Measured as RADIAL EXTENT -- lowest corner to highest along the outward
     /// direction -- because that is the thickness the player sees and aims at.
     /// </summary>
+    /// <summary>
+    /// Is enough of this cell left after the surface cut to be worth a node?
+    ///
+    /// MEASURED FROM THE BISECTORS, NOT FROM THE BUILT CELL.
+    ///
+    /// This is asked during chunk GENERATION, through IsGround, before a single
+    /// node is in the store. Answering it by building the cell therefore built
+    /// -- and cached -- the cell's whole geometry against an empty world, and
+    /// whatever the mesher later wanted was already decided. That is what kept
+    /// the shear plane from ever firing: every cell that reached it was deep
+    /// interior rock with no air anywhere near, because the surface cells had
+    /// been settled long before there was a surface to see.
+    ///
+    /// The thickness only ever needed the cell's RADIAL EXTENT, and that follows
+    /// from the bisectors directly. Outward, the cell stops at whichever comes
+    /// first: the nearest bisector facing out, or the planet's surface. Inward,
+    /// at the nearest bisector facing in. Neither needs a hull, a face or a
+    /// corner, so nothing is built and nothing is cached.
+    ///
+    /// The two caches are now one. There is no geometry to remember here, so the
+    /// verdict is all that is kept.
+    /// </summary>
     private bool ThickEnough(Vector3I cell)
     {
-        // CACHED AS A VERDICT, not recomputed from the geometry.
-        //
-        // Contains is asked constantly -- by the mesher, the picker, the
-        // streamer and the divot -- and only the thin shell at the surface ever
-        // reaches this far. Answering from the built cell each time means
-        // copying some fifteen faces per call even on a cache hit, which
-        // measured a rise in draw latency from 2 frames to 20. The verdict is
-        // one bit and, like the geometry it comes from, depends only on the
-        // address, so it is good for the life of the world.
         ThickCache thick = _thickCache;
 
         if (thick == null || thick.Owner != this)
@@ -188,7 +201,7 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         return verdict;
     }
 
-    /// <summary>The verdicts reached on one thread.</summary>
+    /// <summary>The verdicts reached on one thread. Address-only, so permanent.</summary>
     private sealed class ThickCache
     {
         public OrganicGrid Owner;
@@ -200,37 +213,70 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
     [ThreadStatic]
     private static ThickCache _thickCache;
 
-    /// <summary>Works out whether a cell is thick enough, from its geometry.</summary>
+    /// <summary>
+    /// How far this cell reaches in and out along its own radius, without
+    /// building it.
+    /// </summary>
     private bool MeasureThickness(Vector3I cell)
     {
-        Span<Vector3I> walls = stackalloc Vector3I[MaxWalls];
-        Span<OrganicFace> faces = stackalloc OrganicFace[MaxWalls];
+        Vector3 centre = SiteOffset(cell);
+        float distance = centre.Length();
 
-        int count = BuildCell(cell, walls, faces);
+        if (distance < 0.0001f)
+            return true;
 
-        Vector3 site = SiteOffset(cell);
+        Vector3 outward = centre / distance;
 
-        float lo = float.MaxValue;
-        float hi = float.MinValue;
+        // The box Build starts from bounds the cell in every direction, so it
+        // is the widest either half can be before any bisector cuts it.
+        float box = _nodeSize * 1.5f;
 
-        for (int n = 0; n < count; n++)
+        float up = box;
+        float down = box;
+
+        for (int n = 0; n < Window.Length; n++)
         {
-            if (faces[n].Count < 3)
+            Vector3 theirs = SiteOffset(cell + Window[n]);
+
+            Vector3 normal = theirs - centre;
+            float length = normal.Length();
+
+            if (length < 0.000001f)
                 continue;
 
-            for (int c = 0; c < faces[n].Count; c++)
-            {
-                float radius = (site + faces[n][c]).Length();
+            normal /= length;
 
-                if (radius < lo) lo = radius;
-                if (radius > hi) hi = radius;
+            // Where this bisector crosses the cell's own radial line. A plane
+            // at distance d with normal n meets the ray t*outward at t = d/(n.o)
+            // -- and only when the ray is heading into the plane at all.
+            float along = normal.Dot(outward);
+            float half = length * 0.5f;
+
+            if (along > 0.0001f)
+            {
+                float at = half / along;
+
+                if (at < up) up = at;
+            }
+            else if (along < -0.0001f)
+            {
+                float at = half / -along;
+
+                if (at < down) down = at;
             }
         }
 
-        if (lo > hi)
+        // THE PLANET'S SURFACE, which caps the outward half.
+        float toSurface = _radius - distance;
+
+        if (toSurface < up)
+            up = toSurface;
+
+        // Nothing left above the surface at all.
+        if (up <= -down)
             return false;
 
-        return hi - lo >= _nodeSize * MinSurfaceThickness;
+        return up + down >= _nodeSize * MinSurfaceThickness;
     }
 
     /// <summary>
@@ -485,9 +531,13 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         // check keeps the memory flat without the bookkeeping of an LRU.
         CellCache cached = _cellCache;
 
-        if (cached == null || cached.Owner != this)
+        // The shear follows what has been mined, so a built cell is only good
+        // for the world as it stood. An edit bumps the generation and the cache
+        // is dropped.
+        if (cached == null || cached.Owner != this
+            || cached.Generation != _generation)
         {
-            cached = new CellCache { Owner = this };
+            cached = new CellCache { Owner = this, Generation = _generation };
             _cellCache = cached;
         }
 
@@ -564,6 +614,7 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
     private sealed class CellCache
     {
         public OrganicGrid Owner;
+        public int Generation;
 
         public readonly System.Collections.Generic.Dictionary<Vector3I, CellGeometry>
             Entries = new();
@@ -643,6 +694,24 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
             // ends is decided afterwards, against the sphere itself.
             owner[hull.PlaneCount] = Scaffold;
             hull.Add(outward, _radius - distance + _nodeSize);
+        }
+
+        // THE SHEAR, as one more plane of the hull.
+        //
+        // Added here rather than applied afterwards, which is the point: Hull
+        // works out each face as the part of its plane surviving every other,
+        // so the shear cuts the walls and the walls cut the shear, and the node
+        // comes out closed with no corner moved and no face deleted. Every
+        // earlier attempt moved corners or varied a cut, and each one either
+        // pushed solids into one another or opened holes.
+        //
+        // Marked with the cell own address, which is how the mesher tells a
+        // surface face from a wall: nothing is behind it, so it is always drawn.
+        if (hull.PlaneCount < Hull.MaxFaces
+            && ShearPlane(cell, out Vector3 shear, out float shearAt))
+        {
+            owner[hull.PlaneCount] = cell;
+            hull.Add(shear, shearAt - (_origin + centre).Dot(shear));
         }
 
         int count = 0;
@@ -1076,6 +1145,115 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         }
 
         return count;
+    }
+
+    /// <summary>Is this cell empty? Supplied by the world, which owns the store.</summary>
+    public delegate bool AirTest(Vector3I cell);
+
+    /// <summary>
+    /// How the grid asks whether a node has been mined out or is open sky.
+    ///
+    /// Null on a grid with no world behind it -- the checks build one directly
+    /// -- and then nothing is sheared, which is right for a planet nobody has
+    /// dug.
+    /// </summary>
+    public AirTest IsAir { get; set; }
+
+    /// <summary>Bumped when an edit changes the surface, expiring the cache.</summary>
+    public void SurfaceChanged() => _generation++;
+
+    private volatile int _generation;
+
+    /// <summary>Diagnostic: how often the shear plane is built.</summary>
+    public static int ShearedCount, ShearTried;
+
+    /// <summary>
+    /// The plane a surface node is sheared by, or false if it has none.
+    ///
+    /// ORIENTATION FROM THE NEIGHBOURS, HEIGHT FROM THEIR AVERAGE: the normal is
+    /// the mean outward direction of the solid nodes around this one, so a node
+    /// on a slope tilts with the slope, and the plane passes through the mean of
+    /// their positions so it sits at the height of the ground around it.
+    ///
+    /// A KNOWN, ACCEPTED IMPRECISION. Two neighbours average different sets, so
+    /// their planes differ where they cross the wall they share -- measured at
+    /// 0.70 units mean on a 2-unit node, against a sphere cut whose caps meet to
+    /// 0.00366. That is a visible seam. It is built anyway because every rule
+    /// that avoids it is worse: pinning the plane through the node own site
+    /// exposes the full radial jitter between neighbouring sites and measures
+    /// 1.15 units, and a plane per shared wall would give one node several.
+    /// </summary>
+    private bool ShearPlane(Vector3I cell, out Vector3 normal, out float offset)
+    {
+        normal = Vector3.Zero;
+        offset = 0f;
+
+        AirTest air = IsAir;
+
+        if (air == null)
+            return false;
+
+        Vector3 centre = _origin + SiteOffset(cell);
+        float radius = centre.Length();
+
+        if (radius < 0.0001f)
+            return false;
+
+        System.Threading.Interlocked.Increment(ref ShearTried);
+
+        Vector3 outward = centre / radius;
+
+        // IS THERE AIR ABOVE, and where is the rock around it?
+        //
+        // Both from one walk of the 26. "Above" is judged on the LATTICE STEP
+        // projected on this cell own outward direction, not on the neighbour
+        // site: a cell off the planet has no meaningful site, and comparing it
+        // anyway is what kept this from ever firing.
+        Vector3 middle = Vector3.Zero;
+        Vector3 up = Vector3.Zero;
+        int found = 0;
+        bool openAbove = false;
+
+        for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++)
+        {
+            if (dx == 0 && dy == 0 && dz == 0)
+                continue;
+
+            var at = new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz);
+            bool empty = air(at);
+
+            if (empty)
+            {
+                if (new Vector3(dx, dy, dz).Dot(outward) > 0.3f)
+                    openAbove = true;
+
+                continue;
+            }
+
+            // SOLID NEIGHBOURS SET THE PLANE. The shear should follow the rock.
+            Vector3 site = _origin + SiteOffset(at);
+            float length = site.Length();
+
+            if (length < 0.0001f)
+                continue;
+
+            middle += site;
+            up += site / length;
+            found++;
+        }
+
+        if (!openAbove || found < 3 || up.LengthSquared() < 0.000001f)
+            return false;
+
+        middle /= found;
+        normal = up.Normalized();
+        offset = middle.Dot(normal);
+
+        System.Threading.Interlocked.Increment(ref ShearedCount);
+
+        return true;
     }
 
     /// <summary>

@@ -77,7 +77,39 @@ public partial class NodeWorld : StaticBody3D
     /// Nothing below here knows which -- a node is a polygon swept between two
     /// radii either way.
     /// </summary>
-    public INodeGrid Grid { get; set; }
+    /// <summary>
+    /// The grid the world is built on. Setting it hands the organic grid a way
+    /// to ask what is air, which is what lets a surface node shear to the slope.
+    /// </summary>
+    public INodeGrid Grid
+    {
+        get => _grid;
+
+        set
+        {
+            _grid = value;
+
+            if (value is OrganicGrid organic)
+            {
+                organic.IsAir = cell =>
+                {
+                    bool solid = _store.Has(cell, out bool known);
+
+                    if (known)
+                        return !solid;
+
+                    // NOT RESIDENT, and the two reasons want opposite answers.
+                    // SKY is empty and always will be -- a cell the grid does
+                    // not contain sits outside the planet. ROCK THAT HAS NOT
+                    // STREAMED IN is not, and calling it air would shear every
+                    // node along a loading edge for no reason.
+                    return !organic.Contains(cell);
+                };
+            }
+        }
+    }
+
+    private INodeGrid _grid;
 
     // ---------------------------------------------------------------- store
 
@@ -446,6 +478,9 @@ public partial class NodeWorld : StaticBody3D
     /// </summary>
     private void MarkDirty(Vector3I cell)
     {
+        if (Grid is OrganicGrid surface)
+            surface.SurfaceChanged();
+
         _dirty.Add(SectionOf(cell));
 
         // Every node that shares a face with this one: the two radial
@@ -1378,6 +1413,24 @@ public partial class NodeWorld : StaticBody3D
     public void MarkChunkMeshed(Vector3I chunk) => _meshed.Add(chunk);
 
     /// <summary>Queues a chunk for meshing, for the streamer.</summary>
+    /// <summary>
+    /// Queues a chunk for meshing, for the streamer.
+    ///
+    /// ALSO EXPIRES THE GRID CACHE. Generation writes straight to the store
+    /// through AddNodeGenerated, which deliberately skips MarkDirty -- so on the
+    /// organic planet nothing told the grid the world had appeared, and it kept
+    /// serving cells it had built while the store was still empty. Those cells
+    /// were computed with no rock anywhere near them, so no node ever had air
+    /// above it and the shear fired on 5 cells in 617.
+    /// </summary>
+    public void QueueChunkMeshWithSurface(Vector3I chunk)
+    {
+        if (Grid is OrganicGrid surface)
+            surface.SurfaceChanged();
+
+        QueueChunkMesh(chunk);
+    }
+
     public void QueueChunkMesh(Vector3I chunk)
     {
         QueueChunkSections(chunk);
