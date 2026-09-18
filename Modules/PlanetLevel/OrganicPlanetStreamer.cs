@@ -137,6 +137,59 @@ public partial class OrganicPlanetStreamer : ChunkStreamer
         return unit * (grid.SurfaceRadius + clearance);
     }
 
+    /// <summary>
+    /// The planet's soil shell, made on first use.
+    ///
+    /// A child of the world rather than of the streamer, so it moves with the
+    /// planet and is dropped with it.
+    /// </summary>
+    /// <summary>Makes or refreshes the soil shell, once the tree is settled.</summary>
+    private void BuildSoil()
+    {
+        if (_world == null || !_world.IsInsideTree())
+            return;
+
+        Soil()?.Build(_radius);
+    }
+
+    private TopsoilCap Soil()
+    {
+        if (_world == null)
+            return null;
+
+        // IN THE TREE, not merely alive.
+        //
+        // Reset runs from the export property setters as the scene loads, well
+        // before _Ready -- so the first call lands while the world is still
+        // being assembled and AddChild leaves the cap parented but outside the
+        // tree. Caching that one meant every later call returned an orphan that
+        // nothing could find and nothing drew.
+        if (_soil != null && Godot.GodotObject.IsInstanceValid(_soil)
+            && _soil.IsInsideTree())
+            return _soil;
+
+        if (_soil != null && Godot.GodotObject.IsInstanceValid(_soil))
+        {
+            _soil.QueueFree();
+            _soil = null;
+        }
+
+        if (!_world.IsInsideTree())
+            return null;
+
+        _soil = _world.GetNodeOrNull<TopsoilCap>("Topsoil");
+
+        if (_soil == null)
+        {
+            _soil = new TopsoilCap { Name = "Topsoil" };
+            _world.AddChild(_soil);
+        }
+
+        return _soil;
+    }
+
+    private TopsoilCap _soil;
+
     /// <summary>Rebuilds the grid and drops everything resident.</summary>
     private void Reset()
     {
@@ -146,6 +199,20 @@ public partial class OrganicPlanetStreamer : ChunkStreamer
         Grid = new OrganicGrid(_radius, _nodeSize, Vector3.Zero, _jitter, _soilLayers);
 
         _world.Grid = Grid;
+
+        // THE TOPSOIL, built once over the finished rock.
+        //
+        // Its own object rather than a band of nodes -- see TopsoilCap for why
+        // that distinction is the whole design. Built here because the radius
+        // belongs to the grid, and rebuilt whenever the grid is.
+        // DEFERRED, because Reset can run while the tree is still being built.
+        //
+        // The export property setters call Reset as the scene loads, and an
+        // AddChild then lands parented but outside the tree -- invisible to a
+        // scene search and never drawn. Deferring puts the work at the end of
+        // the current frame, by which point the world is properly in the tree
+        // whichever path got here.
+        Callable.From(BuildSoil).CallDeferred();
 
         _sources.Clear();
         _world.Clear();

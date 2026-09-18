@@ -774,12 +774,6 @@ public partial class NodeWorld : StaticBody3D
 
                     Color color = ShadeOf(cell, (NodeMaterial)raw);
 
-                    // Is this a soil node, and which way is up for it?
-                    bool soil = (NodeMaterial)raw == NodeMaterial.Soil;
-
-                    Vector3 outward = Grid.UpAt(cell);
-                    Color soilColor = ShadeOf(cell, NodeMaterial.Soil) * 1.15f;
-
                     int count = polyhedral.Faces(cell, walls, sides, corners);
                     int at = 0;
 
@@ -830,38 +824,6 @@ public partial class NodeWorld : StaticBody3D
 
                         AddPolygon(face, written, color, scratch, false);
 
-                        // SOIL, STREWN ON THE ROCK rather than built as a node.
-                        //
-                        // Only where the face looks up and only on a soil node,
-                        // so the grains lie on ground the player walks on and not
-                        // on a cliff or an underside. They carry no collision:
-                        // what you stand on stays the rock, which is what keeps a
-                        // decorative layer from ever opening a hole you fall
-                        // through.
-                        if (soil && written >= 3)
-                        {
-                            // (c2 - c0) x (c1 - c0), REVERSED from the textbook
-                            // order -- the same convention AddFace uses and for
-                            // the same reason: Godot's front face winds
-                            // clockwise, so a face's outward normal is the
-                            // reversed cross product. Using the textbook order
-                            // pointed every normal into the planet and no soil
-                            // face was ever judged upward: 0 of 646.
-                            Vector3 grainUp = Vector3.Zero;
-
-                            for (int c = 1; c + 1 < written; c++)
-                            {
-                                grainUp += (face[c + 1] - face[0])
-                                    .Cross(face[c] - face[0]);
-                            }
-
-                            if (grainUp.LengthSquared() > 0.000001f
-                                && grainUp.Normalized().Dot(outward) > 0.35f)
-                            {
-                                AddSoil(face, written, cell, grainNode,
-                                    soilColor, scratch);
-                            }
-                        }
                         at += span;
                     }
                 }
@@ -902,134 +864,6 @@ public partial class NodeWorld : StaticBody3D
 
             AddFace(triangle, color, scratch);
             AddCollisionQuad(triangle, scratch);
-        }
-    }
-
-    /// <summary>
-    /// How many soil grains are strewn on one square unit of exposed rock.
-    ///
-    /// Sized against what the rock underneath is like: measured over 400 exposed
-    /// nodes, 29.6% of a node's surface faces upward and the step between
-    /// neighbouring tops is 0.22 nodes typically. So the grains have plenty of
-    /// upward rock to sit on and only a small height difference to bridge, and
-    /// a scatter at this density reads as a layer rather than as litter.
-    /// </summary>
-    private const float SoilGrainsPerArea = 2.2f;
-
-    /// <summary>How wide one grain is, as a fraction of a node.</summary>
-    private const float SoilGrainSize = 0.30f;
-
-    /// <summary>
-    /// How far a grain sits above the rock it rests on, as a fraction of a node.
-    ///
-    /// Just clear of the surface. Lifted so a grain does not fight the rock face
-    /// for the depth buffer, and no further -- soil that floats reads as debris.
-    /// </summary>
-    private const float SoilGrainLift = 0.04f;
-
-    /// <summary>
-    /// Strews soil grains over one upward-facing rock face.
-    ///
-    /// SOIL IS NOT A NODE HERE, and that is the point. Five attempts made
-    /// topsoil a Voronoi cell, and every one broke on what a cell must promise:
-    /// tile exactly with its neighbours, share every wall and corner, never
-    /// overlap and never gap. A scatter promises none of that. Grains are
-    /// independent triangles laid on the rock, so there is nothing to tear, no
-    /// wall to disagree about, and no hole to open.
-    ///
-    /// DERIVED FROM THE FACE, so it is stable. A grain's position comes from a
-    /// hash of the owning cell and the grain's own index -- never from a random
-    /// sequence, which would scatter differently every time the section was
-    /// re-meshed and make the ground crawl after every edit.
-    /// </summary>
-    private static void AddSoil(ReadOnlySpan<Vector3> corners, int count,
-        Vector3I cell, float node, Color color, MeshScratch scratch)
-    {
-        if (count < 3)
-            return;
-
-        // The face's own frame: a centre, a normal, and two axes across it.
-        Vector3 middle = Vector3.Zero;
-
-        for (int c = 0; c < count; c++)
-            middle += corners[c];
-
-        middle /= count;
-
-        Vector3 normal = Vector3.Zero;
-
-        for (int c = 1; c + 1 < count; c++)
-            normal += (corners[c] - corners[0]).Cross(corners[c + 1] - corners[0]);
-
-        float twiceArea = normal.Length();
-
-        if (twiceArea < 0.000001f)
-            return;
-
-        Vector3 up = normal / twiceArea;
-        float area = twiceArea * 0.5f;
-
-        Vector3 across = up.Cross(corners[1] - corners[0]);
-
-        if (across.LengthSquared() < 0.000001f)
-            return;
-
-        across = across.Normalized();
-
-        Vector3 along = up.Cross(across);
-
-        int grains = Mathf.Max(1, Mathf.RoundToInt(area * SoilGrainsPerArea));
-
-        float reach = Mathf.Sqrt(area) * 0.5f;
-        float half = node * SoilGrainSize * 0.5f;
-        Vector3 lift = up * (node * SoilGrainLift);
-
-        Span<Vector3> grain = stackalloc Vector3[4];
-
-        for (int g = 0; g < grains; g++)
-        {
-            // HASHED FROM THE ADDRESS, so the same grain lands in the same place
-            // every time this section is rebuilt.
-            float a = Hash(cell, g * 3 + 1) * Mathf.Tau;
-            float r = Mathf.Sqrt(Hash(cell, g * 3 + 2)) * reach;
-            float spin = Hash(cell, g * 3 + 3) * Mathf.Tau;
-
-            Vector3 at = middle + lift
-                + across * (Mathf.Cos(a) * r)
-                + along * (Mathf.Sin(a) * r);
-
-            // A small quad lying flat on the face, turned by its own hash so the
-            // grains do not all line up.
-            Vector3 u = (across * Mathf.Cos(spin) + along * Mathf.Sin(spin)) * half;
-            Vector3 v = (along * Mathf.Cos(spin) - across * Mathf.Sin(spin)) * half;
-
-            grain[0] = at - u - v;
-            grain[1] = at + u - v;
-            grain[2] = at + u + v;
-            grain[3] = at - u + v;
-
-            AddFace(grain, color, scratch);
-        }
-    }
-
-    /// <summary>
-    /// A stable number in 0..1 from a cell address and a salt.
-    ///
-    /// The same mix the grid uses for its site jitter, so grains are as
-    /// reproducible as the cells they sit on.
-    /// </summary>
-    private static float Hash(Vector3I cell, int salt)
-    {
-        unchecked
-        {
-            uint h = (uint)(cell.X * 73856093) ^ (uint)(cell.Y * 19349663)
-                ^ (uint)(cell.Z * 83492791) ^ (uint)(salt * 2654435761);
-
-            h ^= h >> 13;
-            h *= 0x5bd1e995u;
-            h ^= h >> 15;
-
-            return (h & 0xFFFFFF) / 16777216f;
         }
     }
 

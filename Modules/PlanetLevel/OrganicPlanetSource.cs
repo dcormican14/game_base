@@ -21,9 +21,6 @@ public sealed class OrganicPlanetSource
         _grid = grid;
     }
 
-    /// <summary>What this planet's skin is made of.</summary>
-    private readonly NodeType _skin = NodeTypes.Of(NodeMaterial.Soil);
-
     /// <summary>What its body is made of.</summary>
     private readonly NodeType _body = NodeTypes.Of(NodeMaterial.Stone);
 
@@ -57,17 +54,21 @@ public sealed class OrganicPlanetSource
                     if (!_grid.IsGround(cell))
                         continue;
 
-                    // The planet's skin is soil, everything under it is rock.
-                    // Which one a node is comes from where its SITE sits, so a
-                    // node is wholly one or the other and the boundary between
-                    // them is a face the Voronoi diagram already draws.
+                    // EVERY NODE IS ROCK.
                     //
-                    // The KINDS come from the node type table rather than being
-                    // named here, so a planet that wants ice or clay for its
-                    // skin changes which type it asks for and nothing else.
-                    NodeType kind = _grid.IsSurfaceNode(cell) ? _skin : _body;
-
-                    cells[NodeChunkStore.LocalIndex(lx, ly, lz)] = (byte)kind.Material;
+                    // There is no soil node any more. Topsoil used to be the
+                    // material of the outermost band of cells, which made it a
+                    // Voronoi cell like any other -- and a cell has to tile
+                    // exactly with its neighbours, share every wall and corner,
+                    // never overlap and never gap. Five attempts to make soil
+                    // LOOK like soil while keeping those promises all broke one
+                    // of them.
+                    //
+                    // Soil is now its own thing laid over the finished rock --
+                    // see TopsoilCap -- so the store holds rock and nothing
+                    // else, and the surface it covers is whatever the Voronoi
+                    // diagram gives with no special case in it.
+                    cells[NodeChunkStore.LocalIndex(lx, ly, lz)] = (byte)_body.Material;
                     solid++;
                 }
             }
