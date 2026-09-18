@@ -104,7 +104,7 @@ public partial class SurfaceSealCheck : Node
 
             case 3:
                 if (_stageFrame < 30) return;
-                GD.Print($"-- after {_dug} digs --");
+                GD.Print($"-- after {_dug} digs, all at least 14 nodes from the patch --");
                 int after = Survey((OrganicGrid)_world.Grid);
 
                 GD.Print(_before == 0 && after == 0
@@ -144,6 +144,20 @@ public partial class SurfaceSealCheck : Node
             Vector3I hit = grid.CellAt(dir * (grid.SurfaceRadius - grid.NodeSize * 0.25f));
 
             if (!grid.Contains(hit) || !_world.HasNode(hit)) continue;
+
+            // NOT IN THE PATCH THE RAYS SURVEY.
+            //
+            // The survey casts inside a few nodes of the player, and digging
+            // there leaves a real crater that a ray correctly falls through --
+            // so the test was reporting holes it had asked for. Measured, that
+            // read 47% with the shear off as well as on, which is what gave it
+            // away. Digging outside the patch asks the real question: does an
+            // edit ANYWHERE break the surface anywhere else?
+            Vector3 eye = _player != null ? _player.GlobalPosition : Vector3.Up * grid.SurfaceRadius;
+
+            if (grid.CentreOf(hit).DistanceTo(eye) < grid.NodeSize * 14f)
+                continue;
+
             if (!_world.RemoveNode(hit)) continue;
 
             dug++;
@@ -243,6 +257,7 @@ public partial class SurfaceSealCheck : Node
             return 0;
         }
 
+        GD.Print($"    triangles in the world:     {_world.TriangleCount}");
         GD.Print($"    rays cast at solid ground:  {cast}");
         GD.Print($"    rays that hit NOTHING:      {missed}"
             + $"  ({100.0 * missed / cast:F2}%)   <-- holes");

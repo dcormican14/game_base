@@ -605,7 +605,7 @@ public abstract partial class ChunkStreamer : Node
                 continue;
 
             if (World.HasChunkMesh(next))
-                World.QueueChunkMeshWithSurface(next);
+                World.QueueChunkMesh(next);
         }
     }
 
@@ -1517,7 +1517,7 @@ public abstract partial class ChunkStreamer : Node
     /// </summary>
     private void MeshOne(Vector3I chunk)
     {
-        World.QueueChunkMeshWithSurface(chunk);
+        World.QueueChunkMesh(chunk);
     }
 
     /// <summary>

@@ -3,9 +3,9 @@
 [ext_resource type="PackedScene" path="res://Modules/Player/Player.tscn" id="1_player"]
 [ext_resource type="PackedScene" path="res://Modules/PlanetLevel/OrganicPlanetStream.tscn" id="2_planet"]
 [ext_resource type="Script" path="res://Modules/PlanetLevel/CubePlanetSpawn.cs" id="3_spawn"]
-[ext_resource type="Script" path="res://Modules/Stats/ShearProbe.cs" id="4_shear"]
+[ext_resource type="Script" path="res://Modules/Stats/ReshapeCheck.cs" id="4_reshape"]
 
-[node name="OrganicShearProbe" type="Node3D"]
+[node name="OrganicReshape" type="Node3D"]
 
 [node name="Planet" parent="." instance=ExtResource("2_planet")]
 
@@ -17,5 +17,5 @@ script = ExtResource("3_spawn")
 StreamerPath = NodePath("../Planet/Streamer")
 PlayerPath = NodePath("../Player")
 
-[node name="Shear" type="Node" parent="."]
-script = ExtResource("4_shear")
+[node name="Reshape" type="Node" parent="."]
+script = ExtResource("4_reshape")

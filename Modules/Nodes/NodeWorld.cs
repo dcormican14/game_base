@@ -77,39 +77,7 @@ public partial class NodeWorld : StaticBody3D
     /// Nothing below here knows which -- a node is a polygon swept between two
     /// radii either way.
     /// </summary>
-    /// <summary>
-    /// The grid the world is built on. Setting it hands the organic grid a way
-    /// to ask what is air, which is what lets a surface node shear to the slope.
-    /// </summary>
-    public INodeGrid Grid
-    {
-        get => _grid;
-
-        set
-        {
-            _grid = value;
-
-            if (value is OrganicGrid organic)
-            {
-                organic.IsAir = cell =>
-                {
-                    bool solid = _store.Has(cell, out bool known);
-
-                    if (known)
-                        return !solid;
-
-                    // NOT RESIDENT, and the two reasons want opposite answers.
-                    // SKY is empty and always will be -- a cell the grid does
-                    // not contain sits outside the planet. ROCK THAT HAS NOT
-                    // STREAMED IN is not, and calling it air would shear every
-                    // node along a loading edge for no reason.
-                    return !organic.Contains(cell);
-                };
-            }
-        }
-    }
-
-    private INodeGrid _grid;
+    public INodeGrid Grid { get; set; }
 
     // ---------------------------------------------------------------- store
 
@@ -478,9 +446,6 @@ public partial class NodeWorld : StaticBody3D
     /// </summary>
     private void MarkDirty(Vector3I cell)
     {
-        if (Grid is OrganicGrid surface)
-            surface.SurfaceChanged();
-
         _dirty.Add(SectionOf(cell));
 
         // Every node that shares a face with this one: the two radial
@@ -511,6 +476,47 @@ public partial class NodeWorld : StaticBody3D
     /// Triangles currently uploaded across every section. Diagnostic: it is
     /// what proves an edit reached the GEOMETRY and not just the store.
     /// </summary>
+    /// <summary>
+    /// A hash of every uploaded vertex. Diagnostic.
+    ///
+    /// TriangleCount cannot tell a mesh that changed from one that did not: a
+    /// rebuild that adds as many triangles as it removes leaves the count
+    /// identical, which read as 3 of 20 digs "not redrawing" when all 20 had.
+    /// This changes whenever any vertex moves.
+    /// </summary>
+    public ulong GeometryHash
+    {
+        get
+        {
+            ulong hash = 1469598103934665603UL;
+
+            foreach (var kv in _sections)
+            {
+                Mesh mesh = kv.Value.MeshInstance.Mesh;
+
+                if (mesh == null || mesh.GetSurfaceCount() == 0)
+                    continue;
+
+                var verts = mesh.SurfaceGetArrays(0)[(int)Mesh.ArrayType.Vertex]
+                    .AsVector3Array();
+
+                foreach (Vector3 v in verts)
+                {
+                    // Quantised, so float noise between rebuilds does not read
+                    // as a change while a real move of a millimetre does.
+                    hash ^= (ulong)Mathf.RoundToInt(v.X * 1000f);
+                    hash *= 1099511628211UL;
+                    hash ^= (ulong)Mathf.RoundToInt(v.Y * 1000f);
+                    hash *= 1099511628211UL;
+                    hash ^= (ulong)Mathf.RoundToInt(v.Z * 1000f);
+                    hash *= 1099511628211UL;
+                }
+            }
+
+            return hash;
+        }
+    }
+
     public int TriangleCount
     {
         get
@@ -1413,24 +1419,6 @@ public partial class NodeWorld : StaticBody3D
     public void MarkChunkMeshed(Vector3I chunk) => _meshed.Add(chunk);
 
     /// <summary>Queues a chunk for meshing, for the streamer.</summary>
-    /// <summary>
-    /// Queues a chunk for meshing, for the streamer.
-    ///
-    /// ALSO EXPIRES THE GRID CACHE. Generation writes straight to the store
-    /// through AddNodeGenerated, which deliberately skips MarkDirty -- so on the
-    /// organic planet nothing told the grid the world had appeared, and it kept
-    /// serving cells it had built while the store was still empty. Those cells
-    /// were computed with no rock anywhere near them, so no node ever had air
-    /// above it and the shear fired on 5 cells in 617.
-    /// </summary>
-    public void QueueChunkMeshWithSurface(Vector3I chunk)
-    {
-        if (Grid is OrganicGrid surface)
-            surface.SurfaceChanged();
-
-        QueueChunkMesh(chunk);
-    }
-
     public void QueueChunkMesh(Vector3I chunk)
     {
         QueueChunkSections(chunk);
