@@ -713,6 +713,8 @@ public partial class NodeWorld : StaticBody3D
         Span<Vector3> corners = stackalloc Vector3[polyhedral.MaxFaceCorners];
         Span<Vector3> face = stackalloc Vector3[Hull.MaxCorners];
 
+        float minArea = MinFaceArea;
+
         for (int lu = 0; lu < SectionSize; lu++)
         {
             for (int lv = 0; lv < SectionSize; lv++)
@@ -758,6 +760,26 @@ public partial class NodeWorld : StaticBody3D
 
                         for (int c = 0; c < written; c++)
                             face[c] = corners[at + c];
+
+                        // A SLIVER IS NOT DRAWN.
+                        //
+                        // A Voronoi cell here has about 13 faces worth seeing,
+                        // which is what a jittered cubic lattice gives. It also
+                        // produces about one more per cell that is a real
+                        // polygon of almost no area -- a bisector that grazes
+                        // the cell rather than cutting it.
+                        //
+                        // Too thin to read as a surface, and not harmless: it
+                        // lies in the same place as whatever is behind it and
+                        // the two fight for the depth buffer, which is what
+                        // shows as faces flickering through one another. The
+                        // solid is unchanged by leaving it out -- it has no
+                        // volume behind it to reveal.
+                        if (AreaOf(face, written) < minArea)
+                        {
+                            at += span;
+                            continue;
+                        }
 
                         AddPolygon(face, written, color, scratch, false);
                         at += span;
@@ -877,6 +899,44 @@ public partial class NodeWorld : StaticBody3D
     /// what guarantees the normal and the winding agree: both come from the
     /// same three corners.
     /// </summary>
+    /// <summary>Twice the area of a fan over a convex polygon, halved.</summary>
+    private static float AreaOf(ReadOnlySpan<Vector3> corners, int count)
+    {
+        if (count < 3)
+            return 0f;
+
+        Vector3 total = Vector3.Zero;
+
+        for (int c = 1; c + 1 < count; c++)
+            total += (corners[c] - corners[0]).Cross(corners[c + 1] - corners[0]);
+
+        return total.Length() * 0.5f;
+    }
+
+    /// <summary>
+    /// The smallest face worth drawing, as a fraction of a node's cross
+    /// section.
+    ///
+    /// A cell of side n has about 6n^2 of surface over some thirteen faces, so
+    /// a typical face is near n^2/2. A HUNDREDTH of that is the cut: measured
+    /// on the organic planet it drops 0.9 faces per cell and leaves 13.2,
+    /// which is what a jittered cubic lattice should give.
+    ///
+    /// Kept as a fraction rather than an area so it means the same thing on a
+    /// world whose nodes are a different size.
+    /// </summary>
+    private const float MinFaceFraction = 0.005f;
+
+    /// <summary>The smallest face worth drawing on this world, in square units.</summary>
+    private float MinFaceArea
+    {
+        get
+        {
+            float node = Grid?.NodeSize ?? _nodeSize;
+            return node * node * MinFaceFraction;
+        }
+    }
+
     private static void AddFace(ReadOnlySpan<Vector3> corners, Color color,
         MeshScratch scratch)
     {
