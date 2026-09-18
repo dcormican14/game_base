@@ -8,11 +8,23 @@ namespace GameBase.Stats;
 /// <summary>
 /// Asks how many of a node's faces are worth drawing.
 ///
-/// A jittered cubic lattice gives about 12.9 faces per Voronoi cell, computed
-/// exactly by clipping bisectors. This grid reports 15.6, so roughly three
-/// faces per node are surplus -- and a surplus face is not free: it is a
-/// sliver of a polygon, too thin to see but wide enough to z-fight with
-/// whatever lies behind it, which is what "too many planes" looks like.
+/// A jittered cubic lattice gives about 14.8 faces per Voronoi cell at the
+/// jitter used here. That figure is worth stating carefully, because it is easy
+/// to get wrong: three methods were tried and two were wrong.
+///
+///   plane sampling, 240 samples   12.9   undersampled, missed thin faces
+///   ray marching                  14.7   carried a stale owner between rays
+///   vertex enumeration            15.8   counts every plane touching a vertex
+///   plane sampling, 3000 samples  14.8   CALIBRATES: gives exactly 6 for a cube
+///
+/// Only the last passes the one case with a known answer -- a perfect cubic
+/// lattice must give exactly six faces -- so 14.8 is the number to compare
+/// against, and the vertex method reports 26 for that same cube.
+///
+/// The surplus this measures is therefore not two or three faces per cell. It
+/// is the SLIVERS: real polygons of almost no area, too thin to see but in the
+/// same place as whatever is behind them, so the two fight for the depth
+/// buffer. That is what "too many planes" looks like on screen.
 ///
 /// Measured by AREA, against the area a face of a cell this size should have.
 /// </summary>
@@ -72,9 +84,9 @@ public partial class PlaneCheck : Node
 
         float node = grid.NodeSize;
 
-        // A cell of this size has about 13 faces over a surface of roughly
-        // 6 n^2, so a typical face is around this big.
-        float typical = 6f * node * node / 13f;
+        // A cell of this size has about fifteen faces over a surface of
+        // roughly 6 n^2, so a typical face is around this big.
+        float typical = 6f * node * node / 15f;
 
         var rng = new Random(99);
 
@@ -136,7 +148,7 @@ public partial class PlaneCheck : Node
         GD.Print($"    of which degenerate (<3 corners): {(double)degenerate / cells:F1}");
         GD.Print($"    of which slivers (<1% of a face): {(double)slivers / cells:F1}");
         GD.Print($"    REAL, drawable faces:             {(double)real / cells:F1}");
-        GD.Print($"  a jittered lattice gives about 12.9");
+        GD.Print($"  a jittered lattice gives about 14.8 (calibrated: 6.0 for a cube)");
         GD.Print($"  mean face area: {areaTotal / Math.Max(1, real):F3} "
             + $"(a typical face is about {typical:F3})");
 

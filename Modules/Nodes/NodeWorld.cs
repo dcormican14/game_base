@@ -763,11 +763,10 @@ public partial class NodeWorld : StaticBody3D
 
                         // A SLIVER IS NOT DRAWN.
                         //
-                        // A Voronoi cell here has about 13 faces worth seeing,
-                        // which is what a jittered cubic lattice gives. It also
-                        // produces about one more per cell that is a real
-                        // polygon of almost no area -- a bisector that grazes
-                        // the cell rather than cutting it.
+                        // A Voronoi cell here has about fifteen faces, which is
+                        // what a jittered cubic lattice gives -- and roughly
+                        // one of them is a real polygon of almost no area, a
+                        // bisector that grazes the cell rather than cutting it.
                         //
                         // Too thin to read as a surface, and not harmless: it
                         // lies in the same place as whatever is behind it and

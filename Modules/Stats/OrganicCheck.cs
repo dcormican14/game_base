@@ -105,7 +105,7 @@ public partial class OrganicCheck : Node
         GD.Print("-- 1. cell shapes --");
         GD.Print($"  {cells} cells, {faces} faces");
         GD.Print($"  faces per cell {fewest}..{most}, mean {(double)faces / cells:F1}"
-            + "   (a jittered lattice gives about 13)");
+            + "   (a jittered lattice gives about 15)");
         GD.Print($"  mean sides per face {totalSides / Math.Max(1, faces):F1}");
         GD.Print($"  faces with fewer than 3 corners: {degenerate}");
     }
