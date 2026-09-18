@@ -503,6 +503,19 @@ public partial class NodeWorld : StaticBody3D
         if (Grid is not IPolyhedralGrid)
             return;
 
+        // ONLY THE CELLS WHOSE SHAPE CAN ACTUALLY CHANGE.
+        //
+        // Depress reads the 26 lattice neighbours, so in principle any of them
+        // can move -- but only a cell AT THE SURFACE has a cap to slump, and
+        // only one already resident can be re-meshed. Marking all 26
+        // unconditionally took a dig from 3.1 sections to 3.9, and because the
+        // extra ones are often in another chunk the flush then waits on more
+        // workers: measured, the median time for a hole to appear went from 2
+        // frames to 20.
+        //
+        // Filtering on what can really change costs a store lookup apiece and
+        // keeps the dirty set near where it was, while still covering every
+        // cell the divot reaches -- which the divot check confirms.
         for (int dx = -1; dx <= 1; dx++)
         for (int dy = -1; dy <= 1; dy++)
         for (int dz = -1; dz <= 1; dz++)
@@ -510,8 +523,20 @@ public partial class NodeWorld : StaticBody3D
             if (dx == 0 && dy == 0 && dz == 0)
                 continue;
 
-            _dirty.Add(SectionOf(new Vector3I(
-                cell.X + dx, cell.Y + dy, cell.Z + dz)));
+            var at = new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz);
+
+            // Not there to re-mesh.
+            if (!_store.Has(at))
+                continue;
+
+            // ONLY A SURFACE CELL CAN SLUMP. Depress returns immediately for a
+            // cell with no cap, so re-meshing buried rock changes nothing --
+            // and it is the buried neighbours, being the majority, that drag
+            // extra sections into the dirty set.
+            if (Grid is OrganicGrid organic && !organic.IsSurfaceNode(at))
+                continue;
+
+            _dirty.Add(SectionOf(at));
         }
     }
 
@@ -580,8 +605,18 @@ public partial class NodeWorld : StaticBody3D
             for (int dy = -1; dy <= 1; dy++)
             for (int dz = -1; dz <= 1; dz++)
             {
-                seen.Add(SectionOf(new Vector3I(
-                    cell.X + dx, cell.Y + dy, cell.Z + dz)));
+                if (dx == 0 && dy == 0 && dz == 0)
+                    continue;
+
+                var at = new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz);
+
+                if (!_store.Has(at))
+                    continue;
+
+                if (Grid is OrganicGrid organic && !organic.IsSurfaceNode(at))
+                    continue;
+
+                seen.Add(SectionOf(at));
             }
         }
 
@@ -953,7 +988,20 @@ public partial class NodeWorld : StaticBody3D
         Vector3 normal = (corners[2] - corners[0]).Cross(corners[1] - corners[0]);
 
         float length = normal.Length();
-        normal = length < 0.000001f ? Vector3.Up : normal / length;
+
+        // A FACE WITH NO AREA IS NOT EMITTED.
+        //
+        // Twice the triangle's area, so this is a face collapsed to a line or a
+        // point. Its normal is whatever direction the float noise in the cross
+        // product happened to land on, which is as likely to be inward as out.
+        // Measured, one such quad survived the surface clip with edges of 0.4
+        // and 1.6 millimetres and zero area, and the mesh audit reported it as
+        // an inside-out face -- correctly, and about nothing a player could
+        // see. Dropping it costs a comparison already being made.
+        if (length < 0.000001f)
+            return;
+
+        normal /= length;
 
         int start = scratch.Vertices.Count;
 
