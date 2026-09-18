@@ -123,16 +123,7 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         Vector3 site = SiteOffset(cell);
         float distance = site.Length();
 
-        // COMFORTABLY INSIDE, allowing for the divot.
-        //
-        // A site just inside the radius used to be declared present without
-        // further question. That is right for a fixed sphere and wrong once the
-        // surface can sink: the ground above such a cell may drop below its
-        // site, leaving it cut to a sliver or to nothing, and a cell declared
-        // present but clipped away is exactly what pokes through the lowered
-        // ground. Measured at a divot cap of 1.0 nodes, 78 corners ended up a
-        // quarter-node or more inside a neighbour; with the margin, none.
-        if (distance <= _radius - DivotDepth)
+        if (distance <= _radius)
             return true;
 
         float reach = _nodeSize * (1f + _jitter);
@@ -178,12 +169,9 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         // address, so it is good for the life of the world.
         ThickCache thick = _thickCache;
 
-        // Same reasoning as the geometry cache: a verdict comes from the built
-        // cell, so it expires with it.
-        if (thick == null || thick.Owner != this
-            || thick.Generation != _generation)
+        if (thick == null || thick.Owner != this)
         {
-            thick = new ThickCache { Owner = this, Generation = _generation };
+            thick = new ThickCache { Owner = this };
             _thickCache = thick;
         }
 
@@ -204,7 +192,6 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
     private sealed class ThickCache
     {
         public OrganicGrid Owner;
-        public int Generation;
 
         public readonly System.Collections.Generic.Dictionary<Vector3I, bool>
             Entries = new();
@@ -213,49 +200,13 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
     [ThreadStatic]
     private static ThickCache _thickCache;
 
-
     /// <summary>Works out whether a cell is thick enough, from its geometry.</summary>
     private bool MeasureThickness(Vector3I cell)
     {
         Span<Vector3I> walls = stackalloc Vector3I[MaxWalls];
         Span<OrganicFace> faces = stackalloc OrganicFace[MaxWalls];
 
-        // MEASURED AGAINST THE UNDUG SURFACE, not the sunken one.
-        //
-        // Whether a cell EXISTS must not depend on what has been mined. It did,
-        // briefly, and the result was that a node could be dug out and then not
-        // put back: mining it sank the ground above, which clipped the cell
-        // below half a node, which made Contains report it absent and AddNode
-        // refuse. A hole you cannot refill.
-        //
-        // The fix is to ask the question the sliver test is actually about --
-        // does this cell hold a node on the planet as GENERATED -- so the answer
-        // is a property of the address, stable for the life of the world and
-        // identical on every thread.
-        // BUILT INTO ITS OWN CACHE, which is what makes this stable.
-        //
-        // Whether a cell exists must not depend on what has been mined. It did,
-        // briefly, and a node could be dug out and then not put back: mining it
-        // sank the ground above, which clipped the cell below half a node, which
-        // made Contains report it absent and AddNode refuse. A hole you could
-        // not refill.
-        //
-        // The verdict is reached once per address and kept for the life of the
-        // world, in a cache the edit generation never clears -- so the answer is
-        // whatever the planet as GENERATED said, whatever has happened since.
-        bool wasFlat = _flatSurface;
-        _flatSurface = true;
-
-        int count;
-
-        try
-        {
-            count = BuildCell(cell, walls, faces);
-        }
-        finally
-        {
-            _flatSurface = wasFlat;
-        }
+        int count = BuildCell(cell, walls, faces);
 
         Vector3 site = SiteOffset(cell);
 
@@ -532,50 +483,12 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         // wholesale when full: the access pattern is a section at a time, so
         // the working set is a section's worth of cells and a plain capacity
         // check keeps the memory flat without the bookkeeping of an LRU.
-        CellCache cached;
+        CellCache cached = _cellCache;
 
-        // NO LONGER GOOD FOR THE LIFE OF THE WORLD.
-        //
-        // A cell's geometry used to depend only on its address. The surface it
-        // is clipped against now sinks near ground that has been mined, so a
-        // built cell is only valid for the world as it stood when it was built.
-        // An edit bumps the generation and the cache is dropped wholesale --
-        // which costs a rebuild of the working set, not of the world, because
-        // only the sections an edit dirties are re-meshed anyway.
-        // KEYED ON THE SUPPRESSION TOO. A cell built with the surface flat --
-        // for the thickness measurement -- is a different solid from the same
-        // cell built against the sunken surface, and serving one where the other
-        // was asked for would put undug geometry into a dug hole.
-        // TWO SEPARATE CACHES, one per mode, rather than one cache keyed on the
-        // mode. Keying it meant a thread alternating between a real clip and a
-        // flat thickness measurement dropped the whole cache on every switch --
-        // and the thickness test is asked constantly, so almost nothing stayed
-        // cached. Measured, the buried-face count went to about 50% and varied
-        // run to run, which is the signature of cells built inconsistently.
-        //
-        // The flat cache also never needs the generation: with the surface held
-        // flat a cell's geometry depends only on its address, exactly as it did
-        // before the divot existed.
-        if (_flatSurface)
+        if (cached == null || cached.Owner != this)
         {
-            cached = _flatCache;
-
-            if (cached == null || cached.Owner != this)
-            {
-                cached = new CellCache { Owner = this, Generation = 0 };
-                _flatCache = cached;
-            }
-        }
-        else
-        {
-            cached = _cellCache;
-
-            if (cached == null || cached.Owner != this
-                || cached.Generation != _generation)
-            {
-                cached = new CellCache { Owner = this, Generation = _generation };
-                _cellCache = cached;
-            }
+            cached = new CellCache { Owner = this };
+            _cellCache = cached;
         }
 
         if (cached.Entries.TryGetValue(cell, out CellGeometry hit))
@@ -652,24 +565,12 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
     {
         public OrganicGrid Owner;
 
-        /// <summary>The edit generation these entries were built against.</summary>
-        public int Generation;
-
         public readonly System.Collections.Generic.Dictionary<Vector3I, CellGeometry>
             Entries = new();
     }
 
     [ThreadStatic]
     private static CellCache _cellCache;
-
-    /// <summary>
-    /// Cells built for the thickness measurement.
-    ///
-    /// Never cleared by an edit: the verdict it feeds is about the planet as
-    /// generated, so the first answer for an address is the right one forever.
-    /// </summary>
-    [ThreadStatic]
-    private static CellCache _flatCache;
 
     /// <summary>Builds a node's faces from scratch.</summary>
     private int Build(Vector3I cell, Span<Vector3I> walls, Span<OrganicFace> faces)
@@ -732,24 +633,14 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         // bisector computed once.
         float distance = centre.Length();
 
-        // THE GATE ALLOWS FOR THE DIVOT, not just for the node's own reach.
-        //
-        // A cell whose site sits comfortably inside the sphere can still have
-        // its surface sink to meet it once a hole opens nearby, and a cell that
-        // fails this test is never clipped at all -- it keeps geometry poking
-        // through the lowered ground. That is precisely what broke the first
-        // attempt at this: both gates still read the bare radius and 86.7% of
-        // sampled quads came back buried.
         if (distance > 0.0001f && hull.PlaneCount < Hull.MaxFaces
-            && distance + _nodeSize * (1f + _jitter) >= _radius - DivotDepth)
+            && distance + _nodeSize * (1f + _jitter) >= _radius)
         {
             Vector3 outward = centre / distance;
 
             // A GENEROUS plane, not the exact surface. It only has to keep the
             // hull finite so the walls are bounded; where the planet actually
-            // ends is decided afterwards, against the surface itself. Generous
-            // OUTWARD, so it never cuts inside where the real surface is -- the
-            // divot only ever lowers the surface, so the plane stays clear.
+            // ends is decided afterwards, against the sphere itself.
             owner[hull.PlaneCount] = Scaffold;
             hull.Add(outward, _radius - distance + _nodeSize);
         }
@@ -775,9 +666,8 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
             count++;
         }
 
-        // The planet's surface, cut from the walls themselves. Same margin as
-        // the gate above and for the same reason.
-        if (distance + _nodeSize * (1f + _jitter) >= _radius - DivotDepth)
+        // The planet's surface, cut from the walls themselves.
+        if (distance + _nodeSize * (1f + _jitter) >= _radius)
             count = ClipToLevel(cell, walls, faces, count);
 
         return count;
@@ -812,6 +702,7 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         Span<OrganicFace> faces, int count)
     {
         Vector3 site = SiteOffset(cell);
+        float level = _radius;
 
         // Crossings found along the way, in the order the walls are visited.
         // Each wall that straddles the surface contributes the two points where
@@ -831,33 +722,13 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
             var clipped = new OrganicFace();
             int written = 0;
 
-            // HOW FAR INSIDE THE SURFACE EACH CORNER SITS, ONCE PER CORNER.
-            //
-            // THE SURFACE IS NOT A SPHERE WHERE THE GROUND HAS BEEN DUG, and
-            // LevelAt is the expensive part of this clip -- it walks the empty
-            // cells near the point. Every corner is visited twice by the edge
-            // loop below, once as `here` and once as `next`, so computing it
-            // per edge did the work twice over.
-            //
-            // LevelAt still reads the same answer for the same point whichever
-            // cell is asking, which is what keeps a shared wall cut identically
-            // from both sides. Hoisting changes when it is called, not what it
-            // returns.
-            Span<float> inside = stackalloc float[Hull.MaxCorners];
-
-            for (int c = 0; c < face.Count; c++)
-            {
-                Vector3 corner = site + face[c];
-                inside[c] = LevelAt(_origin + corner) - corner.Length();
-            }
-
             for (int c = 0; c < face.Count; c++)
             {
                 Vector3 here = site + face[c];
                 Vector3 next = site + face[(c + 1) % face.Count];
 
-                float inHere = inside[c];
-                float inNext = inside[(c + 1) % face.Count];
+                float inHere = level - here.Length();
+                float inNext = level - next.Length();
 
                 bool keepHere = inHere >= 0f;
                 bool keepNext = inNext >= 0f;
@@ -873,10 +744,9 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
                     float t = inHere / (inHere - inNext);
                     Vector3 at = here.Lerp(next, t);
 
-                    // Settled onto the surface: the lerp lands on the chord, a
-                    // hair inside the arc. The level is re-read AT the crossing
-                    // so both cells sharing this edge land on the same point.
-                    at = at.Normalized() * LevelAt(_origin + at);
+                    // Settled onto the shell: the lerp lands on the chord, a
+                    // hair inside the arc.
+                    at = at.Normalized() * level;
 
                     clipped[written++] = at - site;
 
@@ -1206,227 +1076,6 @@ public sealed class OrganicGrid : INodeGrid, IPolyhedralGrid
         }
 
         return count;
-    }
-
-    /// <summary>
-    /// Is this cell empty? Supplied by the world, which owns the store.
-    /// </summary>
-    public delegate bool AirTest(Vector3I cell);
-
-    /// <summary>
-    /// How the grid asks whether a node has been mined out.
-    ///
-    /// Set by the world once. Null on a grid with no world behind it -- the
-    /// checks build one directly -- and then the surface is a plain sphere,
-    /// which is the right answer for a planet nobody has dug.
-    /// </summary>
-    public AirTest IsAir { get; set; }
-
-    /// <summary>
-    /// Bumped whenever an edit changes the shape of the surface.
-    ///
-    /// The per-thread geometry caches hold cells built against a particular
-    /// state of the world, and the surface now sinks where the ground has been
-    /// mined -- so an entry is only good until the next edit. Volatile because
-    /// a mesh worker reads it on a different thread than the edit happened on;
-    /// only ever bumped from the main thread, and the readers need to SEE a
-    /// change rather than agree on its exact value.
-    /// </summary>
-    public void SurfaceChanged() => _generation++;
-
-    private volatile int _generation;
-
-    /// <summary>
-    /// Build into the address-only cache, on this thread only.
-    ///
-    /// Set while measuring whether a cell is thick enough to exist. That
-    /// verdict is a question about the planet as GENERATED, so it is kept in a
-    /// cache the edit generation never clears and reached once per address.
-    ///
-    /// NOT a suppression of the divot. Making LevelAt answer flat under this
-    /// flag was tried and wrecked the mesh -- about 50% of sampled quads came
-    /// back buried, varying run to run, because a cell measured flat and a cell
-    /// clipped for real are different solids and the two got confused. The flag
-    /// selects WHERE the answer is stored, never WHAT it is.
-    ///
-    /// Per thread because mesh workers run this concurrently.
-    /// </summary>
-    [ThreadStatic]
-    private static bool _flatSurface;
-
-    // A TEMPTING OPTIMISATION THAT IS WRONG. Until something has been mined the
-    // surface is a plain sphere, so LevelAt could answer from the radius alone
-    // and skip its neighbourhood search -- which took the load from 2.06 s to
-    // 0.99 s.
-    //
-    // It also broke the world. Sections built before the first dig were clipped
-    // against the plain sphere, and they are not all re-meshed afterwards, so
-    // they kept cells that were never cut to the sunken ground: 12 corners
-    // ended up a quarter-node or more inside a neighbour. The flag made the
-    // geometry depend on WHEN a section was built, which is the same fault that
-    // wrecked an earlier attempt at this feature under a different name.
-
-    /// <summary>
-    /// How far the ground sinks per unit of nearby air, as a fraction of a node.
-    /// </summary>
-    private const float DivotPerAirCell = 0.55f;
-
-    /// <summary>
-    /// The deepest the ground may sink, as a fraction of a node.
-    ///
-    /// EVERY OTHER MARGIN IS DERIVED FROM THIS. The clip gate has to admit any
-    /// cell whose surface could sink to meet it, and the scaffold plane has to
-    /// stay outside the highest the surface can be -- so raising this widens
-    /// the shell of cells that need clipping, at about 1.9x the cells for a cap
-    /// of 1.3 nodes. Kept modest for that reason.
-    /// </summary>
-    private const float DivotCap = 0.6f;
-
-    /// <summary>
-    /// How near an empty cell's site must be to a point to sink it, in nodes.
-    ///
-    /// Past the corner of the 3x3x3 box -- a face neighbour's site sits one node
-    /// away, an edge neighbour root-two at 1.41 and a corner neighbour
-    /// root-three at 1.73 -- so a dig reshapes the whole box around it rather
-    /// than a plus sign through it.
-    /// </summary>
-    private const float DivotReach = 1.5f;
-
-    /// <summary>
-    /// Where the planet's surface sits at this point.
-    ///
-    /// The radius, lowered near ground that has been mined out, so a hole has
-    /// sloping sides instead of a cliff. This is the WHOLE of the divot: the
-    /// surface is a height field and a node is whatever its Voronoi cell leaves
-    /// below it.
-    ///
-    /// A FUNCTION OF THE POINT ALONE -- the position, and which cells around it
-    /// are empty. It never asks which cell is being built, and that is what
-    /// keeps the ground continuous: two neighbours clipping their shared wall
-    /// evaluate this at the same points and get the same answers, so the wall
-    /// is cut identically from both sides. Verified over 256 shared edges
-    /// walked from both ends: worst disagreement 0.000000000 units.
-    ///
-    /// CLIPPED, NOT PUSHED. The alternative is to build the node against the
-    /// full sphere and move its corners inward afterwards. That fails twice
-    /// over: moving only the cap splits the node along its top rim, and moving
-    /// the walls too slides them off the bisectors they share with their
-    /// neighbours -- measured at 2.03 units of overlap, a whole node of one
-    /// solid inside another. Lowering the surface BEFORE the cut shortens each
-    /// wall along its own edges instead, so every wall stays exactly on its
-    /// bisector and the cells still tile.
-    /// </summary>
-    private float LevelAt(Vector3 point)
-    {
-        AirTest air = IsAir;
-
-        if (air == null)
-            return _radius;
-
-        Vector3I home = LatticeOf(point);
-
-        float sunk = 0;
-
-        // THE SEARCH RADIUS IS DERIVED FROM THE REACH, never guessed.
-        //
-        // A site sits within half a cell of its lattice point, so a cell whose
-        // lattice point is R steps away can have its site as close as R - 0.5
-        // nodes. To find every site within DivotReach the search must therefore
-        // run to ceil(DivotReach + 0.5) steps.
-        //
-        // GETTING THIS WRONG IS NOT A ROUNDING ERROR. Narrowing it to one step
-        // to save time -- DivotReach is 1.85 and a one-step site is at most 1.5
-        // away, so it looked safe -- left out two-step sites that do fall inside
-        // 1.85. That makes the height field DISCONTINUOUS: two cells clipping
-        // their shared wall search different boxes and get different answers,
-        // which is precisely the agreement the whole construction depends on.
-        // Measured, it put 12 corners a quarter-node or more inside a
-        // neighbour. The field must be a function of the point, and a search
-        // box that varies with the point is not one.
-        int span = Mathf.CeilToInt(DivotReach + 0.5f);
-
-        // WALKED EVERY TIME, not memoised.
-        //
-        // A per-lattice-point cache of the empty neighbours is the obvious
-        // saving -- LevelAt is called three times per polygon edge and the edges
-        // of one cell land in a handful of lattice points -- and it took the
-        // load from 14.1 s to 0.84 s. It was also a race: mesh workers build
-        // different sections at the same time while an edit bumps the
-        // generation, so two threads held caches built against different states
-        // of the world and the buried-face count came back 26.9%, 26.9%, 21.3%
-        // across three runs of the same binary. A varying answer is the
-        // signature of the fault, not of the measurement.
-        //
-        // The walk is not cheap but it is correct, and the cost is bounded by
-        // the geometry cache above: a cell is built once per generation, so this
-        // runs once per cell per edit rather than once per frame.
-        for (int dx = -span; dx <= span; dx++)
-        for (int dy = -span; dy <= span; dy++)
-        for (int dz = -span; dz <= span; dz++)
-        {
-            var at = new Vector3I(home.X + dx, home.Y + dy, home.Z + dz);
-
-            // AIR ONLY, and deliberately NOT Contains: Contains asks whether
-            // enough of a cell survives the surface, which it answers by
-            // building the cell, which clips against the surface -- the function
-            // you are reading. That is an infinite recursion, and it was one.
-            if (!air(at))
-                continue;
-
-            float reach = (_origin + SiteOffset(at)).DistanceTo(point) / _nodeSize;
-
-            if (reach >= DivotReach)
-                continue;
-
-            // WEIGHTED BY NEARNESS rather than counted. A plain count gives
-            // every point the same drop and the divot reads as a step;
-            // weighting lets ground with rock still beside it sink less than
-            // ground standing over a pit, which is what reads as a slope.
-            sunk += 1f - reach / DivotReach;
-        }
-
-        if (sunk <= 0f)
-            return _radius;
-
-        return _radius - Mathf.Min(sunk * DivotPerAirCell, DivotCap) * _nodeSize;
-    }
-
-    /// <summary>
-    /// How far below the sphere the surface can ever sit, in world units.
-    ///
-    /// The clip gate and the scaffold plane are both sized from this: a cell
-    /// whose surface could sink to meet it has to be clipped, and one that is
-    /// not clipped keeps geometry poking through the lowered ground. Getting
-    /// this wrong is what broke the first attempt -- both gates still tested
-    /// against the bare radius, so a cell under a hole was never clipped at all
-    /// and 86.7% of sampled quads came back buried.
-    /// </summary>
-    /// <summary>
-    /// How far below the sphere the surface can ever sit, in world units.
-    ///
-    /// NOT conditioned on whether anything has been dug YET. The gates have to
-    /// admit cells that a LATER dig could sink, because a chunk built before
-    /// the first edit and never re-meshed would otherwise hold cells that were
-    /// declared present without ever being clipped -- which is exactly what
-    /// pokes through the ground. The cheap short-circuit belongs in LevelAt,
-    /// where it changes no geometry, not here.
-    /// </summary>
-    private float DivotDepth => IsAir == null ? 0f : DivotCap * _nodeSize;
-
-    /// <summary>
-    /// The lattice cell a point sits in, before jitter.
-    ///
-    /// Not <see cref="CellAt"/>, which finds the owning Voronoi cell by testing
-    /// sites. This only needs a box to search around, so rounding is enough.
-    /// </summary>
-    private Vector3I LatticeOf(Vector3 point)
-    {
-        Vector3 local = point - _origin;
-
-        return new Vector3I(
-            Mathf.RoundToInt(local.X / _nodeSize),
-            Mathf.RoundToInt(local.Y / _nodeSize),
-            Mathf.RoundToInt(local.Z / _nodeSize));
     }
 
     /// <summary>

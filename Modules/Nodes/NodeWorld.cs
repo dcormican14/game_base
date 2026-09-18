@@ -77,37 +77,7 @@ public partial class NodeWorld : StaticBody3D
     /// Nothing below here knows which -- a node is a polygon swept between two
     /// radii either way.
     /// </summary>
-    /// <summary>
-    /// The grid the world is built on.
-    ///
-    /// Setting it hands the organic grid a way to ask what has been mined out,
-    /// which is what lets its surface sink into a hole. Done here rather than
-    /// where the grid is constructed so every caller gets it -- the streamer,
-    /// the editor and the headless checks alike.
-    /// </summary>
-    public INodeGrid Grid
-    {
-        get => _grid;
-
-        set
-        {
-            _grid = value;
-
-            if (value is OrganicGrid organic)
-            {
-                organic.IsAir = cell =>
-                {
-                    // MINED OUT, not merely absent. A cell outside the loaded
-                    // region is unknown rather than empty, and treating it as
-                    // empty sinks the surface along every streaming boundary.
-                    bool solid = _store.Has(cell, out bool known);
-                    return known && !solid;
-                };
-            }
-        }
-    }
-
-    private INodeGrid _grid;
+    public INodeGrid Grid { get; set; }
 
     // ---------------------------------------------------------------- store
 
@@ -476,12 +446,6 @@ public partial class NodeWorld : StaticBody3D
     /// </summary>
     private void MarkDirty(Vector3I cell)
     {
-        // The organic surface sinks near mined ground, so its cached geometry
-        // is only good for the world as it stood. Telling the grid an edit
-        // happened is what expires it.
-        if (Grid is OrganicGrid surface)
-            surface.SurfaceChanged();
-
         _dirty.Add(SectionOf(cell));
 
         // Every node that shares a face with this one: the two radial
@@ -502,35 +466,6 @@ public partial class NodeWorld : StaticBody3D
                 _dirty.Add(SectionOf(at));
         }
 
-        // AND THE LATTICE BLOCK, on a grid whose surface sinks into a hole.
-        //
-        // The divot lowers the ground within DivotReach of an emptied cell,
-        // which is a little past the corner of the 3x3x3 box -- a wider set
-        // than the walls, because a cell can sit inside that radius without
-        // sharing a face with this one. Rebuilding only the wall neighbours
-        // left 10 cells in a sample of 685 holding geometry and collision that
-        // no longer matched the ground around them.
-        //
-        // ONLY THE SURFACE _dirty.AddS: a buried cell has no cap to lower, so
-        // re-meshing it changes nothing, and the buried neighbours being the
-        // majority are what would drag extra sections into the set.
-        if (Grid is OrganicGrid organic)
-        {
-            for (int dx = -1; dx <= 1; dx++)
-            for (int dy = -1; dy <= 1; dy++)
-            for (int dz = -1; dz <= 1; dz++)
-            {
-                if (dx == 0 && dy == 0 && dz == 0)
-                    continue;
-
-                var at2 = new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz);
-
-                if (!_store.Has(at2) || !organic.IsSurfaceNode(at2))
-                    continue;
-
-                _dirty.Add(SectionOf(at2));
-            }
-        }
     }
 
     /// <summary>
@@ -590,28 +525,6 @@ public partial class NodeWorld : StaticBody3D
         {
             if (Grid.WallNeighbour(cell, w, out Vector3I at))
                 seen.Add(SectionOf(at));
-        }
-
-        // Mirrors MarkDirty, and must be kept in step: a copy of the rule that
-        // drifts reports a dirty set the world does not use, and a stale copy
-        // here once had me optimising against a number that was not what the
-        // world actually did.
-        if (Grid is OrganicGrid organic2)
-        {
-            for (int dx = -1; dx <= 1; dx++)
-            for (int dy = -1; dy <= 1; dy++)
-            for (int dz = -1; dz <= 1; dz++)
-            {
-                if (dx == 0 && dy == 0 && dz == 0)
-                    continue;
-
-                var at2 = new Vector3I(cell.X + dx, cell.Y + dy, cell.Z + dz);
-
-                if (!_store.Has(at2) || !organic2.IsSurfaceNode(at2))
-                    continue;
-
-                seen.Add(SectionOf(at2));
-            }
         }
 
         return seen;
