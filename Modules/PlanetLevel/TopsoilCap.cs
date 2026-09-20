@@ -29,9 +29,11 @@ namespace GameBase.Levels;
 /// is displaced by a few hashed millimetres per vertex, enough to read as sand
 /// or gravel under light without costing a triangle.
 ///
-/// WHAT IT LOOKS LIKE. Two tans, the darker one laid down in logarithmic
-/// spirals summed over octaves, so the ground carries a weathered swirl at
-/// every scale instead of one flat colour. See <see cref="Spiral"/>.
+/// WHAT IT LOOKS LIKE. Sand: fine speckled grain, broad drift so no two
+/// patches match, and low wind-blown ripples. Drawn PER PIXEL by
+/// TopsoilSand.gdshader, because this mesh cannot express it -- one quad of
+/// the shell is about 3.9 units on the ground, so the finest mark a vertex
+/// colour can make is a blotch that size, blurred soft across the quad.
 ///
 /// WHAT YOU STAND ON. The shell carries its own collider, parented to the
 /// NodeWorld body rather than to this node -- see <see cref="BuildCollider"/>.
@@ -71,78 +73,96 @@ public partial class TopsoilCap : Node3D
     /// </summary>
     [Export] public int Resolution { get; set; } = 64;
 
-    /// <summary>How rough the surface looks, in world units of displacement.</summary>
-    [Export] public float Grain { get; set; } = 0.06f;
-
-    /// <summary>The dirt colour: the lighter tan the spirals are drawn over.</summary>
-    [Export] public Color Soil { get; set; } = new(0.62f, 0.49f, 0.32f);
+    /// <summary>
+    /// How rough the surface is, in world units of vertex displacement.
+    ///
+    /// GEOMETRY, not colour -- this bends the mesh itself, and is a different
+    /// thing from <see cref="Speckle"/>, which shades the sand without moving
+    /// it. Both are "grain" in ordinary speech, which is why neither is called
+    /// that any more.
+    /// </summary>
+    [Export] public float Displace { get; set; } = 0.06f;
 
     /// <summary>
-    /// The darker tan the spiral arms are painted in.
+    /// The sand colour.
     ///
-    /// A DARKER TAN RATHER THAN A DIFFERENT HUE. The two colours have to read
-    /// as the same earth in two shades -- the moment the darker one drifts
-    /// toward grey or red the pattern stops looking like soil and starts
-    /// looking like something spilled on it.
+    /// CALIBRATED AGAINST A RENDER AND AGAINST THE ROCK -- see the note in
+    /// TopsoilSand.gdshader. The scene tonemaps Filmic under a bright sun and
+    /// is tuned for dark terrain (the rock beside this is albedo 0.155 to
+    /// 0.245), so a tan picked as the colour wanted on screen rendered as
+    /// near-white cream.
     /// </summary>
-    [Export] public Color SoilDark { get; set; } = new(0.34f, 0.25f, 0.15f);
-
-    /// <summary>How much lighter or darker a grain may be.</summary>
-    [Export] public float Mottle { get; set; } = 0.10f;
-
-    // ------------------------------------------------------------- the spiral
+    [Export] public Color Sand { get; set; } = new(0.24f, 0.180f, 0.105f);
 
     /// <summary>
-    /// How many arms wind out of each spiral centre.
+    /// The darker tan the grain and ripples shade toward.
     ///
-    /// The whole-number part is what you count on the ground; it is a float so
-    /// the arms can be tuned off a whole number, which stops every centre on
-    /// the planet looking like the same stamp.
+    /// A DARKER TAN RATHER THAN A DIFFERENT HUE. The two have to read as the
+    /// same sand in two shades -- the moment the darker one drifts toward grey
+    /// or red the surface stops looking like sand.
     /// </summary>
-    [Export(PropertyHint.Range, "1,12,0.5")] public float Arms { get; set; } = 3f;
+    [Export] public Color SandDark { get; set; } = new(0.150f, 0.108f, 0.060f);
+
+
+    // --------------------------------------------------------------- the sand
 
     /// <summary>
-    /// How tightly the arms wind, in turns per unit of log-radius.
+    /// How fine the speckle is. Higher is finer.
     ///
-    /// The arms are LOGARITHMIC, which is the one choice here that does most of
-    /// the work. A spiral of constant angular pitch bunches its arms into an
-    /// unreadable smear near the centre and stretches them into straight rays
-    /// far out; winding by the LOG of the distance keeps the arms the same
-    /// width apart at every scale, which is what makes the pattern hold
-    /// together whether you are standing on it or looking down from orbit.
+    /// The number that decides whether this looks like sand or like stucco.
+    /// Well above the shell's own resolution by design: the grain is meant to
+    /// be far smaller than a quad, which is the whole reason it is drawn in a
+    /// shader rather than baked into the mesh.
     /// </summary>
-    [Export(PropertyHint.Range, "0.2,6,0.1")] public float Twist { get; set; } = 1.6f;
+    [Export(PropertyHint.Range, "50,4000,10")]
+    public float SpeckleScale { get; set; } = 1400f;
 
     /// <summary>
-    /// How many times the spiral is redrawn, each smaller and fainter.
+    /// How strongly the speckle shows.
     ///
-    /// This is the "fractal" half: the same spiral function summed over
-    /// octaves, each at roughly twice the frequency and around half the weight,
-    /// so a big lazy swirl carries smaller swirls on its arms and those carry
-    /// smaller ones again. One octave is a logo; four is terrain.
+    /// COLOUR, not geometry: this shades the sand without moving the surface,
+    /// unlike <see cref="Displace"/>.
     /// </summary>
-    [Export(PropertyHint.Range, "1,6,1")] public int Octaves { get; set; } = 4;
+    [Export(PropertyHint.Range, "0,1,0.05")] public float Speckle { get; set; } = 0.55f;
 
     /// <summary>
-    /// How strongly the dark tan shows, 0 none and 1 full.
+    /// How many flat levels the speckle is stepped into.
     ///
-    /// Kept below 1 so the arms stay soil-coloured rather than becoming a
-    /// stencil: at 0.65 the darkest part of an arm is most of the way to
-    /// <see cref="SoilDark"/> but still has the base tan showing through it.
+    /// Sand is made of discrete bits, and smooth tone reads as airbrush. Few
+    /// levels, because many is indistinguishable from smooth.
     /// </summary>
-    [Export(PropertyHint.Range, "0,1,0.05")] public float Swirl { get; set; } = 0.65f;
+    [Export(PropertyHint.Range, "2,12,1")] public int SpeckleLevels { get; set; } = 5;
+
+    /// <summary>How broad the slow variation is. Lower is broader.</summary>
+    [Export(PropertyHint.Range, "1,200,1")] public float DriftScale { get; set; } = 26f;
+
+    /// <summary>How much one patch of ground differs from the next.</summary>
+    [Export(PropertyHint.Range, "0,1,0.05")] public float Drift { get; set; } = 0.35f;
+
+    /// <summary>How tight the wind ripples are.</summary>
+    [Export(PropertyHint.Range, "1,300,1")] public float RippleScale { get; set; } = 60f;
 
     /// <summary>
-    /// How many spiral centres are scattered over the planet.
+    /// How far the ripples are stretched across the wind.
     ///
-    /// NOT ONE SPIRAL, AND NOT A GRID OF THEM. A single centre gives the planet
-    /// a pole the pattern winds out of, which reads as a target painted on it.
-    /// Centres are placed on a Fibonacci sphere instead -- even coverage with no
-    /// repeating direction -- and each point takes the pattern of the nearest
-    /// few, so the arms of neighbouring spirals run into one another and braid
-    /// the way weathered ground does.
+    /// The number that makes them ripples. Round noise gives blotches; the
+    /// stretch is what turns the same noise into long parallel banding.
     /// </summary>
-    [Export(PropertyHint.Range, "1,64,1")] public int Centres { get; set; } = 14;
+    [Export(PropertyHint.Range, "1,30,0.5")]
+    public float RippleStretch { get; set; } = 9f;
+
+    /// <summary>
+    /// How strongly the ripples show.
+    ///
+    /// LOW. Ripples are the feature that says sand rather than dirt, and also
+    /// the first thing to look wrong when overdone -- past about half they stop
+    /// reading as wind on a surface and start reading as stripes painted on it.
+    /// </summary>
+    [Export(PropertyHint.Range, "0,1,0.05")] public float Ripples { get; set; } = 0.30f;
+
+    /// <summary>How sharply a ripple crest turns into a trough.</summary>
+    [Export(PropertyHint.Range, "1,8,0.1")]
+    public float RippleSharpness { get; set; } = 2.2f;
 
     /// <summary>
     /// Whether the shell is something you can stand on.
@@ -327,22 +347,16 @@ public partial class TopsoilCap : Node3D
                 // shell reads as sand rather than as glass. Hashed from the
                 // DIRECTION, so the same point is displaced the same way every
                 // rebuild and the two sides of a seam agree.
-                float rough = (Noise(dir * 40f) - 0.5f) * Grain;
+                float rough = (Noise(dir * 40f) - 0.5f) * Displace;
 
                 verts.Add(dir * (radius + rough));
                 norms.Add(dir);
 
-                // THE PATTERN, then the grain -- in that order, because the
-                // grain has to sit ON the spiral rather than the spiral being
-                // an average of grain. Mixing them the other way round gave a
-                // pattern that dissolved wherever the noise happened to be
-                // bright.
-                float swirl = Spiral(dir);
-
-                Color tint = Soil.Lerp(SoilDark, swirl * Swirl);
-
-                float shade = 1f + (Noise(dir * 18f) - 0.5f) * 2f * Mottle;
-                colors.Add(new Color(tint.R * shade, tint.G * shade, tint.B * shade));
+                // FLAT. The shader draws the pattern per pixel, so the mesh
+                // carries no colour of its own -- a vertex tint under it would
+                // only reintroduce the soft blotches the shader exists to
+                // replace, showing through between the lines.
+                colors.Add(new Color(1f, 1f, 1f));
             }
 
             for (int y = 0; y < n; y++)
@@ -377,218 +391,58 @@ public partial class TopsoilCap : Node3D
         var mesh = new ArrayMesh();
         mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
 
-        var material = new StandardMaterial3D
-        {
-            VertexColorUseAsAlbedo = true,
-
-            // Dirt is rough and not shiny. Without this the shell reads as
-            // polished stone under a moving light.
-            Roughness = 0.95f,
-            Metallic = 0f,
-        };
-
-        mesh.SurfaceSetMaterial(0, material);
+        mesh.SurfaceSetMaterial(0, SandMaterial());
 
         return mesh;
     }
 
     /// <summary>
-    /// How much dark tan belongs at this direction, 0 none and 1 full.
+    /// The pattern material: fine spiral lines, drawn per pixel.
     ///
-    /// Summed over octaves: each one is the same spiral drawn at a higher
-    /// frequency and a lower weight, which is what makes the result fractal
-    /// rather than merely swirly.
+    /// A SHADER RATHER THAN VERTEX COLOURS, which is a correction of how this
+    /// was first built. Vertex colour cannot draw a line: one quad of the shell
+    /// is about 3.9 world units on the ground, a mark needs three or so quads
+    /// to register, and the colour is interpolated across each quad regardless.
+    /// The thinnest possible mark was therefore some twelve units wide with
+    /// soft edges -- six times the player's height -- which is exactly the
+    /// "splotchy and blurred" it looked like. Raising the shell's resolution
+    /// does not rescue it: even at 512 a side, which is 1.6 million vertices,
+    /// a line is still 1.5 units across and still blurred by interpolation.
+    ///
+    /// Sampling per PIXEL removes the limit entirely, and costs one material
+    /// rather than any extra geometry.
     /// </summary>
-    private float Spiral(Vector3 dir)
+    private ShaderMaterial SandMaterial()
     {
-        float total = 0f, weight = 0f;
-        float amplitude = 1f, frequency = 1f;
+        var shader = GD.Load<Shader>("res://Modules/PlanetLevel/TopsoilSand.gdshader");
 
-        for (int o = 0; o < Mathf.Max(1, Octaves); o++)
+        if (shader == null)
         {
-            total += Arm(dir, frequency, o) * amplitude;
-            weight += amplitude;
+            GD.PushWarning("TopsoilCap: the sand shader is missing, so the "
+                + "soil falls back to a flat tan.");
 
-            // Not exactly two and a half, so the octaves do not land on
-            // harmonics of one another and beat into visible rings.
-            frequency *= 2.17f;
-            amplitude *= 0.52f;
+            return null;
         }
 
-        float v = total / Mathf.Max(0.0001f, weight);
+        var material = new ShaderMaterial { Shader = shader };
 
-        // Pushed toward its ends so the arms have edges. Straight off the sum
-        // the pattern is a smooth gradient with no arm you could point at.
-        return Mathf.SmoothStep(0.30f, 0.70f, v);
-    }
+        material.SetShaderParameter("sand", new Vector3(Sand.R, Sand.G, Sand.B));
+        material.SetShaderParameter("sand_dark",
+            new Vector3(SandDark.R, SandDark.G, SandDark.B));
 
-    /// <summary>
-    /// One octave: the spiral field around the nearest few centres.
-    ///
-    /// For each centre, the point is described by how far round it sits
-    /// (azimuth) and how far away (arc distance), and an arm is a band in
-    /// azimuth that SHIFTS with the log of the distance. Walking outward at a
-    /// fixed azimuth therefore crosses arm after arm, which is what winding
-    /// means.
-    /// </summary>
-    private float Arm(Vector3 dir, float frequency, int octave)
-    {
-        // The nearest few centres, blended -- see the note at the bottom of the
-        // loop for why this is not simply the strongest one.
-        Span<float> bandAt = stackalloc float[Near];
-        Span<float> weightAt = stackalloc float[Near];
-        Span<float> arcAt = stackalloc float[Near];
+        material.SetShaderParameter("grain_scale", SpeckleScale);
+        material.SetShaderParameter("grain", Speckle);
+        material.SetShaderParameter("grain_levels", SpeckleLevels);
 
-        int held = 0;
+        material.SetShaderParameter("drift_scale", DriftScale);
+        material.SetShaderParameter("drift", Drift);
 
-        int count = Mathf.Max(1, Centres);
+        material.SetShaderParameter("ripple_scale", RippleScale);
+        material.SetShaderParameter("ripple_stretch", RippleStretch);
+        material.SetShaderParameter("ripples", Ripples);
+        material.SetShaderParameter("ripple_sharpness", RippleSharpness);
 
-        for (int i = 0; i < count; i++)
-        {
-            Vector3 centre = Centre(i, count, octave);
-
-            // Arc distance from the centre, in radians: 0 at the centre and
-            // pi at the point opposite it.
-            float cos = Mathf.Clamp(centre.Dot(dir), -1f, 1f);
-            float arc = Mathf.Acos(cos);
-
-            // Only the nearby centres matter. Past this the arms have wound so
-            // tight they are noise, and every centre contributing everywhere
-            // averages the whole planet to a flat tone.
-            const float reach = 1.1f;
-            if (arc > reach) continue;
-
-            // A frame on the sphere at this centre, to measure azimuth in.
-            // Built from whichever world axis is least aligned with the centre,
-            // so the cross product never collapses.
-            Vector3 axis = Mathf.Abs(centre.Y) < 0.9f ? Vector3.Up : Vector3.Right;
-            Vector3 east = axis.Cross(centre).Normalized();
-            Vector3 north = centre.Cross(east).Normalized();
-
-            float azimuth = Mathf.Atan2(dir.Dot(north), dir.Dot(east));
-
-            // THE WINDING. Log of the distance, so the arms stay evenly spaced
-            // at every scale rather than bunching at the centre. The offset
-            // keeps the log finite as arc approaches zero.
-            float wind = Mathf.Log(arc * frequency + 0.08f) * Twist;
-
-            float phase = (azimuth * Arms) / Mathf.Tau + wind;
-
-            // The arm itself: a cosine band round the spiral, in 0..1.
-            float band = 0.5f + 0.5f * Mathf.Cos(phase * Mathf.Tau);
-
-            // Faded out at the edge of the centre's reach, so an arm ends by
-            // thinning rather than by being cut off mid-stroke.
-            float fade = 1f - Mathf.SmoothStep(reach * 0.55f, reach, arc);
-
-            // FLATTENED TOWARD PLAIN SOIL AT THE EYE, which is where the
-            // pattern outruns the mesh.
-            //
-            // The arms wind by the LOG of the distance, so their radial
-            // spacing collapses as the centre is approached: worked out
-            // against the quad step, the bands pass half a cycle per quad
-            // inside about a tenth of a radian and are simply not
-            // representable there. Sampled anyway, the eye came out as a speck
-            // of noise -- two vertices one quad apart differing by 0.64 of the
-            // whole tonal range.
-            //
-            // Toward the MIDDLE of the range rather than toward zero. Fading
-            // the band itself to zero fades the eye to the LIGHT tan, which
-            // just moves the step somewhere else; 0.5 is the tone the soil
-            // already averages, so the eye melts into it instead.
-            //
-            // A spiral's eye being a patch of plain earth is also what the real
-            // thing looks like.
-            band = Mathf.Lerp(0.5f, band, Mathf.SmoothStep(0.05f, 0.34f, arc));
-
-            // KEPT IF IT IS AMONG THE NEAREST FEW, by displacing the furthest
-            // one held so far.
-            //
-            // NOT THE STRONGEST CENTRE, which is what this did first and which
-            // measured badly: taking the max over fourteen overlapping spirals
-            // is near 1 almost everywhere, so 63% of the planet came out fully
-            // dark and the median saturated -- a dark ball with thin light
-            // gaps rather than arms on soil.
-            //
-            // NOT THE SUM OF ALL OF THEM EITHER: that averages overlapping
-            // spirals into a uniform mid-tone exactly where two patterns meet,
-            // which is the most interesting place on the planet and the last
-            // place it should go flat.
-            //
-            // The nearest few, weighted by how strongly each reaches here, is
-            // what keeps arms dark where one spiral owns the ground and lets
-            // neighbouring spirals braid where they meet.
-            if (held < Near)
-            {
-                bandAt[held] = band; weightAt[held] = fade; arcAt[held] = arc;
-                held++;
-            }
-            else
-            {
-                int furthest = 0;
-
-                for (int k = 1; k < Near; k++)
-                    if (arcAt[k] > arcAt[furthest]) furthest = k;
-
-                if (arc < arcAt[furthest])
-                {
-                    bandAt[furthest] = band;
-                    weightAt[furthest] = fade;
-                    arcAt[furthest] = arc;
-                }
-            }
-        }
-
-        // Nothing reaches here: the plain soil tone, which is the middle of the
-        // range rather than 0 -- returning 0 would ring the bare patches with a
-        // bright halo the pattern never earned.
-        if (held == 0) return 0.5f;
-
-        float sum = 0f, total = 0f;
-
-        for (int k = 0; k < held; k++)
-        {
-            // SQUARED, so a centre that barely reaches here barely counts.
-            // Linear weights let distant spirals drag every value toward the
-            // mean and the arms lost their edges.
-            float w = weightAt[k] * weightAt[k] + 0.0001f;
-
-            sum += bandAt[k] * w;
-            total += w;
-        }
-
-        return total > 0f ? sum / total : 0.5f;
-    }
-
-    /// <summary>
-    /// How many spiral centres may colour one point.
-    ///
-    /// Three is enough for arms to braid where spirals meet without the count
-    /// itself becoming an average of the whole planet.
-    /// </summary>
-    private const int Near = 3;
-
-    /// <summary>
-    /// Where the i-th spiral centre sits, as a unit direction.
-    ///
-    /// A Fibonacci sphere: points spaced by the golden angle, which covers a
-    /// sphere about as evenly as a simple formula can and, unlike a lat/long
-    /// grid, has no pole and no repeating row. Rotated per octave so the
-    /// octaves do not all wind out of the same places.
-    /// </summary>
-    private static Vector3 Centre(int i, int count, int octave)
-    {
-        // Offset by the octave so each octave gets its own scatter, and by a
-        // half so no centre lands exactly on a pole.
-        float t = (i + 0.5f) / count;
-
-        float y = 1f - 2f * t;
-        float r = Mathf.Sqrt(Mathf.Max(0f, 1f - y * y));
-
-        // The golden angle, plus a per-octave turn.
-        float theta = i * 2.39996323f + octave * 1.61803399f;
-
-        return new Vector3(Mathf.Cos(theta) * r, y, Mathf.Sin(theta) * r);
+        return material;
     }
 
     /// <summary>
