@@ -1,4 +1,4 @@
-[gd_scene load_steps=10 format=3]
+[gd_scene load_steps=11 format=3]
 
 [ext_resource type="PackedScene" path="res://Modules/Player/Player.tscn" id="1_player"]
 [ext_resource type="PackedScene" path="res://Modules/PauseMenu/PauseMenu.tscn" id="2_pause"]
@@ -9,6 +9,7 @@
 [ext_resource type="PackedScene" path="res://Modules/Skybox/Skybox.tscn" id="7_skybox"]
 [ext_resource type="PackedScene" path="res://Modules/LoadingScreen/LoadingScreen.tscn" id="8_loading"]
 [ext_resource type="Script" path="res://Modules/PlanetLevel/CubePlanetSpawn.cs" id="9_spawn"]
+[ext_resource type="PackedScene" path="res://Modules/Inventory/InventoryHud.tscn" id="10_inventory"]
 
 [node name="CubePlanetLevel" type="Node3D"]
 
@@ -46,3 +47,5 @@ PlayerPath = NodePath("../Player")
 [node name="Crosshair" parent="." instance=ExtResource("5_crosshair")]
 
 [node name="LoadingScreen" parent="." instance=ExtResource("8_loading")]
+
+[node name="InventoryHud" parent="." instance=ExtResource("10_inventory")]

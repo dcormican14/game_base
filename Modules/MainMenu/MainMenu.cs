@@ -1,4 +1,5 @@
 using Godot;
+using GameBase.Core;
 
 namespace GameBase.UI;
 
@@ -64,6 +65,12 @@ public partial class MainMenu : Control
     public override void _Ready()
     {
         Input.MouseMode = Input.MouseModeEnum.Visible;
+
+        // No level exists yet, so the stack starts here rather than at
+        // Gameplay. Reset rather than push: arriving at the main menu from a
+        // level leaves that level's stack behind, and it describes a scene
+        // that is being torn down.
+        UiStateService.Instance?.Reset(UiState.MainMenu);
 
         _menuRoot = GetNode<Control>("%MenuRoot");
         _settingsMenu = GetNode<SettingsMenu>("%SettingsMenu");
@@ -151,12 +158,14 @@ public partial class MainMenu : Control
 
     private void OnSettingsPressed()
     {
+        UiStateService.Instance?.Push(UiState.Settings);
         _menuRoot.Visible = false;
         _settingsMenu.Visible = true;
     }
 
     private void OnSettingsClosed()
     {
+        UiStateService.Instance?.Close(UiState.Settings);
         _settingsMenu.Visible = false;
         _menuRoot.Visible = true;
     }

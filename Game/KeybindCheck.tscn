@@ -1,0 +1,8 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Modules/Stats/KeybindCheck.cs" id="1_check"]
+
+[node name="KeybindCheck" type="Node"]
+
+[node name="Check" type="Node" parent="."]
+script = ExtResource("1_check")

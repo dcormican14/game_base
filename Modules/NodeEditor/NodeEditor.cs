@@ -151,8 +151,19 @@ public partial class NodeEditor : Node3D
         Edit(_repeatIsMine);
     }
 
+    /// <summary>
+    /// Whether a click should edit the world.
+    ///
+    /// The state service decides whether the player is in the world at all;
+    /// mouse capture is still checked because it is the immediate, per-frame
+    /// truth about where the pointer is, and the two can disagree for a frame
+    /// while a screen opens or closes.
+    /// </summary>
     private bool CanEdit() =>
-        _camera != null && _world != null && Input.MouseMode == Input.MouseModeEnum.Captured;
+        _camera != null
+        && _world != null
+        && Input.MouseMode == Input.MouseModeEnum.Captured
+        && UiStateService.Instance is not { GameplayHasInput: false };
 
     /// <summary>
     /// Casts from the crosshair and performs one edit. Shared by the press and

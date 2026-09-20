@@ -1,0 +1,14 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="PackedScene" path="res://Modules/Inventory/InventoryHud.tscn" id="1_inventory"]
+[ext_resource type="PackedScene" path="res://Modules/PauseMenu/PauseMenu.tscn" id="2_pause"]
+[ext_resource type="Script" path="res://Modules/Stats/EscapeFlowCheck.cs" id="3_check"]
+
+[node name="EscapeFlowCheck" type="Node"]
+
+[node name="InventoryHud" parent="." instance=ExtResource("1_inventory")]
+
+[node name="PauseMenu" parent="." instance=ExtResource("2_pause")]
+
+[node name="Check" type="Node" parent="."]
+script = ExtResource("3_check")

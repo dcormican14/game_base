@@ -1,4 +1,5 @@
 using Godot;
+using GameBase.Core;
 
 namespace GameBase.UI;
 
@@ -42,7 +43,10 @@ public partial class PauseMenu : CanvasLayer
         set
         {
             _suspended = value;
-            if (_suspended && IsPaused)
+            // Keyed on this menu being open, not on the tree being paused:
+            // another screen may have paused it, and resuming then would
+            // unpause on its behalf.
+            if (_suspended && _root != null && _root.Visible)
                 Resume();
         }
     }
@@ -79,9 +83,30 @@ public partial class PauseMenu : CanvasLayer
             return;
         }
 
+        UiStateService states = UiStateService.Instance;
+        if (states != null)
+        {
+            // Escape belongs to whatever screen is on top. Asked of the state
+            // service rather than of the tree: the tree being paused does NOT
+            // mean this menu is what paused it — the inventory pauses too, and
+            // reading IsPaused here made Escape-in-the-inventory look like
+            // Escape-in-the-menu, so this resumed a menu that was never open
+            // and left the inventory sitting there.
+            bool mine = states.IsCurrent(UiState.Menu)
+                || states.IsCurrent(UiState.Settings)
+                || states.IsCurrent(UiState.Gameplay);
+
+            if (!mine)
+                return;
+        }
+
+        // Whether this menu is open, rather than whether the tree is paused.
+        // Another screen may have paused it.
+        bool menuIsOpen = _root.Visible;
+
         if (_settings.Visible)
             CloseSettings();
-        else if (IsPaused)
+        else if (menuIsOpen)
             Resume();
         else
             Pause();
@@ -91,6 +116,7 @@ public partial class PauseMenu : CanvasLayer
 
     public void Pause()
     {
+        UiStateService.Instance?.Push(UiState.Menu);
         GetTree().Paused = true;
         _root.Visible = true;
         _menuPanel.Visible = true;
@@ -100,6 +126,11 @@ public partial class PauseMenu : CanvasLayer
 
     public void Resume()
     {
+        // Closed by name rather than popped, so that resuming from the
+        // Resume button — which can happen with Settings open on top — takes
+        // the whole menu down instead of revealing a settings screen whose
+        // parent has just left.
+        UiStateService.Instance?.Close(UiState.Menu);
         GetTree().Paused = false;
         _root.Visible = false;
         if (CaptureMouseOnResume)
@@ -108,18 +139,23 @@ public partial class PauseMenu : CanvasLayer
 
     private void OpenSettings()
     {
+        UiStateService.Instance?.Push(UiState.Settings);
         _menuPanel.Visible = false;
         _settings.Visible = true;
     }
 
     private void CloseSettings()
     {
+        UiStateService.Instance?.Close(UiState.Settings);
         _settings.Visible = false;
         _menuPanel.Visible = true;
     }
 
     private void OnMainMenuPressed()
     {
+        // The stack describes a scene that is about to stop existing, so it is
+        // reset rather than unwound.
+        UiStateService.Instance?.Reset(UiState.MainMenu);
         GetTree().Paused = false;
         Input.MouseMode = Input.MouseModeEnum.Visible;
         Error err = GetTree().ChangeSceneToFile(MainMenuScenePath);

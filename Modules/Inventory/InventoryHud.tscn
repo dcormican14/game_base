@@ -1,0 +1,123 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://Modules/Inventory/InventoryHud.cs" id="1_hud"]
+[ext_resource type="Script" path="res://Modules/Inventory/Inventory.cs" id="2_inventory"]
+[ext_resource type="Resource" path="res://Modules/Inventory/Items/GreenCube.tres" id="3_green_cube"]
+[ext_resource type="Resource" path="res://Modules/Inventory/Items/Pickaxe.tres" id="4_pickaxe"]
+[ext_resource type="Resource" path="res://Modules/Inventory/Items/Shovel.tres" id="5_shovel"]
+
+[node name="InventoryHud" type="CanvasLayer"]
+process_mode = 3
+layer = 6
+script = ExtResource("1_hud")
+StartingItems = Array[Resource("res://Modules/Inventory/ItemType.cs")]([ExtResource("4_pickaxe"), ExtResource("5_shovel"), ExtResource("3_green_cube")])
+StartingItemCount = 1
+
+[node name="Inventory" type="Node" parent="."]
+unique_name_in_owner = true
+script = ExtResource("2_inventory")
+HotbarSize = 9
+BackpackSize = 27
+
+[node name="HotbarRoot" type="Control" parent="."]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="HotbarAnchor" type="MarginContainer" parent="HotbarRoot"]
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 0
+theme_override_constants/margin_bottom = 18
+mouse_filter = 2
+
+[node name="HotbarCenter" type="CenterContainer" parent="HotbarRoot/HotbarAnchor"]
+layout_mode = 2
+mouse_filter = 2
+
+[node name="HotbarRow" type="HBoxContainer" parent="HotbarRoot/HotbarAnchor/HotbarCenter"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="BackpackRoot" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Dim" type="ColorRect" parent="BackpackRoot"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.035, 0.006, 0.03, 0.55)
+
+[node name="BackpackCenter" type="CenterContainer" parent="BackpackRoot"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="BackpackPanel" type="PanelContainer" parent="BackpackRoot/BackpackCenter"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="BackpackColumn" type="VBoxContainer" parent="BackpackRoot/BackpackCenter/BackpackPanel"]
+layout_mode = 2
+theme_override_constants/separation = 14
+
+[node name="TitleRow" type="HBoxContainer" parent="BackpackRoot/BackpackCenter/BackpackPanel/BackpackColumn"]
+layout_mode = 2
+
+[node name="TitleSpacer" type="Control" parent="BackpackRoot/BackpackCenter/BackpackPanel/BackpackColumn/TitleRow"]
+layout_mode = 2
+custom_minimum_size = Vector2(30, 0)
+mouse_filter = 2
+
+[node name="BackpackTitle" type="Label" parent="BackpackRoot/BackpackCenter/BackpackPanel/BackpackColumn/TitleRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 22
+text = "Inventory"
+horizontal_alignment = 1
+
+[node name="CloseButton" type="Button" parent="BackpackRoot/BackpackCenter/BackpackPanel/BackpackColumn/TitleRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(30, 30)
+text = "X"
+flat = true
+
+[node name="BackpackGrid" type="GridContainer" parent="BackpackRoot/BackpackCenter/BackpackPanel/BackpackColumn"]
+unique_name_in_owner = true
+layout_mode = 2
+columns = 9
+
+[node name="HotbarGap" type="Control" parent="BackpackRoot/BackpackCenter/BackpackPanel/BackpackColumn"]
+layout_mode = 2
+custom_minimum_size = Vector2(0, 10)
+mouse_filter = 2
+
+[node name="PanelHotbarRow" type="HBoxContainer" parent="BackpackRoot/BackpackCenter/BackpackPanel/BackpackColumn"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 6

@@ -1,0 +1,18 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="PackedScene" path="res://Modules/Inventory/InventoryHud.tscn" id="1_inventory"]
+[ext_resource type="Script" path="res://Modules/Stats/DragShot.cs" id="2_shot"]
+
+[node name="DragShot" type="Node"]
+
+[node name="Backdrop" type="ColorRect" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0.0747, 0.0092, 0.0521, 1)
+
+[node name="InventoryHud" parent="." instance=ExtResource("1_inventory")]
+
+[node name="Shot" type="Node" parent="."]
+script = ExtResource("2_shot")
+DragFrames = 30

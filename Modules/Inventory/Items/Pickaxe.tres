@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ItemType" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Modules/Inventory/ItemType.cs" id="1_script"]
+
+[resource]
+script = ExtResource("1_script")
+Id = "pickaxe"
+DisplayName = "Pickaxe"
+MaxStack = 1
+Shape = 2
+HandleColor = Color(0.42, 0.27, 0.15, 1)
+HeadColor = Color(0.58, 0.60, 0.66, 1)
+IconRotation = Vector3(-10, -12, 16)
+IconZoom = 1.0

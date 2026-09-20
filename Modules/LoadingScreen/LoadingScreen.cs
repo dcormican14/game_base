@@ -2,6 +2,7 @@ using Godot;
 using GameBase.Nodes;
 using GameBase.Core;
 using GameBase.Levels;
+using GameBase.Items;
 
 namespace GameBase.UI;
 
@@ -63,6 +64,16 @@ public partial class LoadingScreen : CanvasLayer
     /// yet.
     /// </summary>
     private PauseMenu _pauseMenu;
+
+    /// <summary>
+    /// Held suspended for the same reason as the menu, and with more at stake:
+    /// the inventory pauses the tree when it opens, so a player pressing Tab
+    /// during the load would stop the chunk build they are waiting on — and,
+    /// because the loading screen only clears when the streamer reports ready,
+    /// the world would never finish and the screen would never lift.
+    /// </summary>
+    private InventoryHud _inventory;
+
     private ProgressBar _bar;
     private Label _label;
     private Control _root;
@@ -84,9 +95,18 @@ public partial class LoadingScreen : CanvasLayer
 
         _streamer = NodeSearch.FindByType<ChunkStreamer>(GetTree().CurrentScene ?? GetParent());
 
+        // The level is not playable yet, so the base state is Loading rather
+        // than Gameplay — which is what keeps the player controller and the
+        // node editor from acting on input behind the screen.
+        UiStateService.Instance?.Reset(UiState.Loading);
+
         _pauseMenu = NodeSearch.FindByType<PauseMenu>(GetTree().CurrentScene ?? GetParent());
         if (_pauseMenu != null)
             _pauseMenu.Suspended = true;
+
+        _inventory = NodeSearch.FindByType<InventoryHud>(GetTree().CurrentScene ?? GetParent());
+        if (_inventory != null)
+            _inventory.Suspended = true;
 
         if (_world == null)
         {
@@ -130,6 +150,9 @@ public partial class LoadingScreen : CanvasLayer
         // silently disable pausing for the rest of the session.
         if (_pauseMenu != null && GodotObject.IsInstanceValid(_pauseMenu))
             _pauseMenu.Suspended = false;
+
+        if (_inventory != null && GodotObject.IsInstanceValid(_inventory))
+            _inventory.Suspended = false;
     }
 
     public override void _Process(double delta)
@@ -312,9 +335,15 @@ public partial class LoadingScreen : CanvasLayer
         PlacePlayer();
         HoldPlayer(false);
 
-        // The scene is playable from here, so the menu becomes meaningful.
+        // The scene is playable from here, so the menu and the inventory
+        // become meaningful.
+        UiStateService.Instance?.Reset(UiState.Gameplay);
+
         if (_pauseMenu != null)
             _pauseMenu.Suspended = false;
+
+        if (_inventory != null)
+            _inventory.Suspended = false;
 
         _fade = 0f;
     }

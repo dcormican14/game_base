@@ -1,0 +1,20 @@
+[gd_resource type="Resource" script_class="ItemType" load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://Modules/Inventory/ItemType.cs" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="green"]
+albedo_color = Color(0.204, 0.686, 0.263, 1)
+roughness = 0.65
+
+[sub_resource type="BoxMesh" id="cube"]
+material = SubResource("green")
+size = Vector3(1, 1, 1)
+
+[resource]
+script = ExtResource("1_script")
+Id = "green_cube"
+DisplayName = "Green Cube"
+MaxStack = 64
+IconMesh = SubResource("cube")
+IconRotation = Vector3(-20, -35, 0)
+IconZoom = 1.0

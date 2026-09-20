@@ -219,6 +219,13 @@ public partial class PlayerController : CharacterBody3D
         if (@event is not InputEventMouseMotion motion || Input.MouseMode != Input.MouseModeEnum.Captured)
             return;
 
+        // Mouse capture alone is not a reliable answer to "is the player in
+        // the world": a screen can be opening or closing on the same frame,
+        // and capture is set by whichever module got there first. The state
+        // service is the stated answer.
+        if (UiStateService.Instance is { GameplayHasInput: false })
+            return;
+
         float sensitivity = SettingsService.Instance?.MouseSensitivity ?? FallbackMouseSensitivity;
 
         // Yaw about the body's OWN up, not the world's. On the far side of a
