@@ -1,6 +1,7 @@
 using Godot;
 using GameBase.Levels;
 using GameBase.Nodes;
+using GameBase.Core;
 
 namespace GameBase.PlanetLevel;
 
@@ -167,6 +168,22 @@ public partial class CubePlanetSpawn : Node
                 break;
             }
         }
+
+        // ABOVE THE SOIL, NOT ABOVE THE ROCK.
+        //
+        // The loop above finds the top of the solid ROCK, which was the ground
+        // back when the topsoil was a decorative skin thin enough to ignore.
+        // The soil shell is now a couple of nodes thick and carries its own
+        // collider, so the rock top can be well below the real surface -- and
+        // a player placed relative to it spawns inside the dirt, where their
+        // clearance is spent before they have fallen anywhere.
+        //
+        // Asked of the cap rather than assumed, so a scene without one (or with
+        // its collision turned off) still spawns exactly as it used to.
+        var cap = NodeSearch.FindByType<TopsoilCap>(GetTree().CurrentScene);
+
+        if (cap != null && cap.Collide)
+            top = Mathf.Max(top, grid.SurfaceRadius + cap.Depth);
 
         Vector3 at = outward * (top + Clearance);
         _player.GlobalPosition = at;
