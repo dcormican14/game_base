@@ -1,10 +1,11 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="PackedScene" path="res://Modules/Player/Player.tscn" id="1_player"]
 [ext_resource type="PackedScene" path="res://Modules/PlanetLevel/OrganicPlanetStream.tscn" id="2_planet"]
 [ext_resource type="PackedScene" path="res://Modules/Skybox/Skybox.tscn" id="3_skybox"]
 [ext_resource type="Script" path="res://Modules/PlanetLevel/CubePlanetSpawn.cs" id="4_spawn"]
 [ext_resource type="Script" path="res://Modules/Stats/ShovelShot.cs" id="5_shot"]
+[ext_resource type="PackedScene" path="res://Modules/Filters/StylizedFilter.tscn" id="6_filter"]
 
 [node name="OrganicShovelShot" type="Node3D"]
 
@@ -30,3 +31,5 @@ PlayerPath = NodePath("../Player")
 [node name="Shot" type="Node" parent="."]
 script = ExtResource("5_shot")
 Output = "user://shovel_raise.png"
+
+[node name="StylizedFilter" parent="." instance=ExtResource("6_filter")]

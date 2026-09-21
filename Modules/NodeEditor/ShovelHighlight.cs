@@ -41,8 +41,23 @@ public partial class ShovelHighlight : Node3D
     /// <summary>The topsoil this digs. Found by search when left empty.</summary>
     [Export] public NodePath TopsoilPath { get; set; } = "";
 
-    /// <summary>How far the player can reach, matching NodeEditor.</summary>
-    [Export(PropertyHint.Range, "1,100,0.5")] public float Reach { get; set; } = 6f;
+    /// <summary>
+    /// How far the shovel can reach.
+    ///
+    /// MUCH LONGER THAN THE PICKAXE'S, and it has to be. The pickaxe targets
+    /// BLOCKS, which stand up out of the ground toward the camera, so a short
+    /// reach finds one at almost any angle. The sand is a smooth shell that
+    /// only ever exists BELOW the player, and the crosshair leaves the eye
+    /// horizontally -- so at 6 units the ray met the ground only when looking
+    /// more than about 34 degrees down, and at every ordinary angle it flew off
+    /// over the horizon and the indicator simply never appeared.
+    ///
+    /// Worked out from the geometry: the camera rides about 3.4 units above
+    /// the sand, so reaching ground at 10 degrees below horizontal needs 19.5
+    /// units and at 5 degrees needs 38.8. This covers the angles a player
+    /// actually digs at without letting them sculpt the far horizon.
+    /// </summary>
+    [Export(PropertyHint.Range, "1,100,0.5")] public float Reach { get; set; } = 24f;
 
     /// <summary>How wide the dig is, in world units.</summary>
     [Export(PropertyHint.Range, "0.5,12,0.25")] public float Radius { get; set; } = 3f;
@@ -111,11 +126,15 @@ public partial class ShovelHighlight : Node3D
     /// <summary>
     /// How far the ring floats above the sand.
     ///
-    /// Without it the ring lands exactly on the surface it traces and fights it
-    /// for depth, which shows as the circle stitching in and out along its
-    /// length -- the same problem NodeHighlight solves with Expand.
+    /// MUCH HIGHER THAN A DEPTH-FIGHT NEEDS, and the reason is the viewing
+    /// angle rather than the precision. A ring lying flat on the ground is seen
+    /// nearly edge-on while the player is standing up looking ahead, so a lift
+    /// that clears the surface comfortably from above clears it by a fraction
+    /// of a pixel from eye level -- the sand wins the depth test along most of
+    /// the circle and the mark is simply not there. It looked correct in every
+    /// shot taken from above, which is exactly the angle that hides the bug.
     /// </summary>
-    [Export(PropertyHint.Range, "0,1,0.01")] public float Lift { get; set; } = 0.12f;
+    [Export(PropertyHint.Range, "0,2,0.01")] public float Lift { get; set; } = 0.35f;
 
     /// <summary>How many segments the ring is drawn from.</summary>
     [Export(PropertyHint.Range, "8,96,4")] public int Segments { get; set; } = 48;
@@ -186,7 +205,29 @@ public partial class ShovelHighlight : Node3D
         // No shadow and no depth write: an additive mark that wrote depth
         // would punch a hole in anything drawn after it.
         DisableReceiveShadows = true,
-        NoDepthTest = false,
+
+        // DRAWN THROUGH THE GROUND, and drawn AFTER THE FILTER.
+        //
+        // Two separate things were hiding this mark, and each one alone was
+        // enough to make it invisible.
+        //
+        // The ring lies FLAT on the sand, so from standing eye height it is
+        // seen nearly edge-on and sits within a hair of the surface it traces;
+        // the sand won the depth test along almost its whole length. Lifting it
+        // further does not help, because the problem is the grazing angle
+        // rather than the distance -- a box put at the same spot rendered sunk
+        // to its midline, which is what showed the surface was doing the
+        // hiding. A targeting mark should be legible regardless, the way the
+        // crosshair is, so depth testing goes.
+        //
+        // That alone still drew nothing, because StylizedFilter is a
+        // full-screen quad at render_priority 100 with depth_test_disabled: it
+        // paints over everything that has not sorted ahead of it. The mark has
+        // to outrank it or the filter simply covers it up. This is why the
+        // indicator looked right in a bare shot scene and was missing in the
+        // real level -- only the real level has the filter.
+        NoDepthTest = true,
+        RenderPriority = 101,
     };
 
     public override void _Ready()
