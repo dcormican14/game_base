@@ -1,0 +1,11 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="PackedScene" path="res://Modules/PlanetLevel/OrganicPlanetStream.tscn" id="1_planet"]
+[ext_resource type="Script" path="res://Modules/Stats/ShovelCheck.cs" id="2_check"]
+
+[node name="OrganicShovel" type="Node3D"]
+
+[node name="Planet" parent="." instance=ExtResource("1_planet")]
+
+[node name="Shovel" type="Node" parent="."]
+script = ExtResource("2_check")

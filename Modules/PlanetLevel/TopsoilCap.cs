@@ -234,8 +234,18 @@ public partial class TopsoilCap : Node3D
         // Any previous one goes, whether or not a new one is wanted -- turning
         // Collide off has to actually remove the collision, not just stop
         // refreshing it.
+        //
+        // FREED NOW, NOT QUEUED. QueueFree defers to the end of the frame, so
+        // the old shape is still registered with the physics server while the
+        // new one is added -- the planet briefly has TWO surfaces, and a ray
+        // cast in between hits whichever is higher. With the shovel that is
+        // the ground as it was before the dig, so digging appeared to do
+        // nothing at all while the mesh underneath was changing correctly.
         if (_collider != null && Godot.GodotObject.IsInstanceValid(_collider))
-            _collider.QueueFree();
+        {
+            _collider.GetParent()?.RemoveChild(_collider);
+            _collider.Free();
+        }
 
         _collider = null;
 
@@ -259,6 +269,229 @@ public partial class TopsoilCap : Node3D
         };
 
         body.AddChild(_collider);
+    }
+
+    // The six faces of the cube, as an origin and two edge vectors.
+    //
+    // ORIENTED SO ACROSS x DOWN POINTS OUTWARD on every one of them. Got by
+    // hand the first time, and two faces came out mirrored -- the mesh audit
+    // found 8,192 inside-out quads, which is exactly two faces' worth. The
+    // winding is uniform, so each face's own axes have to be right rather than
+    // fixed up afterwards.
+    //
+    // STATIC, AND SHARED, because the mesh builder and the height field's
+    // direction walk must agree about the order of every vertex on the planet.
+    private static readonly Vector3[] FaceOrigins =
+    {
+        new(-1, -1, -1),  // -Z
+        new(1, -1, -1),   // +X
+        new(1, -1, 1),    // +Z
+        new(-1, -1, 1),   // -X
+        new(-1, 1, -1),   // +Y
+        new(-1, -1, 1),   // -Y
+    };
+
+    private static readonly Vector3[] FaceAcross =
+    {
+        new(2, 0, 0),     // -Z
+        new(0, 0, 2),     // +X
+        new(-2, 0, 0),    // +Z
+        new(0, 0, -2),    // -X
+        new(2, 0, 0),     // +Y
+        new(2, 0, 0),     // -Y
+    };
+
+    private static readonly Vector3[] FaceDown =
+    {
+        new(0, 2, 0),     // -Z
+        new(0, 2, 0),     // +X
+        new(0, 2, 0),     // +Z
+        new(0, 2, 0),     // -X
+        new(0, 0, 2),     // +Y
+        new(0, 0, -2),    // -Y
+    };
+
+    /// <summary>
+    /// Walks every vertex direction of the shell, in build order.
+    ///
+    /// SHARED WITH THE MESH BUILDER ON PURPOSE. The height field is indexed by
+    /// position in this walk, so if the two ever disagreed about the order or
+    /// the count, a dig would move sand somewhere other than where the player
+    /// aimed -- a failure that looks like a physics bug rather than a mismatch.
+    /// One walk, used by both, cannot drift.
+    /// </summary>
+    private void ForEachShellDirection(System.Action<Vector3> each)
+    {
+        int n = Mathf.Max(2, Resolution);
+
+        Vector3[] origin = FaceOrigins;
+        Vector3[] across = FaceAcross;
+        Vector3[] down = FaceDown;
+
+        for (int f = 0; f < 6; f++)
+        for (int y = 0; y <= n; y++)
+        for (int x = 0; x <= n; x++)
+        {
+            Vector3 on = origin[f]
+                + across[f] * ((float)x / n)
+                + down[f] * ((float)y / n);
+
+            each(on.Normalized());
+        }
+    }
+
+    // ------------------------------------------------------------ the digging
+
+    /// <summary>
+    /// How far the sand has been raised or lowered at each vertex of the shell.
+    ///
+    /// ONE FLOAT PER VERTEX, in the same order the shell builds them, rather
+    /// than a sparse map of edits. The shell is rebuilt from this array every
+    /// time it changes, so the two must line up exactly; an index is cheaper
+    /// and less error-prone to keep in step than a position would be, since the
+    /// vertex order is already fixed by the cubed-sphere construction.
+    ///
+    /// Null until something digs. A planet nobody has touched costs nothing,
+    /// and <see cref="HeightAt"/> reads zero everywhere.
+    /// </summary>
+    private float[] _height;
+
+    /// <summary>
+    /// The shovel's reach into the array: which vertex a direction belongs to.
+    ///
+    /// The cubed sphere is not an even angular grid, so this cannot be a
+    /// closed-form lookup. It is built once, the first time anything digs, as a
+    /// flat list of vertex directions -- the shovel then finds every vertex
+    /// within its radius by distance, which is the same test the falloff needs
+    /// anyway.
+    /// </summary>
+    private Vector3[] _vertexDir;
+
+    /// <summary>
+    /// The sculpted height at a direction, for the shell builder.
+    ///
+    /// Reads the array by the index the builder is ABOUT to write, which is why
+    /// the builder passes its own running count rather than a position: looking
+    /// the direction back up would mean a search per vertex on every rebuild.
+    /// </summary>
+    private float HeightAt(Vector3 dir)
+    {
+        if (_height == null) return 0f;
+
+        return _buildIndex < _height.Length ? _height[_buildIndex] : 0f;
+    }
+
+    /// <summary>Where the shell builder has got to, so HeightAt can read along
+    /// with it. Reset at the start of every build.</summary>
+    private int _buildIndex;
+
+    /// <summary>
+    /// Raises or lowers the sand around a point on the surface.
+    ///
+    /// SMOOTH FALLOFF FROM THE CENTRE, so a dig leaves a rounded hollow or
+    /// mound rather than a cylinder punched into the ground. A flat disc would
+    /// be simpler and is wrong for sand: it leaves a vertical wall at the rim
+    /// that sand could not hold.
+    /// </summary>
+    /// <param name="at">A point on or near the surface -- only its direction
+    /// from the planet's centre is used.</param>
+    /// <param name="radius">How wide the dig reaches, in world units.</param>
+    /// <param name="amount">How far to move the sand. Positive raises.</param>
+    /// <returns>True when anything actually moved.</returns>
+    public bool Sculpt(Vector3 at, float radius, float amount)
+    {
+        if (_mesh == null || _radius <= 0f) return false;
+        if (at.LengthSquared() < 0.0001f) return false;
+
+        EnsureField();
+
+        if (_vertexDir == null || _vertexDir.Length == 0) return false;
+
+        Vector3 centre = at.Normalized();
+
+        // The dig radius as an ANGLE, since the field is indexed by direction.
+        float arcLimit = radius / Mathf.Max(1f, _radius);
+        float cosLimit = Mathf.Cos(Mathf.Min(arcLimit, Mathf.Pi));
+
+        bool moved = false;
+
+        for (int i = 0; i < _vertexDir.Length; i++)
+        {
+            float cos = centre.Dot(_vertexDir[i]);
+
+            if (cos < cosLimit) continue;
+
+            float arc = Mathf.Acos(Mathf.Clamp(cos, -1f, 1f));
+            float t = Mathf.Clamp(arc / Mathf.Max(arcLimit, 0.00001f), 0f, 1f);
+
+            // Smooth to nothing at the rim: 1 at the centre, 0 at the edge,
+            // with zero slope at both ends so repeated digs blend instead of
+            // stacking into terraces.
+            float falloff = 1f - Mathf.SmoothStep(0f, 1f, t);
+
+            if (falloff <= 0f) continue;
+
+            float before = _height[i];
+
+            _height[i] = Mathf.Clamp(
+                before + amount * falloff, -MaxDepth, MaxHeight);
+
+            if (!Mathf.IsEqualApprox(before, _height[i])) moved = true;
+        }
+
+        if (moved) Refresh();
+
+        return moved;
+    }
+
+    /// <summary>How far the sand may be piled above its resting surface.</summary>
+    [Export(PropertyHint.Range, "0,20,0.5")] public float MaxHeight { get; set; } = 6f;
+
+    /// <summary>
+    /// How far the sand may be dug below its resting surface.
+    ///
+    /// CAPPED SHORT OF THE ROCK. The shell sits <see cref="Depth"/> above the
+    /// rock, and digging past that would put the sand surface underneath the
+    /// stone it is supposed to cover -- the rock would poke through the sand
+    /// and the player would stand on stone while looking at a hole. Kept just
+    /// inside that, so the deepest pit still has a skin of sand at the bottom.
+    /// </summary>
+    public float MaxDepth => Mathf.Max(0f, Depth - 0.35f);
+
+    /// <summary>The height field and the directions that index it, made on
+    /// first use.</summary>
+    private void EnsureField()
+    {
+        if (_vertexDir != null && _height != null
+            && _height.Length == _vertexDir.Length)
+            return;
+
+        var dirs = new System.Collections.Generic.List<Vector3>();
+
+        ForEachShellDirection(dirs.Add);
+
+        _vertexDir = dirs.ToArray();
+
+        // Kept if it is already the right size: a rebuild at the same
+        // resolution must not wipe what the player has dug.
+        if (_height == null || _height.Length != _vertexDir.Length)
+            _height = new float[_vertexDir.Length];
+    }
+
+    /// <summary>
+    /// Rebuilds the mesh and its collider from the current height field.
+    ///
+    /// BOTH, and that is the point. The collider is built from the mesh, so a
+    /// dig that updated only the mesh would leave the player walking on the
+    /// shape of the ground as it was before they dug it.
+    /// </summary>
+    private void Refresh()
+    {
+        if (_mesh == null || _radius <= 0f) return;
+
+        _mesh.Mesh = Shell(_radius + Depth);
+
+        BuildCollider();
     }
 
     /// <summary>
@@ -293,6 +526,10 @@ public partial class TopsoilCap : Node3D
 
         int n = Mathf.Max(2, Resolution);
 
+        // The height field is read in step with this walk, so the cursor starts
+        // over with it.
+        _buildIndex = 0;
+
         // The six faces, as an origin and two edge vectors on the unit cube.
         //
         // ORIENTED SO ACROSS x DOWN POINTS OUTWARD on every one of them. Got by
@@ -300,35 +537,9 @@ public partial class TopsoilCap : Node3D
         // found 8,192 inside-out quads, which is exactly two faces' worth. The
         // winding below is uniform, so each face's own axes have to be right
         // rather than fixed up afterwards.
-        Vector3[] origin =
-        {
-            new(-1, -1, -1),  // -Z
-            new(1, -1, -1),   // +X
-            new(1, -1, 1),    // +Z
-            new(-1, -1, 1),   // -X
-            new(-1, 1, -1),   // +Y
-            new(-1, -1, 1),   // -Y
-        };
-
-        Vector3[] across =
-        {
-            new(2, 0, 0),     // -Z
-            new(0, 0, 2),     // +X
-            new(-2, 0, 0),    // +Z
-            new(0, 0, -2),    // -X
-            new(2, 0, 0),     // +Y
-            new(2, 0, 0),     // -Y
-        };
-
-        Vector3[] down =
-        {
-            new(0, 2, 0),     // -Z
-            new(0, 2, 0),     // +X
-            new(0, 2, 0),     // +Z
-            new(0, 2, 0),     // -X
-            new(0, 0, 2),     // +Y
-            new(0, 0, -2),    // -Y
-        };
+        Vector3[] origin = FaceOrigins;
+        Vector3[] across = FaceAcross;
+        Vector3[] down = FaceDown;
 
         for (int f = 0; f < 6; f++)
         {
@@ -349,7 +560,11 @@ public partial class TopsoilCap : Node3D
                 // rebuild and the two sides of a seam agree.
                 float rough = (Noise(dir * 40f) - 0.5f) * Displace;
 
-                verts.Add(dir * (radius + rough));
+                // AND WHATEVER THE SHOVEL HAS DONE HERE. The height field is
+                // the only part of this surface that is not a pure function of
+                // direction -- it is the record of the player's digging, so it
+                // has to be read per vertex rather than derived.
+                verts.Add(dir * (radius + rough + HeightAt(dir)));
                 norms.Add(dir);
 
                 // FLAT. The shader draws the pattern per pixel, so the mesh
@@ -357,6 +572,8 @@ public partial class TopsoilCap : Node3D
                 // only reintroduce the soft blotches the shader exists to
                 // replace, showing through between the lines.
                 colors.Add(new Color(1f, 1f, 1f));
+
+                _buildIndex++;
             }
 
             for (int y = 0; y < n; y++)

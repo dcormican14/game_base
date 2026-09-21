@@ -1,10 +1,11 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="Script" path="res://Modules/Player/PlayerController.cs" id="1_script"]
 [ext_resource type="Script" path="res://Modules/Player/PlayerAnimator.cs" id="2_animator"]
 [ext_resource type="PackedScene" path="res://Assets/Characters/XBot/XBot.fbx" id="3_model"]
 [ext_resource type="PackedScene" path="res://Modules/NodeEditor/NodeEditor.tscn" id="4_editor"]
 [ext_resource type="Script" path="res://Modules/NodeEditor/NodeHighlight.cs" id="10_highlight"]
+[ext_resource type="Script" path="res://Modules/NodeEditor/ShovelHighlight.cs" id="11_shovel"]
 
 [sub_resource type="CapsuleShape3D" id="capsule_shape"]
 radius = 0.35
@@ -41,3 +42,6 @@ current = true
 
 [node name="NodeHighlight" type="Node3D" parent="."]
 script = ExtResource("10_highlight")
+
+[node name="ShovelHighlight" type="Node3D" parent="."]
+script = ExtResource("11_shovel")
