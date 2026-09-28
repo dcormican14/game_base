@@ -43,7 +43,7 @@ uniform int pixel_distance_steps : hint_range(1, 12) = 4;
 
 // --- Outlines ---------------------------------------------------------------
 uniform bool outline_enabled = true;
-uniform vec4 outline_color : source_color = vec4(0.05, 0.05, 0.07, 1.0);
+uniform vec4 outline_color : source_color = vec4(0.078, 0.012, 0.059, 1.0);
 uniform float outline_thickness : hint_range(1.0, 4.0) = 1.0;
 // Depth discontinuity needed for an edge, scaled by distance so distant
 // geometry does not smear into a solid outline.

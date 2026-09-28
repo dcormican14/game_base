@@ -116,6 +116,8 @@ public partial class PlayerController : CharacterBody3D
 
     public override void _Ready()
     {
+        AddToGroup(Groups.Player);
+
         _cameraPivot = GetNode<Node3D>("%CameraPivot");
         _springArm = GetNode<SpringArm3D>("%SpringArm");
         _characterRig = GetNode<Node3D>("%CharacterRig");
@@ -232,11 +234,23 @@ public partial class PlayerController : CharacterBody3D
         // planet world +Y is straight down, and yawing about it would roll the
         // camera instead of turning it.
         RotateObjectLocal(Vector3.Up, Mathf.DegToRad(-motion.Relative.X * sensitivity));
-        _pitchDegrees = Mathf.Clamp(
-            _pitchDegrees - motion.Relative.Y * sensitivity,
-            MinPitchDegrees,
-            MaxPitchDegrees);
-        _cameraPivot.RotationDegrees = new Vector3(_pitchDegrees, 0, 0);
+        PitchDegrees = _pitchDegrees - motion.Relative.Y * sensitivity;
+    }
+
+    /// <summary>
+    /// How far the camera looks up (positive) or down (negative), in degrees,
+    /// clamped to the look limits. Set it to aim the camera from code.
+    /// </summary>
+    public float PitchDegrees
+    {
+        get => _pitchDegrees;
+        set
+        {
+            _pitchDegrees = Mathf.Clamp(value, MinPitchDegrees, MaxPitchDegrees);
+
+            if (_cameraPivot != null)
+                _cameraPivot.RotationDegrees = new Vector3(_pitchDegrees, 0, 0);
+        }
     }
 
     public override void _PhysicsProcess(double delta)
@@ -333,9 +347,52 @@ public partial class PlayerController : CharacterBody3D
             }
         }
 
+        RiseWithGround(up, ref velocity);
+
         Velocity = velocity;
         MoveAndSlide();
         UpdateCameraHeight(dt);
+    }
+
+    /// <summary>How far above the feet ground must come before it lifts the body.</summary>
+    private const float RiseTolerance = 0.02f;
+
+    /// <summary>
+    /// Ground that rises into the body carries it up instead of swallowing it.
+    ///
+    /// Particle nodes piled up underfoot rise through the capsule a little every frame,
+    /// and the physics engine only nudges a body a hair out of a static surface
+    /// that moved into it -- so a player standing on a growing heap sank into
+    /// it and, once behind its surface, fell through. A ray down the capsule's
+    /// own axis, from its top to its feet, finds any ground that has come up
+    /// inside the body, and the body is set down on top of it.
+    ///
+    /// Only the TOP of the ground counts -- front faces turned upward -- so a
+    /// wall beside the player or a low ceiling above never pulls anyone
+    /// through it.
+    /// </summary>
+    private void RiseWithGround(Vector3 up, ref Vector3 velocity)
+    {
+        if (_capsule == null)
+            return;
+
+        Vector3 feet = GlobalPosition;
+        var query = PhysicsRayQueryParameters3D.Create(
+            feet + up * _capsule.Height, feet + up * RiseTolerance, CollisionMask,
+            new Godot.Collections.Array<Rid> { GetRid() });
+        query.HitBackFaces = false;
+
+        Godot.Collections.Dictionary hit = GetWorld3D().DirectSpaceState.IntersectRay(query);
+
+        if (hit.Count == 0 || ((Vector3)hit["normal"]).Dot(up) < 0.3f)
+            return;
+
+        GlobalPosition = (Vector3)hit["position"];
+
+        // Carried, not dropped: whatever fall was under way is over.
+        float along = velocity.Dot(up);
+        if (along < 0f)
+            velocity -= up * along;
     }
 
     // -------------------------------------------------------------- sandbox

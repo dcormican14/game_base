@@ -8,7 +8,5 @@ Id = "shovel"
 DisplayName = "Shovel"
 MaxStack = 1
 Shape = 1
-HandleColor = Color(0.42, 0.27, 0.15, 1)
-HeadColor = Color(0.62, 0.64, 0.68, 1)
 IconRotation = Vector3(-12, -28, 18)
 IconZoom = 1.0

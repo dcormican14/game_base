@@ -1,10 +1,15 @@
-// Procedural deep-space sky in the style of the reference pixel art, built as
-// three layers that composite in order:
+// Procedural night sky in the style of the reference pixel art, built as four
+// layers that composite in order:
 //
 //   1. SPACE    flat plum ground (#28061e halved toward black)
 //   2. NEBULAE  clouds quantized into a few flat tones with hard stepped
 //               edges, orbiting one axis like a very slow hurricane
 //   3. STARS    three sizes with drawn twinkle arms, plus rare shooting stars
+//   4. MOON     a still, pixel-drawn moon with maria and craters -- the
+//               light the scene is lit by (see LightingRig)
+//
+// Each of the first three has a BRIGHTNESS from 0 (black) to 1 (the layer's
+// full, calibrated luminosity), so the night can be dimmed layer by layer.
 //
 // EVERYTHING SNAPS TO A PIXEL GRID. The reference is pixel art: hard edges, no
 // antialiasing, flat colour bands. That is enforced by quantizing the view
@@ -30,6 +35,7 @@ uniform float pixel_grid : hint_range(64.0, 1024.0) = 300.0;
 // against a render, not computed. Re-measure if the tonemapper, SkyEnergy or
 // AmbientEnergy change.
 uniform vec3 space_color : source_color = vec3(0.0747, 0.0092, 0.0521);
+uniform float space_brightness : hint_range(0.0, 1.0) = 0.25;
 
 // --- Layer 2: nebulae -------------------------------------------------------
 uniform bool nebula_enabled = true;
@@ -39,10 +45,8 @@ uniform bool nebula_enabled = true;
 uniform vec3 nebula_tone_1 : source_color = vec3(0.115, 0.020, 0.093);
 uniform vec3 nebula_tone_2 : source_color = vec3(0.180, 0.035, 0.130);
 uniform vec3 nebula_tone_3 : source_color = vec3(0.320, 0.060, 0.180);
-// A warm accent for a minority of clouds, from the reference's rusty patches.
-uniform vec3 nebula_warm : source_color = vec3(0.300, 0.085, 0.090);
-uniform float nebula_warm_share : hint_range(0.0, 1.0) = 0.06;
 uniform float nebula_opacity : hint_range(0.0, 2.0) = 1.0;
+uniform float nebula_brightness : hint_range(0.0, 1.0) = 0.5;
 uniform float nebula_scale : hint_range(0.2, 12.0) = 4.5;
 // Density below `floor` is empty sky. A threshold, not a power curve: pow()
 // never reaches zero, so at any visible strength it washes the whole dome
@@ -72,7 +76,7 @@ uniform float star_coverage : hint_range(0.0, 1.0) = 0.34;
 uniform vec3 star_core : source_color = vec3(1.05, 0.62, 0.74);
 uniform vec3 star_mid : source_color = vec3(0.400, 0.175, 0.235);
 uniform vec3 star_faint : source_color = vec3(0.150, 0.062, 0.098);
-uniform float star_brightness : hint_range(0.0, 4.0) = 1.0;
+uniform float star_brightness : hint_range(0.0, 1.0) = 0.75;
 
 // Share of stars drawn large (3x3 core, 8 arms) and medium (1 px core,
 // 4 arms). The rest are single dots.
@@ -111,6 +115,25 @@ uniform float shooting_arc : hint_range(0.02, 1.0) = 0.13;
 // How many slots are tested per frame. Higher lets more shots overlap, at a
 // cost of that many extra hash evaluations per pixel.
 uniform int shooting_slots : hint_range(1, 8) = 4;
+
+// --- Layer 4: moon ----------------------------------------------------------
+// Still in the sky: it keeps its place while the stars and clouds turn, and
+// the scene's key light comes from exactly this direction (LightingRig).
+uniform bool moon_enabled = true;
+uniform vec3 moon_direction = vec3(0.3, 0.57, -0.76);
+// Angular radius, in degrees. Far larger than the real moon's quarter degree:
+// this is a drawn moon, and it has to carry its maria and craters as pixels.
+uniform float moon_size : hint_range(0.5, 20.0) = 4.5;
+// The off-white gold of the highlands and the grey of the maria. Pre-tonemap,
+// and kept below the tonemapper's shoulder: brighter, and the Filmic curve
+// flattens the two into one pale disc with no seas on it.
+uniform vec3 moon_light : source_color = vec3(0.78, 0.68, 0.50);
+uniform vec3 moon_shade : source_color = vec3(0.34, 0.31, 0.30);
+uniform float moon_brightness : hint_range(0.0, 2.0) = 1.0;
+// A faint stepped halo around the disc, in the sky's own dusty rose.
+uniform vec3 moon_halo_color : source_color = vec3(0.30, 0.12, 0.15);
+uniform float moon_halo : hint_range(0.0, 1.0) = 0.3;
+uniform int moon_craters : hint_range(0, 24) = 11;
 
 // ---------------------------------------------------------------------------
 // Hashes: cheap deterministic pseudo-random, no texture lookups.
@@ -156,7 +179,7 @@ float value_noise(vec3 p) {
 // NOTE the range: amplitudes sum to (1 - 0.5^octaves), so 2 octaves span
 // 0..0.75 with mean ~0.38 and 5 octaves span 0..0.97 with mean ~0.48. Any
 // threshold applied to the result must be centred on THAT, not on 0..1 —
-// getting this wrong is what made the warm nebula tint never appear.
+// getting this wrong makes a threshold never (or always) fire.
 float fbm(vec3 p, int octaves) {
     float sum = 0.0;
     float amplitude = 0.5;
@@ -252,14 +275,6 @@ vec4 nebula(vec3 dir, float time) {
     vec3 tone = nebula_tone_1;
     tone = mix(tone, nebula_tone_2, step(0.34, t));
     tone = mix(tone, nebula_tone_3, step(0.68, t));
-
-    // A minority of clouds take the warm accent instead. Thresholded on fbm's
-    // real 2-octave range (mean ~0.38), not on 0..1.
-    // fbm's 2-octave range is 0..0.75 with mean ~0.38, so the threshold sits
-    // well above the mean to keep the warm tint to a minority of clouds.
-    float warm = fbm(p * 0.6 + 5.5, 2);
-    float warm_mix = step(0.56 - nebula_warm_share * 0.3, warm);
-    tone = mix(tone, nebula_warm, warm_mix * 0.55);
 
     // Coverage is stepped too, so a cloud's edge is a hard boundary rather
     // than a fade. Three alpha levels matching the three tone bands.
@@ -580,7 +595,85 @@ vec3 shooting_star(vec3 dir, float time) {
 }
 
 // ---------------------------------------------------------------------------
-// Composite the three layers, in order.
+// LAYER 4 — the moon.
+//
+// Drawn on its own pixel grid, square to the moon, with the grid's pixel as
+// wide as the sky's: a disc whose every pixel is a flat tone. The disc is a
+// sphere seen face on; its maria are a stepped noise over that sphere and its
+// craters are round pits with a lit rim on the side the light comes from and
+// a shadowed one opposite.
+
+// The frame the moon is drawn in: `axis` toward it, `right` and `up` across.
+void moon_frame(out vec3 axis, out vec3 right, out vec3 up) {
+    axis = normalize(moon_direction);
+    vec3 world_up = abs(axis.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    right = normalize(cross(world_up, axis));
+    up = cross(axis, right);
+}
+
+// Where a view direction lands on the moon's disc, in moon radii, snapped to
+// the moon's pixel grid. Far from the moon it is far outside the disc.
+vec2 moon_disc(vec3 dir) {
+    vec3 axis, right, up;
+    moon_frame(axis, right, up);
+
+    float along = dot(dir, axis);
+    if (along <= 0.0) {
+        return vec2(1e3);
+    }
+
+    float radius = radians(moon_size);
+    vec2 q = vec2(dot(dir, right), dot(dir, up)) / (along * tan(radius));
+
+    // As many pixels across a radius as the sky's own grid puts there.
+    float per_radius = max(6.0, radius / (1.5707963 / pixel_grid));
+    return (floor(q * per_radius) + 0.5) / per_radius;
+}
+
+// The moon's colour at a point on its disc (in moon radii, inside the disc).
+vec3 moon_surface(vec2 q) {
+    float r2 = dot(q, q);
+    vec3 n = vec3(q, sqrt(max(1.0 - r2, 0.0)));
+
+    // Maria: broad grey seas over the gold highlands, in two flat depths.
+    // fbm's 4-octave range is 0..0.94 with mean ~0.47.
+    float sea = fbm(n * 2.3 + vec3(3.1, 7.7, 1.9), 4);
+    float mare = step(0.50, sea) * 0.55 + step(0.58, sea) * 0.25;
+    vec3 tone = mix(moon_light, moon_shade, mare);
+
+    // Craters: pits scattered over the face we see, each with a lit rim
+    // toward the upper left, where the light is drawn from, and a shadowed
+    // rim opposite.
+    vec2 light = normalize(vec2(-1.0, 1.0));
+
+    for (int i = 0; i < 24; i++) {
+        if (i >= moon_craters) {
+            break;
+        }
+
+        vec3 roll = hash33(vec3(float(i) * 3.7, 11.0, 5.0));
+        vec3 centre = normalize(vec3(roll.xy * 1.6 - 0.8, 0.35 + roll.z));
+        float size = 0.07 + 0.13 * hash31(vec3(float(i), 41.0, 2.0));
+        float d = distance(n, centre);
+
+        if (d < size) {
+            vec2 toward = normalize((n - centre).xy + vec2(1e-5));
+            float facing = dot(toward, light);
+            float rim = step(size * 0.72, d);
+
+            tone *= 0.78;
+            tone = mix(tone, facing > 0.0 ? tone * 0.62 : moon_light * 1.08, rim * step(0.2, abs(facing)));
+        }
+    }
+
+    // Limb darkening in two hard steps toward the edge.
+    tone *= 1.0 - 0.12 * step(0.80, r2) - 0.10 * step(0.93, r2);
+
+    return tone * moon_brightness;
+}
+
+// ---------------------------------------------------------------------------
+// Composite the four layers, in order.
 vec3 space(vec3 dir, float time, bool with_stars) {
     // Stars rotate with the sky, far slower than the gas. The direction is
     // spun BEFORE snapping, so the pixel grid and the star cells turn together
@@ -593,15 +686,28 @@ vec3 space(vec3 dir, float time, bool with_stars) {
     to_pixel(star_dir, snapped, cell, face);
 
     // LAYER 1 — flat ground.
-    vec3 color = space_color;
+    vec3 color = space_color * space_brightness;
 
     // LAYER 2 — gas, inside the background. Alpha-blended so the flat tones
     // sit ON the ground rather than adding to it, which would brighten the
     // background and wash out the banding.
     if (nebula_enabled) {
         vec4 gas = nebula(snapped, time);
-        color = mix(color, gas.rgb, clamp(gas.a, 0.0, 1.0));
+        color = mix(color, gas.rgb * nebula_brightness, clamp(gas.a, 0.0, 1.0));
     }
+
+    // The moon, from the unturned direction: it stays put while the rest of
+    // the sky wheels past it.
+    vec2 disc = moon_enabled ? moon_disc(dir) : vec2(1e3);
+    float from_centre = length(disc);
+
+    if (from_centre < 1.0) {
+        return moon_surface(disc);
+    }
+
+    // Its halo: two faint stepped rings over the gas, under the stars.
+    float halo = moon_halo * (0.5 * step(from_centre, 1.3) + 0.25 * step(from_centre, 1.7));
+    color += moon_halo_color * moon_brightness * halo;
 
     // LAYER 3 — stars, in front of the gas.
     if (with_stars) {

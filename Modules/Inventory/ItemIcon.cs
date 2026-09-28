@@ -61,9 +61,9 @@ public partial class ItemIcon : TextureRect
     /// Fill light colour: a plum tint, but much paler than the scene's own
     /// ambient. The world can afford a saturated plum fill because its
     /// surfaces are muted earth tones; an icon cannot, because the fill is
-    /// most of what the shadowed faces get, and at full saturation it turns a
-    /// green cube's dark faces purple and the item stops being recognisable as
-    /// one colour of thing.
+    /// most of what the shadowed faces get, and at full saturation it turns an
+    /// item's dark faces purple and it stops being recognisable as one colour
+    /// of thing.
     /// </summary>
     [Export] public Color AmbientColor { get; set; } = new(0.62f, 0.52f, 0.60f);
 
@@ -75,7 +75,7 @@ public partial class ItemIcon : TextureRect
     /// silhouette loses its shaded sides and the item reads as a flat patch of
     /// colour. Too high and it washes out the difference between faces, which
     /// costs the same shape from the other direction. 0.9 keeps the darkest
-    /// face visibly green while the lit face stays clearly brighter.
+    /// face its own colour while the lit face stays clearly brighter.
     /// </summary>
     [Export(PropertyHint.Range, "0,4,0.05")] public float AmbientEnergy { get; set; } = 0.9f;
 

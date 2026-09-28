@@ -1,178 +1,111 @@
 using Godot;
+using GameBase.Core;
 
 namespace GameBase.Nodes;
 
 /// <summary>
-/// What a kind of node IS: how it looks, how it behaves, and where it belongs
-/// in a planet.
+/// What a kind of node is: its name, its form, and what may be done to it.
 ///
-/// One instance per kind, shared by every node of that kind -- a world holds
-/// millions of nodes and storing a reference per node would cost eight bytes
-/// where one suffices. A cell keeps its <see cref="NodeMaterial"/> byte and
-/// this is looked up from it, so the store is unchanged and the behaviour is
-/// polymorphic anyway.
+/// One instance per kind, shared by every node of that kind. A cell stores only
+/// its <see cref="NodeMaterial"/> byte and this is looked up from it, so the
+/// store stays one byte a node while behaviour is still polymorphic.
 ///
-/// WHY A HIERARCHY RATHER THAN A SWITCH
-///
-/// The world has two kinds of node today and will have more -- ores, ice,
-/// clays, whatever a planet turns out to need. A switch on the material byte
-/// would put every one of those decisions in a different file from the others,
-/// and adding a kind would mean finding them all. A type says everything about
-/// itself in one place, and adding a kind is adding a class.
-///
-/// <see cref="SurfaceNode"/> is the branch for anything that forms a planet's
-/// skin, and <see cref="RawNode"/> for anything that makes up its body. The
-/// distinction is not cosmetic: it decides which nodes are cut by the planet's
-/// surface and which keep their whole shape.
+/// The hierarchy splits on <see cref="NodeForm"/> first, because form decides
+/// how a node is meshed and collided and which tools can work it:
+/// <see cref="RawNode"/> for faceted solids, <see cref="ParticleNode"/> for
+/// granular fills. A new kind is a new class under whichever branch fits.
 /// </summary>
 public abstract class NodeType
 {
-    protected NodeType(NodeMaterial material)
+    protected NodeType(NodeMaterial material, string name)
     {
         Material = material;
+        Name = name;
     }
 
     /// <summary>The byte a cell stores to mean this kind.</summary>
     public NodeMaterial Material { get; }
 
-    /// <summary>A name for logs and tools.</summary>
-    public abstract string Name { get; }
+    /// <summary>A name for logs, tools and the HUD.</summary>
+    public string Name { get; }
 
-    /// <summary>
-    /// Is this kind part of the planet's SKIN?
-    ///
-    /// A skin node is trimmed by the surface so the planet ends exactly at its
-    /// radius; a body node keeps its whole irregular shape and is never cut.
-    /// That is the whole difference between the soil you walk on and the rock
-    /// underneath it.
-    /// </summary>
-    public abstract bool IsSurface { get; }
+    /// <summary>How this kind occupies its cell.</summary>
+    public abstract NodeForm Form { get; }
 
-    /// <summary>
-    /// The two shades this kind alternates between.
-    ///
-    /// Two rather than one because a field of identically coloured cells is
-    /// unreadable -- the eye needs the break to see where one node ends and the
-    /// next begins.
-    /// </summary>
-    public abstract Color ShadeA { get; }
-
-    public abstract Color ShadeB { get; }
-
-    /// <summary>
-    /// Can a player dig this out?
-    ///
-    /// Here so that a future kind -- bedrock at the core, say -- can refuse
-    /// without the editor having to know about it.
-    /// </summary>
+    /// <summary>Can a player remove this kind? A future bedrock says no.</summary>
     public virtual bool CanMine => true;
+
+    /// <summary>Can a player put this kind into the world?</summary>
+    public virtual bool CanPlace => true;
+
+    public override string ToString() => Name;
 }
 
 /// <summary>
-/// A node of the planet's BODY: the rock under the skin.
+/// A node that fills its whole Voronoi cell: faceted, solid, all or nothing.
 ///
-/// Never cut by the surface. A raw node keeps the whole irregular shape the
-/// Voronoi diagram gives it, and the skin above sits on top of that shape
-/// rather than replacing it.
+/// Drawn cell by cell as the polyhedron the Voronoi diagram gives it, with two
+/// shades alternated between neighbours so individual nodes stay readable.
 /// </summary>
 public abstract class RawNode : NodeType
 {
-    protected RawNode(NodeMaterial material) : base(material)
+    protected RawNode(NodeMaterial material, string name) : base(material, name)
     {
     }
 
-    public sealed override bool IsSurface => false;
+    public sealed override NodeForm Form => NodeForm.Raw;
+
+    /// <summary>The lighter of the two shades neighbouring nodes alternate between.</summary>
+    public abstract Color ShadeA { get; }
+
+    /// <summary>The darker shade.</summary>
+    public abstract Color ShadeB { get; }
 }
 
 /// <summary>
-/// A node of the planet's SKIN: what a player walks on.
+/// A node that fills its cell to a level, like grains poured into a box.
 ///
-/// Trimmed by the planet's surface, so its outer face is the sphere itself and
-/// the world has a clean edge. Its inner and side faces are ordinary Voronoi
-/// walls, which is what lets it sit exactly on the rock below with no gap.
+/// Stored as a fill level per cell (see <see cref="NodeFill"/>), and drawn as
+/// one smooth surface through every particle cell at once, so a bed of them
+/// reads as a continuous material rather than as blocks. Digging lowers the
+/// fill and building raises it; a cell whose fill runs out becomes air.
 /// </summary>
-public abstract class SurfaceNode : NodeType
+public abstract class ParticleNode : NodeType
 {
-    protected SurfaceNode(NodeMaterial material) : base(material)
+    protected ParticleNode(NodeMaterial material, string name) : base(material, name)
     {
     }
 
-    public sealed override bool IsSurface => true;
+    public sealed override NodeForm Form => NodeForm.Particle;
 
-    /// <summary>
-    /// How deep this kind of skin runs, in LAYERS of nodes.
-    ///
-    /// In layers rather than world units so it means the same at any node size:
-    /// three layers is three nodes down whether a node is one unit across or
-    /// four.
-    /// </summary>
-    public abstract float Layers { get; }
+    /// <summary>The material's lit colour.</summary>
+    public abstract Color Colour { get; }
+
+    /// <summary>The colour its grain and ripples shade toward.</summary>
+    public abstract Color Shade { get; }
 }
 
-// --------------------------------------------------------------- the kinds
+// ------------------------------------------------------------------- kinds
 
-/// <summary>Ordinary grey rock: what most of a planet is made of.</summary>
+/// <summary>Plain rock: the body of the planet.</summary>
 public sealed class StoneNode : RawNode
 {
-    public StoneNode() : base(NodeMaterial.Stone)
+    public StoneNode() : base(NodeMaterial.Stone, "Stone")
     {
     }
 
-    public override string Name => "Stone";
-
-    public override Color ShadeA => new(0.155f, 0.155f, 0.170f);
-    public override Color ShadeB => new(0.245f, 0.245f, 0.265f);
+    public override Color ShadeA => Palette.StoneLight;
+    public override Color ShadeB => Palette.StoneDark;
 }
 
-/// <summary>
-/// Unclassified rock.
-///
-/// Kept at material id 0 so a cell whose byte was never set reads as ordinary
-/// rock rather than as something exotic.
-/// </summary>
-public sealed class UnknownNode : RawNode
+/// <summary>Sand: the particle node the planet's shell is made of.</summary>
+public sealed class SandNode : ParticleNode
 {
-    public UnknownNode() : base(NodeMaterial.Raw)
+    public SandNode() : base(NodeMaterial.Sand, "Sand")
     {
     }
 
-    public override string Name => "Raw";
+    public override Color Colour => Palette.Sand;
+    public override Color Shade => Palette.SandShade;
 
-    public override Color ShadeA => new(0.30f, 0.30f, 0.34f);
-    public override Color ShadeB => new(0.42f, 0.42f, 0.46f);
-}
-
-/// <summary>Dark capping stone.</summary>
-public sealed class DarkNode : RawNode
-{
-    public DarkNode() : base(NodeMaterial.Dark)
-    {
-    }
-
-    public override string Name => "Dark";
-
-    public override Color ShadeA => new(0.105f, 0.082f, 0.058f);
-    public override Color ShadeB => new(0.140f, 0.112f, 0.078f);
-}
-
-/// <summary>
-/// The earth over the rock: the planet's topsoil.
-///
-/// Warm and clearly not grey, so the boundary between soil and rock reads at a
-/// glance when a hole is dug through it. Darker than it looks here for the same
-/// reason as the rest of the palette -- the stylised filter lifts midtones
-/// hard.
-/// </summary>
-public sealed class SoilNode : SurfaceNode
-{
-    public SoilNode() : base(NodeMaterial.Soil)
-    {
-    }
-
-    public override string Name => "Soil";
-
-    public override float Layers => 3f;
-
-    public override Color ShadeA => new(0.185f, 0.125f, 0.070f);
-    public override Color ShadeB => new(0.240f, 0.170f, 0.098f);
 }

@@ -20,7 +20,7 @@ public partial class StylizedFilter : MeshInstance3D
 {
     [ExportGroup("Outlines")]
     [Export] public bool OutlineEnabled { get; set; } = true;
-    [Export] public Color OutlineColor { get; set; } = new(0.05f, 0.05f, 0.07f);
+    [Export] public Color OutlineColor { get; set; } = GameBase.Core.Palette.Ink;
     [Export(PropertyHint.Range, "1,4,0.1")] public float OutlineThickness { get; set; } = 1f;
     [Export(PropertyHint.Range, "0.01,2,0.01")] public float DepthThreshold { get; set; } = 0.18f;
     /// <summary>Cap on grazing-angle compensation: how much the depth-edge

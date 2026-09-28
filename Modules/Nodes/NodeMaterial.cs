@@ -1,34 +1,42 @@
-
 namespace GameBase.Nodes;
 
 /// <summary>
-/// What a block is made OF, as the byte a cell stores.
+/// What a node is made of, as the byte a cell stores.
 ///
-/// The IDENTITY only. Everything a kind of node does or looks like lives on its
-/// <see cref="NodeType"/>, reached through <see cref="NodeTypes.Of"/>; this
-/// enum exists so a planet of millions of nodes costs one byte each rather than
-/// a reference each. Adding a kind means adding an id here and a class there.
+/// The identity only. Everything a kind of node does or looks like lives on its
+/// <see cref="NodeType"/>, reached through <see cref="NodeTypes.Of"/>; the enum
+/// exists so a planet of millions of nodes costs one byte a node rather than a
+/// reference. Adding a kind means adding an id here and a class there.
 ///
-/// Ids are stable and small because they are
-/// what save data records.
+/// Empty space is not a material: the store marks it with
+/// <see cref="NodeChunkStore.Air"/>.
 /// </summary>
 public enum NodeMaterial : byte
 {
-    /// <summary>The default, kept at id 0 so an unset byte reads as ordinary
-    /// rock rather than as something exotic.</summary>
-    Raw = 0,
+    /// <summary>Plain rock, the body of the planet.</summary>
+    Stone = 0,
 
-    /// <summary>Dark capping stone.</summary>
-    Dark = 1,
+    /// <summary>Sand: the material of the planet's particle nodes.</summary>
+    Sand = 1,
+}
 
-    /// <summary>The planet's grey stone: what the cube world is built from.</summary>
-    Stone = 2,
+/// <summary>
+/// The two ways a node can occupy its cell.
+///
+/// This is the split every system keys off: how a node is meshed, which body it
+/// collides on, and which tools can work it.
+/// </summary>
+public enum NodeForm
+{
+    /// <summary>
+    /// A solid cell with the exact shape of its Voronoi region: rock-like,
+    /// faceted, all or nothing.
+    /// </summary>
+    Raw,
 
     /// <summary>
-    /// The planet's skin: the few layers of earth over the rock.
-    ///
-    /// A material rather than a flag, so a dug block keeps being soil wherever
-    /// it is put back and the mesher needs to know nothing about depth.
+    /// A granular fill that takes up as much of its cell as its fill level says,
+    /// and flows into its neighbours as one smooth surface.
     /// </summary>
-    Soil = 3,
+    Particle,
 }

@@ -1,1556 +1,291 @@
 using Godot;
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
+using GameBase.Core;
 
 namespace GameBase.Nodes;
 
 /// <summary>
-/// Keeps the chunks around a target resident, and drops the ones behind it.
+/// Keeps the chunks around a target resident and drops the ones behind it.
 ///
-/// This is the piece that turns a finite generated region into an endless
-/// world. The generator it drives defines its field over all of space already
-/// — density is a pure function of position and seed — so what bounded the
-/// world was never the field, it was the fact that everything generated stayed
-/// in memory forever. Streaming is the missing driver: decide which chunks
-/// should exist right now, make those, and free the rest.
+/// Residency is a ball of <see cref="LoadRadius"/> chunks around the target --
+/// ALL of them, open sky included. Sky costs almost nothing (a uniform chunk is
+/// a few bytes, and a section of nothing but air is never meshed), and it has
+/// to be there: a chunk that is not loaded cannot be edited, so skipping the
+/// sky would put a ceiling on how high anything can be built. Missing chunks are generated on
+/// worker threads nearest-first and installed into the <see cref="NodeWorld"/>,
+/// which meshes them. Chunks past <see cref="UnloadRadius"/> -- deliberately
+/// larger, so a player on the boundary does not load and free the same chunk
+/// on every step -- are dropped.
 ///
-/// FULLY 3D
-///
-/// Residency is a sphere of chunks around the target, in all three axes. Not
-/// columns: a world of floating islands has as much interesting structure
-/// above and below the player as around them, and a column-based scheme would
-/// either load the entire vertical extent of the world at every horizontal
-/// position (which is what made the old region so expensive) or clip the world
-/// at an arbitrary ceiling and floor.
-///
-/// The radius is a distance in chunks, so residency is a ball rather than a
-/// cube — about half the chunks of the enclosing cube for the same view
-/// distance, and no far corners loaded at twice the range of the axes.
-///
-/// HYSTERESIS
-///
-/// Chunks are loaded inside <see cref="LoadRadius"/> and dropped outside
-/// <see cref="UnloadRadius"/>, which is deliberately larger. With a single
-/// radius a player standing on a boundary loads and frees the same chunk every
-/// time they step back and forth — the most expensive operations in the
-/// system, run repeatedly for no change in what is visible.
-///
-/// NEAREST FIRST
-///
-/// Work is ordered by distance from the target, so the chunk the player is
-/// about to walk into is built before the one at the edge of the view. Under a
-/// per-frame budget that ordering is what decides whether the world appears to
-/// keep up: the same throughput spent in the wrong order shows holes exactly
-/// where the player is looking.
+/// READY means the player can be let go: every chunk within
+/// <see cref="ReadyRadius"/> is resident and a ray cast down from the target
+/// meets real collision. Only the second part cannot be fooled by a spawn with
+/// nothing but sky around it.
 /// </summary>
-public abstract partial class ChunkStreamer : Node
+public partial class ChunkStreamer : Node, ILoadProgress
 {
-    /// <summary>What to follow. Defaults to the scene's player.</summary>
+    /// <summary>The world to stream into. Defaults to a sibling or parent NodeWorld.</summary>
+    [Export] public NodePath WorldPath { get; set; } = "";
+
+    /// <summary>What to follow. Defaults to the node in the "player" group.</summary>
     [Export] public NodePath TargetPath { get; set; } = "";
 
-    /// <summary>Stream chunks at all. Off leaves whatever is already loaded.</summary>
-    [Export] public bool Enabled { get; set; } = true;
+    /// <summary>Chunks kept resident around the target, as a radius in chunks.</summary>
+    [Export(PropertyHint.Range, "1,16,1")] public int LoadRadius { get; set; } = 4;
 
-    /// <summary>
-    /// How far chunks are kept resident, in chunks.
-    ///
-    /// The cost of a view distance grows with its cube, so this is the single
-    /// most expensive dial in the engine — 6 is roughly 900 resident chunks,
-    /// 8 is over 2000.
-    /// </summary>
-    [Export(PropertyHint.Range, "1,24,1")]
-    public int LoadRadius { get; set; } = 3;
+    /// <summary>How far a chunk must be before it is dropped. Kept above <see cref="LoadRadius"/>.</summary>
+    [Export(PropertyHint.Range, "2,24,1")] public int UnloadRadius { get; set; } = 6;
 
-    /// <summary>
-    /// How far a chunk must be before it is dropped, in chunks. Must exceed
-    /// <see cref="LoadRadius"/>, or a chunk on the boundary thrashes.
-    /// </summary>
-    [Export(PropertyHint.Range, "2,32,1")]
-    public int UnloadRadius { get; set; } = 5;
+    /// <summary>Chunks around the target that must be resident before the world is ready.</summary>
+    [Export(PropertyHint.Range, "0,4,1")] public int ReadyRadius { get; set; } = 1;
 
-    /// <summary>
-    /// Chunks whose data is generated per frame.
-    ///
-    /// Generation is the cheaper half — it writes into a byte array and
-    /// touches no scene state — so it can run ahead of meshing.
-    /// </summary>
-    [Export(PropertyHint.Range, "1,64,1")]
-    public int GeneratePerFrame { get; set; } = 8;
+    /// <summary>How far below the target to look for ground before calling the world ready.</summary>
+    [Export(PropertyHint.Range, "4,512,4")] public float GroundProbe { get; set; } = 96f;
 
-    /// <summary>
-    /// Chunks meshed per frame.
-    ///
-    /// Kept low because meshing ends in an ArrayMesh upload and a collision
-    /// shape rebuild, both of which touch the rendering and physics servers on
-    /// the main thread. This is the number that decides frame pacing while
-    /// flying.
-    /// </summary>
-    [Export(PropertyHint.Range, "1,32,1")]
-    public int MeshPerFrame { get; set; } = 2;
+    /// <summary>Worker threads generating chunks.</summary>
+    [Export(PropertyHint.Range, "1,16,1")] public int Workers { get; set; } = 3;
 
-    /// <summary>
-    /// Milliseconds per frame the streamer may spend, across both phases.
-    /// A ceiling on top of the per-phase counts, since chunk costs vary a lot.
-    /// </summary>
-    [Export(PropertyHint.Range, "1,50,0.5")]
-    public float MillisecondsPerFrame { get; set; } = 6f;
+    public IChunkGenerator Generator { get; set; }
 
-    /// <summary>
-    /// Milliseconds per frame spent turning chunk data into meshes.
-    ///
-    /// Separate from <see cref="MillisecondsPerFrame"/>, which bounds the
-    /// generation side. This one is the dial that decides whether streaming is
-    /// felt: a chunk is 64 sections and the whole batch used to be built in
-    /// one call, which measured at a 912ms frame -- roughly one frame per
-    /// second while a chunk landed. Spending a few milliseconds a frame
-    /// instead spreads the same work over about a second of play at full rate.
-    /// </summary>
-    [Export(PropertyHint.Range, "1,50,0.5")]
-    public float MeshMillisecondsPerFrame { get; set; } = 4f;
+    public NodeWorld World { get; set; }
 
-    /// <summary>
-    /// How far the target must move before residency is recomputed, in cells.
-    /// Rescanning every frame is pure waste — the answer only changes when the
-    /// target crosses into a new chunk.
-    /// </summary>
-    [Export(PropertyHint.Range, "1,64,1")]
-    public int RescanAfterCells { get; set; } = NodeChunkStore.ChunkSize / 2;
+    public Node3D Target { get; set; }
 
-    /// <summary>
-    /// Most chunks to keep queued at once, nearest first.
-    ///
-    /// A backlog longer than the workers can clear before the next rescan is
-    /// not throughput, it is latency: the far end of it is terrain the player
-    /// will have left before it is built. Bounding it keeps the queue a
-    /// picture of what is wanted now rather than a record of everything ever
-    /// asked for.
-    /// </summary>
-    [Export(PropertyHint.Range, "8,512,1")]
-    public int QueueLimit { get; set; } = 64;
-
-    protected Node3D Target;
-
-    /// <summary>The world being streamed into. Supplied by the subclass.</summary>
-    protected abstract NodeWorld World { get; }
-
-    /// <summary>
-    /// Fills `cells` with one chunk's materials, and returns how many are
-    /// solid.
-    ///
-    /// The subclass's whole responsibility. It must be a pure function of the
-    /// chunk coordinate and the generator's seed — no dependence on which
-    /// other chunks exist or on the order they are asked for — because chunks
-    /// are generated in whatever order the player's movement demands, and a
-    /// chunk unloaded and revisited must come back identical.
-    /// </summary>
-    protected abstract int GenerateChunk(Vector3I chunk, byte[] cells);
-
-    /// <summary>
-    /// Could this chunk hold anything at all?
-    ///
-    /// Asked during the residency scan, before a chunk is queued. The default
-    /// says yes, which is the safe answer and what a generator with no cheap
-    /// bound should keep.
-    ///
-    /// It exists so view distance can be large without the scan being
-    /// hopeless. Residency is a ball, so its cost grows with the cube of the
-    /// radius -- but for a world with structure the interesting chunks are a
-    /// SURFACE inside that volume, and the rest is empty space that can be
-    /// rejected analytically. On a planet the whole surface is about 2000
-    /// chunks while a radius-100 ball is over four million, so rejecting is
-    /// the difference between a view distance that reaches the horizon and one
-    /// that cannot leave the ground.
-    ///
-    /// Must be conservative: returning false for a chunk that does hold
-    /// something punches a permanent hole in the world.
-    /// </summary>
-    protected virtual bool CouldHoldAnything(Vector3I chunk) => true;
-
-    /// <summary>
-    /// Is this chunk worth having geometry for, given where the player is
-    /// LOOKING?
-    ///
-    /// <see cref="CouldHoldAnything"/> asks whether a chunk holds rock at all;
-    /// this asks whether the player could see the rock it holds. The two are
-    /// separate because they fail differently. Rejecting rock that exists
-    /// punches a permanent hole in the world, so that test must be
-    /// conservative -- but rejecting rock that is merely behind the player
-    /// costs nothing permanent, because turning round rescans and the chunk
-    /// comes back.
-    ///
-    /// The default says yes, which is the old behaviour: a plain ball of
-    /// residency around the target.
-    /// </summary>
-    /// <remarks>
-    /// This gates MESHING, not generation. Chunk data is cheap and is what the
-    /// physics and neighbour lookups read; the mesh is the expensive half. So a
-    /// chunk out of view still generates -- keeping collision honest under the
-    /// player's feet and the frontier's neighbours available -- and simply does
-    /// not get geometry built until it is looked at.
-    /// </remarks>
-    protected virtual bool CouldBeSeen(Vector3I chunk) => true;
-
-    /// <summary>
-    /// Called once at the top of every residency scan, before any chunk is
-    /// tested.
-    ///
-    /// The place to snapshot anything <see cref="CouldBeSeen"/> needs -- the
-    /// camera's position and facing, most obviously -- so the per-chunk test
-    /// stays cheap and, just as importantly, stays CONSISTENT: a scan that
-    /// re-read a moving camera per chunk could accept one chunk and reject its
-    /// neighbour on a different frustum and leave a seam between them.
-    /// </summary>
-    protected virtual void BeforeScan() { }
-
-    /// <summary>
-    /// Has the view turned far enough since the last scan to change what is
-    /// visible?
-    ///
-    /// Only meaningful for a streamer that culls to the view; the default says
-    /// no, so a streamer without a view test rescans on movement exactly as it
-    /// always did.
-    /// </summary>
-    protected virtual bool ViewChanged() => false;
-
-    /// <summary>Chunks whose data exists but whose mesh does not.</summary>
-    private readonly List<Vector3I> _toGenerate = new();
-    private readonly List<Vector3I> _toMesh = new();
-
-    /// <summary>Chunks already queued, so a rescan does not enqueue them
-    /// twice.</summary>
-    private readonly HashSet<Vector3I> _queued = new();
-
-    private readonly List<Vector3I> _scratch = new();
-
-    private Vector3I _lastScanCell;
-    private bool _hasScanned;
-
-    /// <summary>The radius the last scan actually used, for the ready check.</summary>
-    private int _lastLoadRadius;
-
-    /// <summary>
-    /// Chunks around the target that must be meshed before the world counts as
-    /// ready to play in, as a radius in chunks.
-    ///
-    /// A streaming world is never "finished" — there is always more of it just
-    /// out of range — so the old signal of "every chunk meshed" would never
-    /// fire and the loading screen would never lift. Readiness has to mean
-    /// something local instead: enough solid ground around the spawn for the
-    /// player to stand on and not see holes.
-    ///
-    /// 1 is the 3x3x3 of chunks containing and surrounding the spawn, which at
-    /// 32 cells a chunk is a 96-cell box — comfortably more than the player can
-    /// cross before streaming catches up.
-    /// </summary>
-    [Export(PropertyHint.Range, "0,6,1")]
-    public int ReadyRadius { get; set; } = 1;
-
-    /// <summary>True once the chunks around the spawn are built.</summary>
     public bool IsReady { get; private set; }
 
-    /// <summary>
-    /// Raised once, when <see cref="IsReady"/> first becomes true.
-    ///
-    /// Not called "Ready": Godot's Node already has a signal by that name, and
-    /// shadowing it would make which one a subscriber gets depend on the
-    /// static type of the reference.
-    /// </summary>
-    public event System.Action BecameReady;
+    public float Progress { get; private set; }
 
-    /// <summary>
-    /// How much of the initial ready-set is built, 0..1. What a loading screen
-    /// shows: progress toward being able to play, not toward an end of work
-    /// that never comes.
-    /// </summary>
-    public float ReadyProgress { get; private set; }
+    public event Action BecameReady;
 
-    /// <summary>Chunks in the ready-set when it was first measured, so
-    /// progress has a stable denominator to count against.</summary>
-    private int _readyTotal;
+    /// <summary>Chunks queued or being generated.</summary>
+    public int PendingChunks => _queue.Count + _inFlight.Count;
+
+    private readonly List<Vector3I> _queue = new();
+    private readonly HashSet<Vector3I> _inFlight = new();
+    private readonly ConcurrentQueue<Generated> _finished = new();
+    private readonly List<Vector3I> _scratch = new();
+
+    private Vector3I _centre;
+    private bool _scanned;
+    private int _generation;
+
+    private readonly record struct Generated(Vector3I Chunk, byte[] Materials, byte[] Fills, int Generation);
 
     public override void _Ready()
     {
-        Target = !TargetPath.IsEmpty ? GetNodeOrNull<Node3D>(TargetPath) : null;
-        Target ??= FindPlayer(GetTree().CurrentScene ?? GetParent());
+        World ??= !WorldPath.IsEmpty ? GetNodeOrNull<NodeWorld>(WorldPath) : null;
+        World ??= GetParent()?.GetNodeOrNull<NodeWorld>("NodeWorld") ?? GetParentOrNull<NodeWorld>();
     }
 
-    /// <summary>Finds the scene's player by group, falling back to a search
-    /// for anything named Player.</summary>
-    private static Node3D FindPlayer(Node from)
+    /// <summary>Forgets everything resident and queued, for a world that has been rebuilt.</summary>
+    public void Restart()
     {
-        if (from == null)
-            return null;
-
-        foreach (Node node in from.GetTree().GetNodesInGroup("player"))
-        {
-            if (node is Node3D found)
-                return found;
-        }
-
-        return from.GetNodeOrNull<Node3D>("Player");
+        Interlocked.Increment(ref _generation);
+        _queue.Clear();
+        _inFlight.Clear();
+        _finished.Clear();
+        _scanned = false;
+        IsReady = false;
+        Progress = 0f;
+        _progressFloor = 0f;
     }
 
     public override void _Process(double delta)
     {
-        if (!Enabled || World == null)
+        if (World?.Grid == null || Generator == null || !FindTarget())
             return;
 
-        if (Target == null)
+        Vector3I centre = NodeChunkStore.ChunkOf(World.CellAt(Target.GlobalPosition));
+
+        if (!_scanned || centre != _centre)
         {
-            Target = !TargetPath.IsEmpty ? GetNodeOrNull<Node3D>(TargetPath) : null;
-            Target ??= FindPlayer(GetTree().CurrentScene ?? GetParent());
-            if (Target == null)
-                return;
+            _centre = centre;
+            _scanned = true;
+            Rescan();
         }
 
-        Vector3I centre = World.CellAt(Target.GlobalPosition);
-
-        // Rescan when the target has moved somewhere that could change the
-        // answer, OR when generation has run dry while the world is still not
-        // ready.
-        //
-        // THE SECOND CASE IS A DEADLOCK FIX, NOT AN OPTIMISATION.
-        //
-        // Rescan queues the whole residency ball and Trim keeps only the
-        // nearest QueueLimit, un-marking the rest so a later scan can offer
-        // them again. At LoadRadius 3 the ball is 257 chunks against a limit of
-        // 64, so most of it is dropped every scan and only re-offered by the
-        // next one. Movement alone does not provide a next one: a player
-        // standing still at spawn never travels the cells that triggers it.
-        //
-        // What that left was a mesh queue full of chunks whose face neighbours
-        // had been dropped and would never be asked for again. Measured on the
-        // planet, the streamer settled at 85% ready with 29 chunks queued for
-        // meshing, each waiting on neighbours only two or three chunks away
-        // that were in no queue, in no worker, and not marked — unchanged from
-        // four seconds in to twenty.
-        //
-        // Generation running dry is the signal, NOT every queue being empty:
-        // the mesh queue is precisely what stays full in this state, so
-        // waiting for it to drain would wait forever.
-        bool starved = _toGenerate.Count == 0 && _inFlight.Count == 0;
-
-        // TURNING COUNTS AS MOVING, once meshing is gated on where the player
-        // looks. Residency used to depend only on position, so a scan was owed
-        // only when the player travelled; with a view test, standing still and
-        // turning round changes the answer for every chunk behind them and
-        // would otherwise never be re-asked.
-        bool turned = ViewChanged();
-
-        if (!_hasScanned || (starved && !IsReady) || turned
-            || Distance(centre, _lastScanCell) >= RescanAfterCells)
-        {
-            Rescan(ScanCentre(centre));
-            _lastScanCell = centre;
-            _hasScanned = true;
-        }
-
-        Pump();
-    }
-
-    /// <summary>
-    /// The chunk a residency scan should start from.
-    ///
-    /// CLAMPED ONTO THE GRID, because the player is normally ABOVE it. A point
-    /// above the surface has a negative shell -- it is sky, belonging to no
-    /// cell -- and the scan walks outward from its seed by asking the grid for
-    /// neighbouring chunks. From a chunk that is entirely sky every one of
-    /// those six steps fails, so the walk visits exactly one chunk, queues
-    /// nothing, and the world never generates.
-    ///
-    /// Pulling the seed down to the outermost real shell puts it on ground the
-    /// walk can actually spread across. The scan reaches the sky above anyway,
-    /// from the inside out.
-    /// </summary>
-    private Vector3I ScanCentre(Vector3I cell)
-    {
-        if (World.Grid == null)
-            return NodeChunkStore.ChunkOf(cell);
-
-        // ON A POLYHEDRAL GRID THE ADDRESS IS A POSITION, so there is no shell
-        // axis to clamp and clamping Z would move the seed sideways -- onto the
-        // far side of the planet, or through it. The seed is pulled toward the
-        // surface in SPACE instead: the target's own direction, at the radius.
-        if (World.Grid is IPolyhedralGrid)
-        {
-            Vector3 at = Target != null
-                ? Target.GlobalPosition - World.GlobalPosition : Vector3.Zero;
-
-            if (at.LengthSquared() < 0.0001f)
-                return NodeChunkStore.ChunkOf(cell);
-
-            Vector3 surface = at.Normalized()
-                * (World.Grid.SurfaceRadius - World.Grid.NodeSize * 0.5f);
-
-            return NodeChunkStore.ChunkOf(
-                World.Grid.CellAt(World.GlobalPosition + surface));
-        }
-
-        // Shell 0 is the surface: the first shell that can hold anything.
-        if (cell.Z < 0)
-            cell = new Vector3I(cell.X, cell.Y, 0);
-        else if (cell.Z >= World.Grid.ShellCount)
-            cell = new Vector3I(cell.X, cell.Y, World.Grid.ShellCount - 1);
-
-        return NodeChunkStore.ChunkOf(cell);
-    }
-
-    private static int Distance(Vector3I a, Vector3I b)
-    {
-        Vector3I d = a - b;
-        return Mathf.Max(Mathf.Abs(d.X), Mathf.Max(Mathf.Abs(d.Y), Mathf.Abs(d.Z)));
-    }
-
-    /// <summary>
-    /// Recomputes which chunks should be resident, queueing the missing ones
-    /// nearest-first and dropping the departed.
-    /// </summary>
-    private void Rescan(Vector3I centre)
-    {
-        // Once per scan, not once per chunk: whatever the view test needs to
-        // read off the camera is read here, so the thousands of CouldBeSeen
-        // calls below are pure arithmetic.
-        BeforeScan();
-
-        int load = Mathf.Max(1, EffectiveLoadRadius(centre));
-
-        // The unload radius has to clear the generate margin too, or the
-        // margin chunks are dropped the moment they are made and the frontier
-        // never gets the neighbours it is waiting on.
-        int unload = Mathf.Max(load + 2, UnloadRadius);
-        _lastLoadRadius = load;
-
-        // Drop first, so the memory the new chunks need is already free by the
-        // time they are generated rather than after.
-        _scratch.Clear();
-        foreach (var kv in World.Store.Chunks)
-        {
-            if (ChunkDistance(kv.Key, centre) > unload)
-                _scratch.Add(kv.Key);
-        }
-
-        foreach (Vector3I dead in _scratch)
-        {
-            World.UnloadChunk(dead);
-            _queued.Remove(dead);
-        }
-
-        // Anything still queued but now out of range is work nobody wants.
-        //
-        // Dropping these from _queued as well as from the lists is what makes
-        // the streamer recoverable. _queued exists to stop a chunk being
-        // enqueued twice; a chunk removed from a list but left in that set is
-        // marked as pending forever and can never be asked for again. Walking
-        // away from an area and back used to leave a growing set of chunks in
-        // exactly that state — the world emptied to a handful of chunks while
-        // the pending count sat stuck in the hundreds, which is the bug behind
-        // terrain thinning out as you travel.
-
-        DropOutOfRange(_toGenerate, centre, unload);
-        DropOutOfRange(_toMesh, centre, unload);
-
-        // One chunk PAST the load radius is generated but never meshed.
-        //
-        // Meshing a chunk reads one cell into each neighbour to cull the faces
-        // between them, so a chunk on the frontier cannot be meshed until its
-        // neighbours' data exists. Without this margin the outermost shell's
-        // neighbours are never asked for, those chunks wait forever, and the
-        // ready check that counts them never completes.
-        //
-        // The margin is data only: generating a chunk fills a byte array,
-        // which is far cheaper than meshing one, and these are never meshed
-        // unless the player moves far enough to bring them inside the radius.
-        int outer = load + 1;
-
-        // ARC CHUNKS ARE WALKED, NOT ENUMERATED.
-        //
-        // A chunk index on the cubed sphere is (u, v, shell) with the face
-        // folded into u, which is not a metric space: chunks touching across a
-        // face edge are 39 apart by index. Sweeping a ball of indices
-        // therefore never leaves the face the player is on -- measured, all
-        // 257 resident chunks sat on face 0 of 6, so the world simply ended at
-        // every seam.
-        //
-        // Flooding outward through real neighbours follows the surface instead,
-        // crossing seams because the grid knows what is over an edge. On a flat
-        // world the sweep below is kept, since a ball of indices IS the right
-        // answer there and enumerating beats walking.
-        if (World.Grid != null)
-        {
-            FloodResidency(centre, load, outer);
-            Sort(centre);
-            return;
-        }
-
-        // A generator that knows its world is a thin structure inside a large
-        // volume can narrow the sweep to a band of distances, so the scan cost
-        // follows the structure rather than the cube of the radius.
-        ChunkBand(centre, outer, out int bandLo, out int bandHi);
-
-        for (int x = -outer; x <= outer; x++)
-        {
-            // The ball bounds y for this slice, so rows outside it are never
-            // entered rather than entered and rejected.
-            int yReach = IntSqrt(outer * outer - x * x);
-
-            for (int y = -yReach; y <= yReach; y++)
-            {
-                // And z is bounded twice over: by the ball, and by the band of
-                // distances the generator says its world occupies.
-                //
-                // SOLVING for z rather than scanning it is what lets the view
-                // distance reach a planet from orbit. The ball alone is cubic
-                // in the radius -- at 96 that is seven million cells to walk
-                // every rescan, at 256 it is 135 million -- while the chunks
-                // that survive are a shell whose area grows only as the square.
-                // Iterating the answer instead of filtering for it keeps the
-                // scan proportional to what it finds.
-                int ballZ = IntSqrt(outer * outer - x * x - y * y);
-
-                int zFrom = -ballZ;
-                int zTo = ballZ;
-
-                if (bandLo <= bandHi)
-                {
-                    // Chunk distance is measured from the WORLD origin, so the
-                    // slice's own offset has to be carried in.
-                    int wx = centre.X + x;
-                    int wy = centre.Y + y;
-                    int flat = wx * wx + wy * wy;
-
-                    // |wz| must satisfy bandLo <= flat + wz^2 <= bandHi.
-                    if (flat > bandHi)
-                        continue;
-
-                    int zOuter = IntSqrt(bandHi - flat);
-                    int zInner = flat >= bandLo ? 0 : IntSqrt(bandLo - flat - 1) + 1;
-
-                    // Two arcs where the band is an annulus, one where the
-                    // slice passes through it. Emitting both halves keeps the
-                    // loop a single pass over what is wanted.
-                    EmitRow(centre, x, y, zFrom, zTo, -zOuter - centre.Z, -zInner - centre.Z, load, outer);
-                    EmitRow(centre, x, y, zFrom, zTo, zInner - centre.Z, zOuter - centre.Z, load, outer);
-                    continue;
-                }
-
-                EmitRow(centre, x, y, zFrom, zTo, zFrom, zTo, load, outer);
-            }
-        }
-
-        Sort(centre);
-    }
-
-    /// <summary>
-    /// Queues the chunks around the target by walking outward through
-    /// neighbours, for a world whose chunks are arcs.
-    ///
-    /// Breadth-first from the player's own chunk, so distance is travelled
-    /// rather than computed, and a face edge is just another step. The visited
-    /// set bounds the work; the queue is trimmed afterwards exactly as the
-    /// enumerated path's is.
-    /// </summary>
-    private void FloodResidency(Vector3I centre, int load, int outer)
-    {
-        _floodSeen.Clear();
-        _floodQueue.Clear();
-
-        _floodSeen.Add(centre);
-        _floodQueue.Enqueue(centre);
-
-        // Bounded so a pathological grid cannot spin: the ball of chunks a
-        // radius `outer` reaches, with room to spare for the seams where a
-        // face edge fans out.
-        int budget = (2 * outer + 1) * (2 * outer + 1) * (2 * outer + 1) * 2 + 64;
-
-        while (_floodQueue.Count > 0 && _floodSeen.Count < budget)
-        {
-            Vector3I chunk = _floodQueue.Dequeue();
-
-            int distance = ChunkDistance(chunk, centre);
-            if (distance > outer)
-                continue;
-
-            Offer(chunk, distance <= load);
-
-            // Step to the six neighbouring chunks THROUGH THE GRID, so a step
-            // off a face lands on the next one.
-            for (int face = 0; face < 6; face++)
-            {
-                Vector3I dir = NodeFace.Offsets[face];
-                if (!NeighbourChunk(chunk, dir, out Vector3I next))
-                    continue;
-
-                if (_floodSeen.Add(next))
-                    _floodQueue.Enqueue(next);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Re-meshes the already-built chunks around one that has just arrived.
-    ///
-    /// Their boundary faces were culled while this chunk was still unknown, and
-    /// unknown is taken as covered — so those faces are hidden and have to be
-    /// rebuilt now that there is a real answer to cull against. Chunks with no
-    /// mesh are skipped: they have nothing stale to fix, and queueing them
-    /// would mesh the margin the streamer deliberately leaves as data only.
-    /// </summary>
-    private void RemeshNeighbours(Vector3I chunk)
-    {
-        if (World.Grid == null)
-            return;
-
-        for (int face = 0; face < NodeFace.Offsets.Length; face++)
-        {
-            if (!NeighbourChunk(chunk, NodeFace.Offsets[face], out Vector3I next))
-                continue;
-
-            if (World.HasChunkMesh(next))
-                World.QueueChunkMesh(next);
-        }
-    }
-
-    /// <summary>
-    /// The chunk next to this one in a direction, found through the grid so
-    /// face edges are crossed correctly.
-    /// </summary>
-    private bool NeighbourChunk(Vector3I chunk, Vector3I direction, out Vector3I result)
-    {
-        // Asked of the grid, which knows how its own faces fold. A cubed sphere
-        // steps a whole chunk at once; an icosphere walks cell by cell, because
-        // its lattice has no direction in which a chunk-sized jump is even
-        // defined.
-        if (!World.Grid.NeighbourChunk(chunk, direction, out result))
-        {
-            result = default;
-            return false;
-        }
-
-        return result != chunk;
-    }
-
-    /// <summary>
-    /// Queues one chunk for generation, or for meshing if its data is already
-    /// resident. Shared by both residency scans.
-    /// </summary>
-    private void Offer(Vector3I chunk, bool inside)
-    {
-        if (!CouldHoldAnything(chunk))
-        {
-            if (!World.IsChunkLoaded(chunk) || !World.HasChunkMesh(chunk))
-            {
-                World.Store.SetUniform(chunk, NodeChunkStore.Air);
-                World.MarkChunkMeshed(chunk);
-            }
-
-            _queued.Remove(chunk);
-            return;
-        }
-
-        if (World.IsChunkLoaded(chunk))
-        {
-            // Meshing is gated on visibility as well as distance: the data is
-            // already here, and geometry for rock behind the player buys
-            // nothing until they turn round.
-            if (inside && CouldBeSeen(chunk) && !World.HasChunkMesh(chunk) && _queued.Add(chunk))
-                _toMesh.Add(chunk);
-
-            return;
-        }
-
-        if (!_queued.Add(chunk))
-            return;
-
-        _toGenerate.Add(chunk);
-    }
-
-    private readonly HashSet<Vector3I> _floodSeen = new();
-    private readonly Queue<Vector3I> _floodQueue = new();
-    private readonly HashSet<Vector3I> _readySeen = new();
-    private readonly Queue<Vector3I> _readyQueue = new();
-
-    /// <summary>
-    /// Queues one row of chunks, clipped to both the ball and the band.
-    /// </summary>
-    private void EmitRow(Vector3I centre, int x, int y,
-        int ballFrom, int ballTo, int bandFrom, int bandTo, int load, int outer)
-    {
-        int from = Mathf.Max(ballFrom, bandFrom);
-        int to = Mathf.Min(ballTo, bandTo);
-
-        for (int z = from; z <= to; z++)
-        {
-            var chunk = new Vector3I(centre.X + x, centre.Y + y, centre.Z + z);
-            {
-                {
-                    // Nothing here to find, and the generator knows it without
-                    // sampling. Recording it keeps the queue full of chunks
-                    // that can actually contribute, which is what lets the
-                    // radius grow far enough to see a planet from orbit.
-                    //
-                    // RECORDED AS EMPTY, not merely skipped. A skipped chunk is
-                    // invisible to everything downstream: the readiness check
-                    // counts it and never sees it arrive, so a spawn with sky
-                    // overhead stalled at 67% forever. Storing the uniform air
-                    // byte is what the generator would have produced anyway,
-                    // for none of the cost.
-                    if (!CouldHoldAnything(chunk))
-                    {
-                        if (!World.IsChunkLoaded(chunk) || !World.HasChunkMesh(chunk))
-                        {
-                            World.Store.SetUniform(chunk, NodeChunkStore.Air);
-                            World.MarkChunkMeshed(chunk);
-                        }
-
-                        _queued.Remove(chunk);
-                        continue;
-                    }
-
-                    if (World.IsChunkLoaded(chunk))
-                    {
-                        // Already generated. It may still be an unmeshed
-                        // margin chunk that the player has since moved toward,
-                        // in which case it now needs geometry.
-                        bool inside = x * x + y * y + z * z <= load * load;
-                        if (inside && CouldBeSeen(chunk)
-                            && !World.HasChunkMesh(chunk) && _queued.Add(chunk))
-                            _toMesh.Add(chunk);
-
-                        continue;
-                    }
-
-                    if (!_queued.Add(chunk))
-                        continue;
-
-                    _toGenerate.Add(chunk);
-                }
-            }
-        }
-    }
-
-    /// <summary>Integer floor of the square root, for non-negative input.</summary>
-    private static int IntSqrt(int v) => v <= 0 ? 0 : (int)Mathf.Sqrt(v);
-
-    /// <summary>Orders the queues nearest-first and trims them.</summary>
-    private void Sort(Vector3I centre)
-    {
-        // Nearest first, so the chunk the player is walking into is built
-        // before the one at the edge of view.
-        _toGenerate.Sort((a, b) =>
-            SquareDistance(a, centre).CompareTo(SquareDistance(b, centre)));
-        _toMesh.Sort((a, b) =>
-            SquareDistance(a, centre).CompareTo(SquareDistance(b, centre)));
-
-        // Keep only the nearest QueueLimit. The queue used to hold every chunk
-        // of the ball at once — hundreds of them, most of which the player had
-        // moved away from long before a worker reached them, so the streamer
-        // spent its time generating terrain that was stale on arrival while
-        // the ground underfoot waited behind it.
-        //
-        // Nothing is lost by forgetting the far ones: the rescan re-derives
-        // the whole ball from the player's position every time, so a chunk
-        // dropped here is simply re-offered when it matters. What the limit
-        // buys is that the work in flight is always work that is still wanted.
-        Trim(_toGenerate, QueueLimit);
-        Trim(_toMesh, QueueLimit);
-    }
-
-    /// <summary>
-    /// Keeps the first `limit` entries of an already-sorted queue and un-marks
-    /// the rest so a later rescan can offer them again.
-    /// </summary>
-    private void Trim(List<Vector3I> queue, int limit)
-    {
-        if (limit <= 0 || queue.Count <= limit)
-            return;
-
-        for (int i = limit; i < queue.Count; i++)
-        {
-            Vector3I chunk = queue[i];
-            if (!_inFlight.Contains(chunk))
-                _queued.Remove(chunk);
-        }
-
-        queue.RemoveRange(limit, queue.Count - limit);
-    }
-
-    /// <summary>
-    /// Removes chunks beyond `limit` from a queue, and un-marks them so they
-    /// can be requested again if the player returns.
-    /// </summary>
-    private void DropOutOfRange(List<Vector3I> queue, Vector3I centre, int limit)
-    {
-        for (int i = queue.Count - 1; i >= 0; i--)
-        {
-            Vector3I chunk = queue[i];
-            if (ChunkDistance(chunk, centre) <= limit)
-                continue;
-
-            queue.RemoveAt(i);
-
-            // Only un-mark chunks nothing else is still tracking: one being
-            // generated right now is legitimately queued until it lands.
-            if (!_inFlight.Contains(chunk))
-                _queued.Remove(chunk);
-        }
-    }
-
-    /// <summary>
-    /// The load radius to use right now, which a generator may widen.
-    ///
-    /// A fixed radius is a fixed number of chunks in every direction, which is
-    /// the right rule standing on the ground and the wrong one in the air. Fly
-    /// away from a planet and the ground leaves the ball entirely: measured,
-    /// at 3500 nodes up the nearest rock was 97 chunks below a radius of 3, and
-    /// every one of the 250-odd resident chunks held nothing but sky.
-    /// </summary>
-    protected virtual int EffectiveLoadRadius(Vector3I centre) => LoadRadius;
-
-    /// <summary>
-    /// The band of squared chunk-distances-from-the-origin that can hold
-    /// anything, or an empty range (lo > hi) for a world with no such bound.
-    ///
-    /// This is what makes a long view distance affordable for a planet. The
-    /// residency ball grows as the cube of its radius -- a radius of 80 is over
-    /// four million chunks to even LOOK at -- but a planet's rock lives in a
-    /// shell, so the scan can skip every chunk whose distance from the planet's
-    /// centre puts it inside the core or out in space.
-    /// </summary>
-    protected virtual void ChunkBand(Vector3I centre, int radius, out int lo, out int hi)
-    {
-        lo = 1;
-        hi = 0;
-    }
-
-    /// <summary>
-    /// How far apart two chunks are, in chunks.
-    ///
-    /// MEASURED IN THE WORLD, not in chunk indices, whenever the world has a
-    /// grid. On a cubed sphere the chunk coordinate is (u, v, shell) with the
-    /// face folded into u, which is not a metric space: two chunks touching
-    /// across a face edge are 39 chunks apart by index. Residency computed on
-    /// that never crosses a seam, so the world stopped at the edge of one face
-    /// -- measured, 257 resident chunks all on face 0 of 6.
-    ///
-    /// Comparing the chunks' actual positions fixes it, and costs one distance
-    /// per candidate rather than a subtraction. That is the price of chunks
-    /// being arcs rather than boxes.
-    /// </summary>
-    private int ChunkDistance(Vector3I chunk, Vector3I centre)
-    {
-        if (World?.Grid == null)
-        {
-            Vector3I d = chunk - centre;
-            return Mathf.RoundToInt(Mathf.Sqrt(d.X * d.X + d.Y * d.Y + d.Z * d.Z));
-        }
-
-        float world = ChunkCentre(chunk).DistanceTo(ChunkCentre(centre));
-        return Mathf.RoundToInt(world / NodeChunkStore.ChunkSize);
-    }
-
-    private int SquareDistance(Vector3I chunk, Vector3I centre)
-    {
-        if (World?.Grid == null)
-        {
-            Vector3I d = chunk - centre;
-            return d.X * d.X + d.Y * d.Y + d.Z * d.Z;
-        }
-
-        float world = ChunkCentre(chunk).DistanceSquaredTo(ChunkCentre(centre));
-        float scale = NodeChunkStore.ChunkSize * NodeChunkStore.ChunkSize;
-        return Mathf.RoundToInt(world / scale);
-    }
-
-    /// <summary>The world position a chunk sits at, for distance tests.</summary>
-    private Vector3 ChunkCentre(Vector3I chunk)
-    {
-        Vector3I origin = NodeChunkStore.OriginOf(chunk);
-        int half = NodeChunkStore.ChunkSize / 2;
-
-        return World.Grid.CentreOf(new Vector3I(
-            origin.X + half, origin.Y + half, origin.Z + half));
-    }
-
-    /// <summary>
-    /// Worker threads generating chunk data. 0 picks a share of the machine
-    /// (see <see cref="ThreadBudget"/>).
-    ///
-    /// This used to default to every core but one, on the reasoning that
-    /// generation is the bottleneck so it should have the machine. That is
-    /// true and still the wrong thing to do: a game is a guest on the player's
-    /// desktop, and saturating 23 of 24 hardware threads with uninterruptible
-    /// noise evaluation starves everything else they are running — video
-    /// stutters, the compositor drops frames, fans spin up. A background
-    /// loader has no business being the heaviest process on the machine.
-    /// </summary>
-    [Export(PropertyHint.Range, "0,32,1")]
-    public int WorkerThreads { get; set; }
-
-    /// <summary>
-    /// Share of the machine's threads to use when <see cref="WorkerThreads"/>
-    /// is 0.
-    ///
-    /// A quarter, capped: enough to keep several chunks in flight, few enough
-    /// that the rest of the machine stays responsive. The cap matters more
-    /// than the fraction on a big machine — a 24-thread desktop does not want
-    /// six background threads any more than it wants twenty-three.
-    /// </summary>
-    [Export(PropertyHint.Range, "0.1,1,0.05")]
-    public float ThreadBudget { get; set; } = 0.25f;
-
-    /// <summary>Most workers to run whatever the machine's size.</summary>
-    [Export(PropertyHint.Range, "1,16,1")]
-    public int MaxWorkers { get; set; } = 4;
-
-    /// <summary>How many worker threads to actually run.</summary>
-    private int ThreadCount()
-    {
-        if (WorkerThreads > 0)
-            return WorkerThreads;
-
-        int share = Mathf.FloorToInt(System.Environment.ProcessorCount * ThreadBudget);
-        return Mathf.Clamp(share, 1, Mathf.Max(1, MaxWorkers));
-    }
-
-    /// <summary>One chunk generated and waiting to be installed.</summary>
-    private readonly struct Generated
-    {
-        public readonly Vector3I Chunk;
-        public readonly byte[] Cells;
-        public readonly int Solid;
-
-        public Generated(Vector3I chunk, byte[] cells, int solid)
-        {
-            Chunk = chunk;
-            Cells = cells;
-            Solid = solid;
-        }
-    }
-
-    /// <summary>Chunks handed to workers, so the same one is not dispatched
-    /// twice while it is in flight.</summary>
-    private readonly HashSet<Vector3I> _inFlight = new();
-
-    /// <summary>Finished chunks waiting for the main thread to install them.
-    /// Guarded by its own lock, which is the only state the two sides
-    /// share.</summary>
-    private readonly Queue<Generated> _finished = new();
-    private readonly object _finishedLock = new();
-
-    /// <summary>How many workers are running right now.</summary>
-    private int _running;
-
-
-    /// <summary>
-    /// Bumped whenever the world this streamer describes changes, so results
-    /// from work started against the old one are discarded rather than
-    /// installed into the new.
-    /// </summary>
-    private volatile int _generation;
-
-    /// <summary>
-    /// Starts workers on the nearest queued chunks, up to the thread budget.
-    ///
-    /// Dispatch is from the FRONT of the queue, which the rescan sorted
-    /// nearest-first, so the chunks the player is walking into are the ones
-    /// occupying the workers.
-    /// </summary>
-    private void DispatchGeneration()
-    {
-        int threads = ThreadCount();
-
-        while (_running < threads && _toGenerate.Count > 0)
-        {
-            Vector3I chunk = _toGenerate[0];
-            _toGenerate.RemoveAt(0);
-
-            if (!_inFlight.Add(chunk))
-                continue;
-
-            _running++;
-            int generation = _generation;
-
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                // Below normal priority, so the operating system hands the CPU
-                // to anything the player is actually interacting with first.
-                // Chunk generation is background work by nature — it has a
-                // deadline measured in seconds, not frames — and dropping the
-                // priority costs it almost nothing on an idle machine while
-                // making it yield promptly on a busy one.
-                System.Threading.Thread current = System.Threading.Thread.CurrentThread;
-                System.Threading.ThreadPriority was = current.Priority;
-                try
-                {
-                    current.Priority = System.Threading.ThreadPriority.BelowNormal;
-                }
-                catch (System.Exception)
-                {
-                    // Priority is advisory and some platforms refuse it.
-                }
-
-                // A buffer per job rather than one shared scratch: workers run
-                // concurrently, and the array is handed straight to the store
-                // on completion, so it could not be reused anyway.
-                var cells = new byte[NodeChunkStore.ChunkVolume];
-                int solid;
-
-                try
-                {
-                    solid = GenerateChunk(chunk, cells);
-                }
-                catch (System.Exception e)
-                {
-                    GD.PushError($"ChunkStreamer: generating {chunk} failed — {e}");
-                    solid = 0;
-                }
-
-                lock (_finishedLock)
-                {
-                    // Results for a superseded world are dropped: the field
-                    // they were generated against no longer describes the
-                    // world they would land in.
-                    if (generation == _generation)
-                        _finished.Enqueue(new Generated(chunk, cells, solid));
-
-                    _running--;
-                }
-
-                // Thread-pool threads are reused, so the priority has to go
-                // back or it would leak onto whatever runs next.
-                try
-                {
-                    current.Priority = was;
-                }
-                catch (System.Exception)
-                {
-                }
-            });
-        }
-    }
-
-    /// <summary>
-    /// Installs whatever the workers finished, and queues the solid ones for
-    /// meshing.
-    ///
-    /// All of it, every frame: installing is a dictionary write and an array
-    /// handover, cheap enough that throttling it would only let the queue grow
-    /// while the workers sat idle behind it.
-    /// </summary>
-    private void CollectGenerated(Vector3I meshCentre)
-    {
-        while (true)
-        {
-            Generated done;
-            lock (_finishedLock)
-            {
-                if (_finished.Count == 0)
-                    return;
-                done = _finished.Dequeue();
-            }
-
-            _inFlight.Remove(done.Chunk);
-
-            // Unloaded while it was being generated — the player moved away.
-            // The result is stale; dropping the mark lets it be asked for
-            // again if they come back.
-            if (!_queued.Contains(done.Chunk))
-                continue;
-
-            if (done.Solid == 0)
-            {
-                // Empty sky. Recorded as a uniform air chunk rather than
-                // skipped, so residency knows it has been considered and the
-                // rescan does not queue it again every time.
-                World.Store.SetUniform(done.Chunk, NodeChunkStore.Air);
-                _queued.Remove(done.Chunk);
-                continue;
-            }
-
-            World.Store.Install(done.Chunk, done.Cells, done.Solid);
-
-            // THE NEIGHBOURS' FACES ARE NOW STALE.
-            //
-            // A face is culled against what was resident when it was built, and
-            // an absent neighbour counts as covered rather than as air (see
-            // NodeWorld.NeighbourSolid). That is the safe way round — it never
-            // opens a hole — but it leaves the boundary faces of the chunks
-            // already meshed around this one hidden against a neighbour that
-            // has just arrived. Re-meshing them here is what turns the
-            // conservative guess back into the right answer.
-            //
-            // Only chunks already meshed are touched, so this costs nothing on
-            // the frontier, where the neighbours are margin chunks with no
-            // geometry of their own.
-            RemeshNeighbours(done.Chunk);
-
-            // Margin chunks exist so their neighbours can be meshed; they are
-            // not meshed themselves until the player comes close enough to
-            // bring them inside the load radius, which the next rescan does.
-            if (SquareDistance(done.Chunk, meshCentre) <= LoadRadius * LoadRadius)
-                _toMesh.Add(done.Chunk);
-            else
-                _queued.Remove(done.Chunk);
-        }
-    }
-
-    /// <summary>
-    /// Does one frame's worth of generating and meshing, under both the
-    /// per-phase counts and the overall time budget.
-    /// </summary>
-    private void Pump()
-    {
-        Vector3I meshCentre = _hasScanned
-            ? NodeChunkStore.ChunkOf(_lastScanCell)
-            : Vector3I.Zero;
-
-        ulong deadline = Time.GetTicksMsec()
-            + (ulong)Mathf.Max(1f, MillisecondsPerFrame);
-
-        // The world no longer meshes its own edits: this pump does, under the
-        // same budget as everything else here. Said every frame, because the
-        // credit lapses -- a world whose pump goes away must go back to
-        // meshing its own edits rather than queueing them for nobody.
-        World.DriveMeshingExternally();
-
-        // Hand out generation work and take back what finished. Generating a
-        // chunk is by far the most expensive thing the streamer does —
-        // hundreds of milliseconds of density-field evaluation — and none of
-        // it touches the scene, so it belongs on a worker rather than in the
-        // frame. What remains on the main thread is only installing the
-        // finished arrays, which is a dictionary write.
-        DispatchGeneration();
-        CollectGenerated(meshCentre);
-
-        // AN EDIT IS MESHED AHEAD OF THE STREAMING BACKLOG.
-        //
-        // The player is looking at the node they just mined, and the queue in
-        // front of it may be a newly streamed chunk's worth of sections -- tens
-        // of frames at this budget. Serving edits first is what makes a dig
-        // feel immediate while still costing only a budgeted slice of a frame.
-        //
-        // AFTER generation is dispatched, though, and without returning: a
-        // player who mines while walking would otherwise stall chunk
-        // generation for as long as they kept digging, and the world would
-        // stop arriving around them.
-        if (World.EditPending)
-        {
-            World.FlushEdits(MeshMillisecondsPerFrame);
-
-            if (!IsReady)
-                CheckReady();
-
-            return;
-        }
-
-        // FINISH WHAT IS ALREADY QUEUED BEFORE TAKING MORE.
-        //
-        // A chunk queues 64 sections and they are meshed under a time budget
-        // across however many frames that takes, so the backlog has to be
-        // drained before another chunk is added to it. Otherwise the queue
-        // grows faster than it is served and the hitch simply arrives later.
-        if (World.HasQueuedMeshes)
-        {
-            World.FlushQueuedMeshes(MeshMillisecondsPerFrame);
-            if (!IsReady)
-                CheckReady();
-            return;
-        }
-
-        int meshed = 0;
-        while (_toMesh.Count > 0 && meshed < MeshPerFrame)
-        {
-            Vector3I chunk = _toMesh[0];
-            _toMesh.RemoveAt(0);
-            _queued.Remove(chunk);
-
-            // A chunk cannot be meshed until its neighbours' data exists: face
-            // culling reads one cell past the boundary, and a missing
-            // neighbour reads as air, which would draw an interior wall that
-            // the neighbour's arrival never removes. Chunks whose neighbours
-            // are still pending go back in the queue.
-            if (!NeighboursReady(chunk))
-            {
-                _toMesh.Add(chunk);
-                _queued.Add(chunk);
-
-                // Everything left may be waiting on the same missing
-                // neighbours; generating more is the way forward, not spinning
-                // here.
-                break;
-            }
-
-            MeshOne(chunk);
-            meshed++;
-            break;
-        }
-
-        // Mesh what was just queued, under the frame budget. Whatever does not
-        // fit stays dirty and is picked up next frame by the branch above.
-        if (World.HasQueuedMeshes)
-            World.FlushQueuedMeshes(MeshMillisecondsPerFrame);
+        Collect();
+        Dispatch();
 
         if (!IsReady)
             CheckReady();
     }
 
-    /// <summary>
-    /// Reports whether the chunks around the target have been built, and how
-    /// far along that is.
-    ///
-    /// Counts only chunks that hold something: a spawn surrounded by open sky
-    /// would otherwise never be ready, because an empty chunk is stored as a
-    /// uniform byte and never enters the mesh queue at all.
-    /// </summary>
-    private void CheckReady()
+    private bool FindTarget()
     {
-        if (Target == null || World == null)
-            return;
+        if (Target != null && IsInstanceValid(Target))
+            return true;
 
-        // MEASURED AT THE GROUND, NOT AT THE TARGET.
-        //
-        // The player spawns ABOVE the surface, and a point above the surface
-        // has a negative shell -- it is sky, which belongs to no cell. Asking
-        // whether the chunks around it are built is asking about open space,
-        // and open space is trivially complete: the walk found one empty chunk,
-        // counted it as both wanted and had, and declared the world ready on
-        // the first frame with nothing generated anywhere.
-        //
-        // The player then got physics, fell under radial gravity through a
-        // planet that did not yet exist, and came to rest at the core. Measured
-        // radius 123 -> 24 while IsReady had been true since frame 1.
-        //
-        // So readiness is judged where the player will LAND: the outermost
-        // solid shell under them. Sky above is not the question.
-        Vector3I centre = ScanCentre(World.CellAt(Target.GlobalPosition));
-        int radius = Mathf.Max(0, ReadyRadius);
+        Target = !TargetPath.IsEmpty ? GetNodeOrNull<Node3D>(TargetPath) : null;
 
-        int wanted = 0;
-        int have = 0;
-
-        // WALKED, not enumerated, for the same reason residency is: a chunk
-        // offset is packed-index arithmetic, and on the sphere most of those
-        // offsets name chunks that do not exist. Counting them left readiness
-        // pinned at 33% -- one layer of the 3x3x3 was real and the other two
-        // never arrived.
-        if (World.Grid != null)
+        if (Target == null)
         {
-            _readySeen.Clear();
-            _readyQueue.Clear();
-            _readySeen.Add(centre);
-            _readyQueue.Enqueue(centre);
-
-            while (_readyQueue.Count > 0)
+            foreach (Node node in GetTree().GetNodesInGroup(Groups.Player))
             {
-                Vector3I chunk = _readyQueue.Dequeue();
-                if (ChunkDistance(chunk, centre) > radius)
-                    continue;
-
-                wanted++;
-
-                // DATA resident and not still queued. Whether the geometry
-                // exists is asked separately, of the ground the player will
-                // actually land on -- requiring a mesh for every chunk in the
-                // radius is too strong, because a chunk of pure sky never gets
-                // one and the count would never complete.
-                if (World.IsChunkLoaded(chunk) && !_queued.Contains(chunk))
-                    have++;
-
-                for (int face = 0; face < 6; face++)
+                if (node is Node3D found)
                 {
-                    if (!NeighbourChunk(chunk, NodeFace.Offsets[face], out Vector3I next))
-                        continue;
-
-                    if (_readySeen.Add(next))
-                        _readyQueue.Enqueue(next);
+                    Target = found;
+                    break;
                 }
             }
         }
-        else
+
+        return Target != null;
+    }
+
+    // ------------------------------------------------------------ residency
+
+    private void Rescan()
+    {
+        int unload = Math.Max(UnloadRadius, LoadRadius + 1);
+
+        _scratch.Clear();
+        foreach (var pair in World.Store.Chunks)
         {
-            for (int x = -radius; x <= radius; x++)
-                for (int y = -radius; y <= radius; y++)
-                    for (int z = -radius; z <= radius; z++)
-                    {
-                        var chunk = new Vector3I(centre.X + x, centre.Y + y, centre.Z + z);
-                        wanted++;
-                        if (World.IsChunkLoaded(chunk) && !_queued.Contains(chunk))
-                            have++;
-                    }
+            if (DistanceSquared(pair.Key, _centre) > unload * unload)
+                _scratch.Add(pair.Key);
         }
 
-        if (_readyTotal == 0)
-            _readyTotal = wanted;
+        foreach (Vector3I chunk in _scratch)
+            World.UnloadChunk(chunk);
 
-        // WHAT THE BAR ACTUALLY SHOWS.
-        //
-        // Counting only the chunks inside the ready radius makes a useless
-        // bar: at the default radius that is a handful of chunks which all
-        // arrive within a frame or two of each other, so the figure sat at 0%
-        // for the whole of a four-and-a-half second load and then jumped to
-        // done. Measured on the organic planet: 0.0% at 0.3s, 0.0% at 2.1s,
-        // 0.0% at 4.1s, ready at 4.66s.
-        //
-        // What the player is waiting on is the geometry, and the residency
-        // count cannot express it: the walk covers only the ready radius,
-        // which at its default is a SINGLE chunk, so `have` is 0 until the one
-        // chunk lands and then 1. Measured, that is exactly what the bar did.
-        float residency = _readyTotal == 0
-            ? 1f : Mathf.Clamp(have / (float)_readyTotal, 0f, 1f);
+        _queue.Clear();
 
-        // So the bar is the meshing, and residency only holds it back from
-        // reaching the end before the ground the player lands on is there.
-        float built = MeshProgress();
+        int r = LoadRadius;
 
-        ReadyProgress = residency >= 1f
-            ? built : Mathf.Min(built, 0.99f);
-
-        if (have < wanted)
-            return;
-
-        // AND THERE MUST ACTUALLY BE GROUND.
-        //
-        // The count above says the chunks around the target are built; it does
-        // not say any of them hold rock. A target in the sky is surrounded by
-        // empty chunks, which are "built" the moment they are recorded as air
-        // -- so the count alone declared the world ready on frame one, the
-        // player was handed physics over a planet that did not exist yet, and
-        // fell through it to the core.
-        //
-        // Asking for a solid cell under their feet is the part that cannot be
-        // satisfied by empty space.
-        if (!StandableGroundExists())
+        for (int x = -r; x <= r; x++)
+        for (int y = -r; y <= r; y++)
+        for (int z = -r; z <= r; z++)
         {
-            ReadyProgress = Mathf.Min(ReadyProgress, 0.99f);
-            return;
+            if (x * x + y * y + z * z > r * r)
+                continue;
+
+            var chunk = new Vector3I(_centre.X + x, _centre.Y + y, _centre.Z + z);
+
+            if (!World.IsChunkLoaded(chunk) && !_inFlight.Contains(chunk))
+                _queue.Add(chunk);
         }
+
+        // Nearest first, so the ground the player is about to stand on is built
+        // before the scenery at the edge of view. Sorted descending so the
+        // nearest is taken from the end of the list.
+        _queue.Sort((a, b) => DistanceSquared(b, _centre).CompareTo(DistanceSquared(a, _centre)));
+    }
+
+    private static int DistanceSquared(Vector3I a, Vector3I b)
+    {
+        Vector3I d = a - b;
+        return d.X * d.X + d.Y * d.Y + d.Z * d.Z;
+    }
+
+    // ----------------------------------------------------------- generation
+
+    private void Dispatch()
+    {
+        while (_inFlight.Count < Workers && _queue.Count > 0)
+        {
+            Vector3I chunk = _queue[^1];
+            _queue.RemoveAt(_queue.Count - 1);
+
+            if (!_inFlight.Add(chunk))
+                continue;
+
+            IChunkGenerator generator = Generator;
+            int generation = Volatile.Read(ref _generation);
+
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var materials = new byte[NodeChunkStore.ChunkVolume];
+                var fills = new byte[NodeChunkStore.ChunkVolume];
+
+                try
+                {
+                    generator.Generate(chunk, materials, fills);
+                }
+                catch (Exception error)
+                {
+                    GD.PushError($"ChunkStreamer: generating {chunk} failed - {error}");
+                    Array.Fill(materials, NodeChunkStore.Air);
+                    Array.Clear(fills);
+                }
+
+                _finished.Enqueue(new Generated(chunk, materials, fills, generation));
+            });
+        }
+    }
+
+    /// <summary>Installs whatever the workers finished that is still wanted.</summary>
+    private void Collect()
+    {
+        int unload = Math.Max(UnloadRadius, LoadRadius + 1);
+
+        while (_finished.TryDequeue(out Generated done))
+        {
+            if (done.Generation != Volatile.Read(ref _generation))
+                continue;
+
+            _inFlight.Remove(done.Chunk);
+
+            // The player moved on while it was being made.
+            if (DistanceSquared(done.Chunk, _centre) > unload * unload)
+                continue;
+
+            World.InstallChunk(done.Chunk, done.Materials, done.Fills);
+        }
+    }
+
+    // ------------------------------------------------------------ readiness
+
+    private float _progressFloor;
+
+    private void CheckReady()
+    {
+        int wanted = 0;
+        int have = 0;
+        int r = ReadyRadius;
+
+        for (int x = -r; x <= r; x++)
+        for (int y = -r; y <= r; y++)
+        for (int z = -r; z <= r; z++)
+        {
+            var chunk = new Vector3I(_centre.X + x, _centre.Y + y, _centre.Z + z);
+
+            wanted++;
+            if (World.IsChunkLoaded(chunk))
+                have++;
+        }
+
+        float resident = wanted == 0 ? 1f : have / (float)wanted;
+
+        int built = World.BuiltSections;
+        float meshed = built / (float)Math.Max(1, built + World.PendingSections);
+
+        // Never allowed to fall: a bar that slides back tells the player the
+        // wait just got longer.
+        _progressFloor = Math.Max(_progressFloor, 0.6f * resident + 0.39f * meshed);
+        Progress = _progressFloor;
+
+        if (have < wanted || !HasGround())
+            return;
 
         IsReady = true;
-        ReadyProgress = 1f;
+        Progress = 1f;
         BecameReady?.Invoke();
     }
 
-    /// <summary>
-    /// How far the meshing has come, as a fraction.
-    ///
-    /// Measured against the MOST work ever outstanding at once rather than
-    /// against what is left now, because the queue grows as the residency scan
-    /// finds more to do -- a bar reading "remaining / remaining" would slide
-    /// backwards every time it discovered another chunk.
-    ///
-    /// The high-water mark only resets when the world does, so the figure
-    /// climbs monotonically through a load, which is the one property a
-    /// progress bar has to have.
-    /// </summary>
-    private float MeshProgress()
+    /// <summary>Is there collision under the target yet?</summary>
+    private bool HasGround()
     {
-        // COUNTED BY WHAT IS FINISHED, NOT BY WHAT IS LEFT.
-        //
-        // The queue is capped, and the residency scan refills it as fast as it
-        // drains -- so "outstanding" sits near its own peak for the whole load
-        // and a bar reading 1 - left/peak never moves. Measured: 60 chunks
-        // queued at the start, 53 a second later, the figure pinned at 0%
-        // throughout.
-        //
-        // What does climb steadily is the number of chunks that have been
-        // MESHED, and the world knows that without anyone counting it. The
-        // total is not known up front -- residency discovers it -- so the
-        // denominator is the most ever wanted at once, which only grows. Both
-        // numbers therefore rise, and the ratio rises with them.
-        // Counted in SECTIONS, which is the unit work is actually done in --
-        // a chunk is sixty-four of them, and a chunk of sky is none.
-        int done = World?.BuiltSections ?? 0;
-
-        int outstanding = (_toGenerate.Count + _toMesh.Count + _inFlight.Count)
-            * SectionsPerChunk;
-
-        int total = done + outstanding;
-
-        if (total > _meshPeak)
-            _meshPeak = total;
-
-        if (_meshPeak == 0)
-            return _hasScanned ? 1f : 0f;
-
-        // MEASURED AGAINST WHAT IS LEFT RIGHT NOW.
-        //
-        // Not against the high-water mark: that keeps rising as residency finds
-        // more to do, so the bar climbed smoothly and then stopped near 60%
-        // while the world went ready without it. Most of what it was still
-        // counting was the rest of the residency ball, which streams in behind
-        // the player and was never part of the wait.
-        //
-        // Dividing by the work known about at this moment tracks the fraction
-        // of the CURRENT backlog that is done, which reaches 1 as the backlog
-        // empties -- and the backlog empties at about the time the world is
-        // playable, which is what the bar is for.
-        float progress = done / (float)Mathf.Max(1, total);
-
-        // Never allowed to fall. A figure that goes backwards tells the player
-        // the wait just got longer, which is the one thing a bar exists to
-        // reassure them about -- and it would, every time a scan queues more.
-        if (progress > _progressFloor)
-            _progressFloor = progress;
-
-        return Mathf.Clamp(_progressFloor, 0f, 1f);
-    }
-
-    /// <summary>The most work known about at once, for the progress bar.</summary>
-    private int _meshPeak;
-
-    /// <summary>Sections in a chunk, for turning a queue length into work.</summary>
-    private const int SectionsPerChunk = 64;
-
-    /// <summary>
-    /// The highest the bar has read, so it never slides backwards.
-    ///
-    /// A progress figure that goes down is worse than one that is wrong: it
-    /// tells the player the wait just got longer, which is the one thing a bar
-    /// exists to reassure them about.
-    /// </summary>
-    private float _progressFloor;
-
-    /// <summary>
-    /// Is there a solid, MESHED block under the target for them to land on?
-    ///
-    /// Walks inward from the target's own direction, so it works wherever they
-    /// are rather than assuming a fixed spawn. Bounded by the ready radius in
-    /// chunks: if there is no rock within that, the world is not ready here
-    /// whatever else has been built.
-    /// </summary>
-    private bool StandableGroundExists()
-    {
-        if (World.Grid == null)
-            return true;
-
-        // WALKED DOWN IN SPACE, NOT ALONG AN AXIS.
-        //
-        // This used to step the address's Z, which is the shell on both sphere
-        // grids and so genuinely means "deeper". On a grid whose coordinates
-        // are positions rather than (face, u, v, shell) -- the organic world --
-        // Z is just one direction in space, and walking it from a player at
-        // (0, 120, 0) travels SIDEWAYS past the planet instead of down into it.
-        // The search then found no ground however much had been built, and the
-        // world never declared itself ready.
-        //
-        // Sampling positions along the line to the planet's centre asks the
-        // question every grid understands: what is under my feet.
         Vector3 from = Target.GlobalPosition;
-        Vector3 down = (World.GlobalPosition - from);
+        Vector3 down = World.GlobalBasis * Generator.DownAt(World.ToLocal(from));
 
-        if (down.LengthSquared() < 0.0001f)
-            down = Vector3.Down;
+        var exclude = Target is CollisionObject3D body
+            ? new Godot.Collections.Array<Rid> { body.GetRid() }
+            : null;
 
-        down = down.Normalized();
-
-        float step = Mathf.Max(0.25f, World.Grid.NodeSize * 0.5f);
-        float limit = (Mathf.Max(0, ReadyRadius) + 1)
-            * NodeChunkStore.ChunkSize * World.Grid.NodeSize;
-
-        Vector3I last = new(int.MinValue, int.MinValue, int.MinValue);
-
-        for (float travelled = 0f; travelled < limit; travelled += step)
-        {
-            Vector3I at = World.CellAt(from + down * travelled);
-
-            if (at == last)
-                continue;
-
-            last = at;
-
-            if (!World.Grid.Contains(at))
-                continue;
-
-            if (!World.Store.Has(at))
-                continue;
-
-            // Solid. It only counts if its geometry exists, because collision
-            // is what the player actually lands on.
-            return World.HasChunkMesh(NodeChunkStore.ChunkOf(at));
-        }
-
-        return false;
+        return World.Raycast(from, from + down.Normalized() * GroundProbe, out _, exclude);
     }
-
-    /// <summary>
-    /// Are all six face neighbours' data resident?
-    ///
-    /// Face neighbours only. Occupancy reaches two cells past a boundary,
-    /// which touches edge and corner neighbours as well — but only for the
-    /// outermost sub-cells of the outermost nodes, where a wrong answer costs
-    /// a few surplus triangles rather than a hole. Requiring all 26 would stall
-    /// the frontier badly for that.
-    /// </summary>
-    private bool NeighboursReady(Vector3I chunk)
-    {
-        if (World.Grid == null)
-        {
-            return World.IsChunkLoaded(chunk + Vector3I.Right)
-                && World.IsChunkLoaded(chunk + Vector3I.Left)
-                && World.IsChunkLoaded(chunk + Vector3I.Up)
-                && World.IsChunkLoaded(chunk + Vector3I.Down)
-                && World.IsChunkLoaded(chunk + Vector3I.Back)
-                && World.IsChunkLoaded(chunk + Vector3I.Forward);
-        }
-
-        // Asked through the grid, so a neighbour across a face edge is the
-        // chunk actually there rather than an index one step along u.
-        //
-        // A direction with NO neighbour does not block: past the outermost
-        // shell there is only sky, and waiting for it to load left every chunk
-        // meshless forever -- readiness sat at 36% with the world fully
-        // generated underneath it.
-        for (int face = 0; face < 6; face++)
-        {
-            if (!NeighbourChunk(chunk, NodeFace.Offsets[face], out Vector3I next))
-                continue;
-
-            if (!World.IsChunkLoaded(next))
-                return false;
-        }
-
-        return true;
-    }
-
-    /// <summary>
-    /// Queues one chunk's sections. The actual meshing is paced by
-    /// <see cref="Pump"/> under a time budget, not done here.
-    /// </summary>
-    private void MeshOne(Vector3I chunk)
-    {
-        World.QueueChunkMesh(chunk);
-    }
-
-    /// <summary>
-    /// Forgets what has been scanned, so the next frame recomputes residency
-    /// from scratch.
-    ///
-    /// For a generator whose field has changed underneath the streamer: the
-    /// chunks already resident are stale in a way distance cannot detect, so
-    /// the queues are dropped and everything in range is asked for again.
-    /// </summary>
-    public void ForceRescan()
-    {
-        // Anything a worker is part-way through was generated against the
-        // world as it was; bumping the generation makes those results land in
-        // the bin rather than in the new world.
-        _generation++;
-
-        _toGenerate.Clear();
-        _toMesh.Clear();
-        _queued.Clear();
-        _inFlight.Clear();
-
-        lock (_finishedLock)
-            _finished.Clear();
-
-        _hasScanned = false;
-        _readyTotal = 0;
-        _meshPeak = 0;
-        _progressFloor = 0f;
-        IsReady = false;
-        ReadyProgress = 0f;
-    }
-
-    /// <summary>Chunks still waiting to be generated or meshed.</summary>
-    public int PendingChunks => _toGenerate.Count + _toMesh.Count;
 }

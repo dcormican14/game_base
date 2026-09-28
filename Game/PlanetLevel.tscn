@@ -1,0 +1,44 @@
+[gd_scene load_steps=13 format=3]
+
+[ext_resource type="PackedScene" path="res://Modules/Skybox/Skybox.tscn" id="1_skybox"]
+[ext_resource type="PackedScene" path="res://Modules/Planet/Planet.tscn" id="2_planet"]
+[ext_resource type="PackedScene" path="res://Modules/Player/Player.tscn" id="3_player"]
+[ext_resource type="Script" path="res://Modules/Planet/PlanetSpawn.cs" id="4_spawn"]
+[ext_resource type="PackedScene" path="res://Modules/PauseMenu/PauseMenu.tscn" id="5_pause"]
+[ext_resource type="PackedScene" path="res://Modules/Filters/StylizedFilter.tscn" id="6_filter"]
+[ext_resource type="PackedScene" path="res://Modules/Stats/PerfStats.tscn" id="7_stats"]
+[ext_resource type="PackedScene" path="res://Modules/Crosshair/Crosshair.tscn" id="8_crosshair"]
+[ext_resource type="PackedScene" path="res://Modules/LoadingScreen/LoadingScreen.tscn" id="9_loading"]
+[ext_resource type="PackedScene" path="res://Modules/Inventory/InventoryHud.tscn" id="10_inventory"]
+[ext_resource type="PackedScene" path="res://Modules/Lighting/LightingRig.tscn" id="11_lighting"]
+[ext_resource type="PackedScene" path="res://Modules/Tools/ModeBar/ToolModeBar.tscn" id="12_modebar"]
+
+[node name="PlanetLevel" type="Node3D"]
+
+[node name="Skybox" parent="." instance=ExtResource("1_skybox")]
+
+[node name="LightingRig" parent="." instance=ExtResource("11_lighting")]
+
+[node name="Planet" parent="." instance=ExtResource("2_planet")]
+
+[node name="Player" parent="." instance=ExtResource("3_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 6002, 0)
+
+[node name="PlanetSpawn" type="Node" parent="."]
+script = ExtResource("4_spawn")
+PlanetPath = NodePath("../Planet")
+PlayerPath = NodePath("../Player")
+
+[node name="PauseMenu" parent="." instance=ExtResource("5_pause")]
+
+[node name="StylizedFilter" parent="." instance=ExtResource("6_filter")]
+
+[node name="PerfStats" parent="." instance=ExtResource("7_stats")]
+
+[node name="Crosshair" parent="." instance=ExtResource("8_crosshair")]
+
+[node name="LoadingScreen" parent="." instance=ExtResource("9_loading")]
+
+[node name="InventoryHud" parent="." instance=ExtResource("10_inventory")]
+
+[node name="ToolModeBar" parent="." instance=ExtResource("12_modebar")]

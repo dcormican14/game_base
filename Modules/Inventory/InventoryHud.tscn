@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" path="res://Modules/Inventory/InventoryHud.cs" id="1_hud"]
 [ext_resource type="Script" path="res://Modules/Inventory/Inventory.cs" id="2_inventory"]
-[ext_resource type="Resource" path="res://Modules/Inventory/Items/GreenCube.tres" id="3_green_cube"]
+[ext_resource type="Resource" path="res://Modules/Inventory/Items/Stone.tres" id="3_stone"]
 [ext_resource type="Resource" path="res://Modules/Inventory/Items/Pickaxe.tres" id="4_pickaxe"]
 [ext_resource type="Resource" path="res://Modules/Inventory/Items/Shovel.tres" id="5_shovel"]
 
@@ -10,7 +10,7 @@
 process_mode = 3
 layer = 6
 script = ExtResource("1_hud")
-StartingItems = Array[Resource("res://Modules/Inventory/ItemType.cs")]([ExtResource("4_pickaxe"), ExtResource("5_shovel"), ExtResource("3_green_cube")])
+StartingItems = Array[Resource("res://Modules/Inventory/ItemType.cs")]([ExtResource("4_pickaxe"), ExtResource("5_shovel"), ExtResource("3_stone")])
 StartingItemCount = 1
 
 [node name="Inventory" type="Node" parent="."]

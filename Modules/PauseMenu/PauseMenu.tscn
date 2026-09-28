@@ -25,7 +25,7 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-color = Color(0, 0, 0, 0.45)
+color = Color(0.078, 0.012, 0.059, 0.55)
 
 [node name="MenuPanel" type="CenterContainer" parent="Root"]
 unique_name_in_owner = true

@@ -1,9 +1,6 @@
-[gd_scene load_steps=3 format=3]
+[gd_scene load_steps=2 format=3]
 
 [ext_resource type="Script" path="res://Modules/LoadingScreen/LoadingScreen.cs" id="1_script"]
-
-[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_bg"]
-bg_color = Color(0.04, 0.04, 0.05, 1)
 
 [node name="LoadingScreen" type="CanvasLayer"]
 layer = 50
@@ -22,7 +19,7 @@ layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-color = Color(0.04, 0.04, 0.05, 1)
+color = Color(0.078, 0.012, 0.059, 1)
 mouse_filter = 2
 
 [node name="Center" type="CenterContainer" parent="Root"]

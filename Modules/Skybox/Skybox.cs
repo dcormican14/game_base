@@ -80,69 +80,13 @@ public partial class Skybox : Node
         set { _skyEnergy = value; Rebuild(); }
     }
 
-    /// <summary>
-    /// How much ambient light the scene receives — which is to say, how bright
-    /// SHADOWS are, since ambient is all an unlit face gets.
-    ///
-    /// Raised from the 0.35 a pure-sky ambient wanted. Terrain albedo runs
-    /// dark (soil is around 0.10), and a dark albedo under a dim ambient has
-    /// nothing left to carry a hue: measured through the Filmic curve, soil in
-    /// shadow resolved to #090204 — black, whatever colour the ambient was.
-    /// At 0.70 the same face lands on #18060d, which reads as plum. Higher
-    /// washes the shadow out and costs contrast against the lit side: at 1.4
-    /// it is #2d111b against a #482f2b lit face.
-    /// </summary>
-    private float _ambientEnergy = 0.70f;
-    [Export(PropertyHint.Range, "0,4,0.05")]
-    public float AmbientEnergy
-    {
-        get => _ambientEnergy;
-        set { _ambientEnergy = value; Rebuild(); }
-    }
-
-    /// <summary>
-    /// The colour of the light that fills SHADOW.
-    ///
-    /// Ambient is the only light an unlit face receives, so this is what
-    /// decides what a shadow looks like. Taken from the nebula's plum rather
-    /// than left to the sky's own average: sampling the sky gives a shadow
-    /// that is merely dark, because the background is nearly black, and the
-    /// result reads as crushed rather than as coloured. A stated plum keeps
-    /// the shadow tied to the backdrop while staying light enough to see
-    /// shape in.
-    ///
-    /// Brighter and more saturated than <see cref="SpaceColor"/> on purpose.
-    /// It is competing with a directional light rather than being looked at
-    /// directly, and the Filmic tonemapper crushes darks hard.
-    /// </summary>
-    private Color _ambientColor = new(0.300f, 0.085f, 0.245f);
-    [Export]
-    public Color AmbientColor
-    {
-        get => _ambientColor;
-        set { _ambientColor = value; Rebuild(); }
-    }
-
-    /// <summary>
-    /// How much of the ambient comes from this stated colour rather than from
-    /// the sky itself. 1 is all sky (the old behaviour), 0 all
-    /// <see cref="AmbientColor"/>.
-    ///
-    /// Not zero: a little real sky keeps the nebula spilling onto surfaces
-    /// that face it, which is what sells the islands as being inside the
-    /// backdrop rather than composited over it.
-    /// </summary>
-    private float _skyAmbientShare = 0.25f;
-    [Export(PropertyHint.Range, "0,1,0.01")]
-    public float SkyAmbientShare
-    {
-        get => _skyAmbientShare;
-        set { _skyAmbientShare = value; Rebuild(); }
-    }
-
-    // The three layers the sky shader composites, in order: space, then
-    // nebulae inside it, then stars in front. Each group maps to the matching
-    // block of uniforms in SpaceSky.gdshader.
+    // The four layers the sky shader composites, in order: space, then
+    // nebulae inside it, then stars in front, then the moon. Each group maps
+    // to the matching block of uniforms in SpaceSky.gdshader.
+    //
+    // Space, nebulae and stars each have a BRIGHTNESS from 0 (black) to 1 (the
+    // layer's full, calibrated luminosity), so the night can be dimmed layer
+    // by layer without touching the colours.
 
     [ExportGroup("Pixel Grid")]
     private float _pixelGrid = 300f;
@@ -163,13 +107,22 @@ public partial class Skybox : Node
     // Calibrated against a render, not computed: the environment's Filmic
     // tonemapper crushes darks so hard that the naive linear value lands on
     // screen at about #050104. Re-measure if the tonemapper, SkyEnergy or
-    // AmbientEnergy change.
+    // the lighting rig's ambient change.
     private Color _spaceColor = new(0.0747f, 0.0092f, 0.0521f);
     [Export]
     public Color SpaceColor
     {
         get => _spaceColor;
         set { _spaceColor = value; PushProceduralParameters(); }
+    }
+
+    private float _spaceBrightness = 0.25f;
+    /// <summary>The plum background's brightness: 0 is black, 1 its full luminosity.</summary>
+    [Export(PropertyHint.Range, "0,1,0.01")]
+    public float SpaceBrightness
+    {
+        get => _spaceBrightness;
+        set { _spaceBrightness = value; PushProceduralParameters(); }
     }
 
     [ExportGroup("Layer 2 - Nebulae")]
@@ -208,29 +161,21 @@ public partial class Skybox : Node
         set { _nebulaTone3 = value; PushProceduralParameters(); }
     }
 
-    private Color _nebulaWarm = new(0.300f, 0.085f, 0.090f);
-    /// <summary>Warm accent taken by a minority of clouds.</summary>
-    [Export]
-    public Color NebulaWarm
-    {
-        get => _nebulaWarm;
-        set { _nebulaWarm = value; PushProceduralParameters(); }
-    }
-
-    private float _nebulaWarmShare = 0.06f;
-    [Export(PropertyHint.Range, "0,1,0.01")]
-    public float NebulaWarmShare
-    {
-        get => _nebulaWarmShare;
-        set { _nebulaWarmShare = value; PushProceduralParameters(); }
-    }
-
     private float _nebulaOpacity = 1f;
     [Export(PropertyHint.Range, "0,2,0.01")]
     public float NebulaOpacity
     {
         get => _nebulaOpacity;
         set { _nebulaOpacity = value; PushProceduralParameters(); }
+    }
+
+    private float _nebulaBrightness = 0.5f;
+    /// <summary>The clouds' brightness: 0 is black, 1 their full luminosity.</summary>
+    [Export(PropertyHint.Range, "0,1,0.01")]
+    public float NebulaBrightness
+    {
+        get => _nebulaBrightness;
+        set { _nebulaBrightness = value; PushProceduralParameters(); }
     }
 
     private float _nebulaScale = 4.5f;
@@ -347,8 +292,9 @@ public partial class Skybox : Node
         set { _starFaint = value; PushProceduralParameters(); }
     }
 
-    private float _starBrightness = 1f;
-    [Export(PropertyHint.Range, "0,4,0.05")]
+    private float _starBrightness = 0.75f;
+    /// <summary>The stars' brightness, shooting stars included: 0 is black, 1 their full luminosity.</summary>
+    [Export(PropertyHint.Range, "0,1,0.01")]
     public float StarBrightness
     {
         get => _starBrightness;
@@ -474,8 +420,108 @@ public partial class Skybox : Node
         set { _shootingSlots = value; PushProceduralParameters(); }
     }
 
+    [ExportGroup("Layer 4 - Moon")]
+    private bool _moonEnabled = true;
+    [Export]
+    public bool MoonEnabled
+    {
+        get => _moonEnabled;
+        set { _moonEnabled = value; PushProceduralParameters(); }
+    }
+
+    private Vector3 _moonDirection = new Vector3(0.3f, 0.57f, -0.76f).Normalized();
+    /// <summary>
+    /// Where the moon hangs, as a direction from the world toward it. It
+    /// stays there while the stars and clouds turn, and a <c>LightingRig</c>
+    /// takes its key light from exactly this direction.
+    /// </summary>
+    [Export]
+    public Vector3 MoonDirection
+    {
+        get => _moonDirection;
+        set
+        {
+            _moonDirection = value.LengthSquared() > 0.0001f ? value.Normalized() : Vector3.Up;
+            PushProceduralParameters();
+            MoonMoved?.Invoke(_moonDirection);
+        }
+    }
+
+    /// <summary>Raised when <see cref="MoonDirection"/> changes, so the light can follow.</summary>
+    public event System.Action<Vector3> MoonMoved;
+
+    private float _moonSize = 4.5f;
+    /// <summary>The moon's angular radius, in degrees.</summary>
+    [Export(PropertyHint.Range, "0.5,20,0.1")]
+    public float MoonSize
+    {
+        get => _moonSize;
+        set { _moonSize = value; PushProceduralParameters(); }
+    }
+
+    private Color _moonLight = new(0.78f, 0.68f, 0.50f);
+    /// <summary>The highlands: an off-white gold. Pre-tonemap.</summary>
+    [Export]
+    public Color MoonLight
+    {
+        get => _moonLight;
+        set { _moonLight = value; PushProceduralParameters(); }
+    }
+
+    private Color _moonShade = new(0.34f, 0.31f, 0.30f);
+    /// <summary>The maria: a warm grey. Pre-tonemap.</summary>
+    [Export]
+    public Color MoonShade
+    {
+        get => _moonShade;
+        set { _moonShade = value; PushProceduralParameters(); }
+    }
+
+    private float _moonBrightness = 1f;
+    [Export(PropertyHint.Range, "0,2,0.01")]
+    public float MoonBrightness
+    {
+        get => _moonBrightness;
+        set { _moonBrightness = value; PushProceduralParameters(); }
+    }
+
+    private Color _moonHaloColor = new(0.30f, 0.12f, 0.15f);
+    /// <summary>The halo's colour: the sky's dusty rose, so it sits in the backdrop's palette.</summary>
+    [Export]
+    public Color MoonHaloColor
+    {
+        get => _moonHaloColor;
+        set { _moonHaloColor = value; PushProceduralParameters(); }
+    }
+
+    private float _moonHalo = 0.3f;
+    /// <summary>The faint stepped halo around the disc.</summary>
+    [Export(PropertyHint.Range, "0,1,0.01")]
+    public float MoonHalo
+    {
+        get => _moonHalo;
+        set { _moonHalo = value; PushProceduralParameters(); }
+    }
+
+    private int _moonCraters = 11;
+    [Export(PropertyHint.Range, "0,24,1")]
+    public int MoonCraters
+    {
+        get => _moonCraters;
+        set { _moonCraters = value; PushProceduralParameters(); }
+    }
+
     private WorldEnvironment _worldEnvironment;
     private Godot.Environment _environment;
+
+    /// <summary>The environment this module drives, once it has been built.</summary>
+    public Godot.Environment Environment => _environment;
+
+    /// <summary>
+    /// Raised whenever the environment is (re)built, so whatever lights the
+    /// scene -- a <c>LightingRig</c> -- can apply its ambient to it.
+    /// </summary>
+    public event System.Action<Godot.Environment> EnvironmentReady;
     private Sky _sky;
     private ShaderMaterial _proceduralMaterial;
 
@@ -525,9 +571,7 @@ public partial class Skybox : Node
 
         _sky.SkyMaterial = material;
         _environment.BackgroundEnergyMultiplier = SkyEnergy;
-        _environment.AmbientLightEnergy = AmbientEnergy;
-        _environment.AmbientLightColor = AmbientColor;
-        _environment.AmbientLightSkyContribution = SkyAmbientShare;
+        EnvironmentReady?.Invoke(_environment);
     }
 
     /// <summary>Creates the WorldEnvironment this module drives, once.</summary>
@@ -554,11 +598,9 @@ public partial class Skybox : Node
         {
             BackgroundMode = Godot.Environment.BGMode.Sky,
             Sky = _sky,
-            // Light the scene from the sky itself: in space there is no
-            // bounce light from ground, so the nebulae are the ambient source.
+            // Ambient light is the lighting rig's to set (see LightingRig);
+            // until one does, the sky itself fills the shadows.
             AmbientLightSource = Godot.Environment.AmbientSource.Sky,
-            AmbientLightSkyContribution = SkyAmbientShare,
-            AmbientLightColor = AmbientColor,
             TonemapMode = Godot.Environment.ToneMapper.Filmic,
         };
 
@@ -614,15 +656,15 @@ public partial class Skybox : Node
 
         // Layer 1 - space.
         _proceduralMaterial.SetShaderParameter("space_color", SpaceColor);
+        _proceduralMaterial.SetShaderParameter("space_brightness", SpaceBrightness);
 
         // Layer 2 - nebulae.
         _proceduralMaterial.SetShaderParameter("nebula_enabled", NebulaEnabled);
         _proceduralMaterial.SetShaderParameter("nebula_tone_1", NebulaTone1);
         _proceduralMaterial.SetShaderParameter("nebula_tone_2", NebulaTone2);
         _proceduralMaterial.SetShaderParameter("nebula_tone_3", NebulaTone3);
-        _proceduralMaterial.SetShaderParameter("nebula_warm", NebulaWarm);
-        _proceduralMaterial.SetShaderParameter("nebula_warm_share", NebulaWarmShare);
         _proceduralMaterial.SetShaderParameter("nebula_opacity", NebulaOpacity);
+        _proceduralMaterial.SetShaderParameter("nebula_brightness", NebulaBrightness);
         _proceduralMaterial.SetShaderParameter("nebula_scale", NebulaScale);
         _proceduralMaterial.SetShaderParameter("nebula_floor", NebulaFloor);
         _proceduralMaterial.SetShaderParameter("nebula_span", NebulaSpan);
@@ -653,6 +695,17 @@ public partial class Skybox : Node
         _proceduralMaterial.SetShaderParameter("shooting_pixels", ShootingPixels);
         _proceduralMaterial.SetShaderParameter("shooting_arc", ShootingArc);
         _proceduralMaterial.SetShaderParameter("shooting_slots", ShootingSlots);
+
+        // Layer 4 - moon.
+        _proceduralMaterial.SetShaderParameter("moon_enabled", MoonEnabled);
+        _proceduralMaterial.SetShaderParameter("moon_direction", MoonDirection);
+        _proceduralMaterial.SetShaderParameter("moon_size", MoonSize);
+        _proceduralMaterial.SetShaderParameter("moon_light", MoonLight);
+        _proceduralMaterial.SetShaderParameter("moon_shade", MoonShade);
+        _proceduralMaterial.SetShaderParameter("moon_brightness", MoonBrightness);
+        _proceduralMaterial.SetShaderParameter("moon_halo", MoonHalo);
+        _proceduralMaterial.SetShaderParameter("moon_halo_color", MoonHaloColor);
+        _proceduralMaterial.SetShaderParameter("moon_craters", MoonCraters);
     }
 
     /// <summary>Hides the exports that do not apply to the chosen source.</summary>
@@ -665,7 +718,7 @@ public partial class Skybox : Node
         // hand-written list silently rots every time one is added or renamed.
         bool procedural = name.StartsWith("Space") || name.StartsWith("Nebula")
             || name.StartsWith("Star") || name.StartsWith("Twinkle")
-            || name.StartsWith("Shooting") || name == nameof(PixelGrid);
+            || name.StartsWith("Shooting") || name.StartsWith("Moon") || name == nameof(PixelGrid);
 
         bool hide = name switch
         {

@@ -18,7 +18,7 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-color = Color(0.08, 0.08, 0.1, 0.94)
+color = Color(0.157, 0.024, 0.118, 0.94)
 
 [node name="CenterContainer" type="CenterContainer" parent="."]
 layout_mode = 1

@@ -1,4 +1,5 @@
 using Godot;
+using GameBase.Core;
 
 namespace GameBase.Items;
 
@@ -37,23 +38,23 @@ public static class InventoryPalette
     public static readonly Color SlotFill = new(0.030f, 0.008f, 0.032f, 0.72f);
 
     /// <summary>Slot border at rest — off-white, well back so the grid reads as quiet.</summary>
-    public static readonly Color SlotBorder = new(1f, 0.922f, 0.761f, 0.32f);
+    public static readonly Color SlotBorder = new(Palette.Cream, 0.32f);
 
     /// <summary>Slot border under the cursor.</summary>
-    public static readonly Color SlotBorderHover = new(1f, 0.922f, 0.761f, 0.70f);
+    public static readonly Color SlotBorderHover = new(Palette.Cream, 0.70f);
 
     /// <summary>
     /// Border of the selected hotbar slot: the crosshair's off-white at nearly
     /// full strength, so the bar's selection and the crosshair are obviously
     /// the same UI speaking.
     /// </summary>
-    public static readonly Color SlotBorderSelected = new(1f, 0.922f, 0.761f, 0.95f);
+    public static readonly Color SlotBorderSelected = new(Palette.Cream, 0.95f);
 
     /// <summary>Labels, counts and headings.</summary>
-    public static readonly Color Text = new(1f, 0.922f, 0.761f, 0.92f);
+    public static readonly Color Text = new(Palette.Cream, 0.92f);
 
     /// <summary>Slot numerals under the hotbar — present, but not competing with the count.</summary>
-    public static readonly Color TextDim = new(1f, 0.922f, 0.761f, 0.45f);
+    public static readonly Color TextDim = new(Palette.Cream, 0.45f);
 
     /// <summary>Drop shadow behind text, so counts stay readable over a bright icon.</summary>
     public static readonly Color TextShadow = new(0.02f, 0.004f, 0.018f, 0.85f);

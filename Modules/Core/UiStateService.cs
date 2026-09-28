@@ -63,7 +63,7 @@ public partial class UiStateService : Node
     /// nothing is layered over the top.
     ///
     /// This is the check gameplay code wants —
-    /// <see cref="PlayerController"/> looking, <see cref="NodeEditor"/> mining
+    /// the player looking around, a tool mining or placing
     /// — in place of asking whether the mouse happens to be captured.
     /// </summary>
     public bool GameplayHasInput => Current == UiState.Gameplay;
@@ -75,6 +75,15 @@ public partial class UiStateService : Node
     public bool IsCurrent(UiState state) => Current == state;
 
     public override void _EnterTree() => Instance = this;
+
+    /// <summary>
+    /// Merges the palette theme into the engine's default theme, so every
+    /// screen in the game is drawn from <see cref="Palette"/> without styling
+    /// itself. Into the DEFAULT theme rather than onto the root window: a theme
+    /// on the window only reaches controls parented to controls, and every HUD
+    /// here hangs off a CanvasLayer.
+    /// </summary>
+    public override void _Ready() => ThemeDB.GetDefaultTheme().MergeWith(PaletteTheme.Create());
 
     public override void _ExitTree()
     {

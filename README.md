@@ -1,46 +1,297 @@
 # Game Base
 
-A modular Godot 4.6 (.NET / C#) starter project. Every feature lives in its own
-folder under `Modules/` (scene + script side by side) so it can be ported into
-another project by copying that folder.
+A Godot 4.6 (.NET / C#) game: a large, flat-looking planet of raw nodes
+under a shell of particle nodes, lit by a still moon in a night sky, which the
+player digs, piles and builds with a pickaxe and a shovel. Every feature lives in its own folder under `Modules/` (scene
+and script side by side) so it can be ported into another project by copying
+that folder.
+
+## Running
+
+1. Open the project in Godot 4.6 (.NET edition), or build from the command
+   line with `dotnet build`.
+2. Run. Main menu -> **Play** loads `Game/PlanetLevel.tscn`.
+
+| Input | Action |
+|---|---|
+| WASD, mouse | move, look |
+| Space / Shift / Ctrl | jump / sprint / crouch (while sprinting: slide) |
+| Double-tap Space | sandbox: free flight, no collision |
+| **Left mouse** | **mine** with the held tool |
+| **Right mouse** | **place** with the held tool |
+| 1-9, mouse wheel | pick a hotbar slot |
+| Tab | inventory |
+| Esc | pause |
+
+Every action is rebindable in **Settings -> Controls**.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `Modules/Core/` | `SettingsService` autoload — persists video/audio/control settings and dynamic keybinds to `user://settings.cfg` |
-| `Modules/MainMenu/` | Main menu screen (Play / Settings / Quit) |
-| `Modules/PauseMenu/` | Drop-in pause menu (`CanvasLayer`, pauses the scene tree) |
-| `Modules/SettingsMenu/` | Settings screen with a keybind list generated from the InputMap |
-| `Modules/Player/` | `CharacterBody3D` player rig — first- or third-person, toggled from settings; animated humanoid model |
-| `Assets/Characters/` | Character models, one folder per character (Mixamo XBot & YBot dummies) |
-| `Modules/Filters/` | Drop-in screen-space stylization: outlines, pixelation, dither |
-| `Modules/Bismuth/` | `[Tool]` bismuth hopper-crystal blobs — stepped terraces on a jittered tessellation (art-direction prototype for project-infinite-world WP05) |
-| `Modules/Crosshair/` | Centre-screen pixel-art crosshair — 0-4 gold dashes spread evenly around the centre, fading out toward the tips, with a two-ring outline |
-| `Modules/Nodes/` | The node world: a global grid whose cells (`nodes`) are shaped by a pluggable `INodeType`. `RawNode` is the raw-bismuth type; chunked meshing |
-| `Modules/NodeLevel/` | `[Tool]` level generator — a rounded pillar of rock with primitive solids scattered on and above its flat top |
-| `Modules/Density/` | The layered density field floating islands are carved from: placement, body profile, side erosion, top relief and caves, plus the plane cuts |
-| `Modules/IslandLevel/` | `[Tool]` level generator — a field of floating islands built from the density map, dark-capped flat tops over jagged tapering undersides. `IslandHorizon` draws the world beyond it as rings of coarser blocks that follow the player |
-| `Modules/LoadingScreen/` | Progress bar shown while the node world meshes; holds the player until collision exists |
-| `Modules/NodeEditor/` | Place/destroy nodes by looking at them; hold to repeat. `NodeHighlight` outlines the targeted node |
-| `Modules/Stats/` | Performance overlay (FPS, frame/physics time, draw calls, tris, VRAM/memory) plus the current movement mode, toggled in Settings -> Video |
-| `Modules/Skybox/` | Deep-space skybox — procedural stars + nebulae placeholder, or your own panorama/sky shader |
-| `Modules/Terrain/` | `[Tool]` procedural "workshop" terrain: flat dark checker floor, box platforms, prism ramps |
-| `Game/PillarLevel.tscn` | The node level: a rounded pillar built entirely from nodes (the scene the menu launches) |
-| `Game/World.tscn` | Training level — the workshop terrain with no nodes, kept for testing the rig in isolation |
+| `Game/PlanetLevel.tscn` | The level: planet, player, spawn, HUD, filter |
+| `Modules/Core/` | `Palette` (every colour), `PaletteTheme`, the `SettingsService` and `UiStateService` autoloads, `ILoadProgress`, `NodeSearch` |
+| `Modules/Nodes/` | The node world: types, storage, the Voronoi grid, meshing, streaming, physics picking |
+| `Modules/Planet/` | The planet: its numbers, its generator, and the spawn that stands the player on it |
+| `Modules/Tools/` | The tool interface, the pickaxe and shovel, the controller that drives them, and the highlight |
+| `Modules/Player/` | `CharacterBody3D` player rig with radial gravity, first or third person, animated model |
+| `Modules/Inventory/` | Hotbar and backpack, item resources, rendered item icons |
+| `Modules/Skybox/` | Pixel-art night sky and its moon: the source of the palette |
+| `Modules/Lighting/` | `LightingRig`: the moonlight and the ambient that fills its shadows |
+| `Modules/Filters/` | Screen-space stylisation: outlines, pixelation, dither |
+| `Modules/Crosshair/`, `LoadingScreen/`, `MainMenu/`, `PauseMenu/`, `SettingsMenu/`, `Stats/` | HUD and menus |
+| `Tests/` | The test runner and suites; `Tests/Capture/` renders screenshots of the level |
 
-## First run
+## The world
 
-1. Open the project in Godot 4.6 (.NET edition).
-2. Build the C# assembly once (**Project → Tools → C#** or the hammer icon /
-   `dotnet build`) so scripts — including the `[Tool]` terrain — resolve.
-3. Run. Main menu → Play loads `Game/World.tscn`.
+### One grid, two forms of node
 
-Default controls: WASD move, Space jump, Shift sprint, Ctrl crouch (press
-while sprinting to slide), mouse look, Esc pause. Left click places a node,
-right click destroys one; hold either to repeat. **Double-tap Space** to toggle
-sandbox mode — free flight with no collision, for inspecting geometry from
-inside.
+Space is a **Voronoi diagram over a jittered cubic lattice** (`VoronoiGrid`).
+Every integer cell owns a site pushed a little off its lattice point by a hash
+of its address; a node is the region closer to its site than to any other, so
+neighbouring nodes share their walls exactly and the rock reads as shattered
+stone rather than masonry. Sites are never stored — any thread can compute any
+site.
+
+Every cell holds one byte of material and one byte of fill
+(`NodeChunkStore`). What a material *is* lives on its `NodeType`, and the type
+hierarchy splits on **form**:
+
+- **`RawNode`** — a solid that fills its whole Voronoi cell: faceted, all or
+  nothing. `StoneNode` is the planet's body.
+- **`ParticleNode`** — granular material that fills its cell *to a level*. The
+  fill is a signed distance to the material's surface (`NodeFill`), so a bed of
+  particles is drawn as one smooth surface that can sit anywhere between
+  lattice points. `SandNode` is the planet's topsoil.
+
+**Terminology.** *Raw nodes* and *particle nodes* are the two forms; *stone*
+and *sand* are materials, one of each form, the way a type names what a node
+is made of. The planet is a ball of raw nodes under a shell of particle nodes.
+
+The particle nodes are their own **shell**, not a coat of paint on the rock.
+Their surface is a closed "cloud" around them that sinks part of the way into
+the raw nodes beside them -- never to a raw node's core -- and both surfaces
+are drawn, so the rock wins wherever they overlap: rock stands through a thin
+shell, and a thick one hides the join without a seam. Mine the rock out from
+under the shell and the shell stays put, rounded underneath; mine the shell
+away and its edge rounds down into the rock instead of stopping at an angle.
+Which cells are particle nodes is decided node by node at generation, so
+pockets of particle nodes inside the planet are a generator change away.
+
+Adding a material is a class under the right branch plus an id in
+`NodeMaterial`; the store, the meshers, the streamer and the tools pick it up.
+
+### Meshing
+
+The world is built in 8-cell sections on worker threads, one `INodeMesher` per
+form, and uploaded on the main thread under a per-frame budget with edits ahead
+of streaming:
+
+- `RawNodeMesher` draws each rock cell as its polyhedron, skipping any face a
+  neighbour covers and any cell whose 26 neighbours cover it — the whole
+  interior of the planet costs nothing.
+- `ParticleNodeMesher` runs **surface nets** over the fills: a quad wherever
+  the fill changes sign along a lattice edge, with vertices at the average of
+  the crossings in each lattice cube. A raw node counts as *just outside* the
+  particle surface (`SectionSample.RawLevel`), so the shell sinks into the rock
+  by an amount set by how deep the particle node beside it is. Where either end
+  is rock the crossing is taken between *sites*, whose midpoint lies on the
+  rock's own face, so that depth is measured against the rock itself. Where the
+  shell lies buried on the rock, neither surface is drawn.
+
+Raw and particle geometry collide on separate bodies, so a ray that hits the
+world knows which form it touched. `MeshingTests.PitIsWatertight` fires 3000
+rays into dug pits to prove no seam between the two lets the sky through.
+
+### The planet
+
+`Planet` holds the numbers (radius 6000, node size 2, a 6-unit shell of
+particle nodes) and hands a `PlanetGenerator` to the world and a
+`ChunkStreamer`. The shell's surface is a perfect sphere; the raw nodes beneath
+are every node whose site lies below the shell. At this radius the horizon dips about 1.3 degrees below level for a
+standing player, so the ground reads as flat while still being a planet anyone
+flying high enough can see curve.
+
+`ChunkStreamer` keeps a ball of chunks around the player resident -- open sky
+included, as uniform air, so there is no ceiling on building (generation on
+worker threads, nearest first) and reports `ILoadProgress` to the loading
+screen. `PlanetSpawn` holds the player frozen until the streamer confirms real
+collision underfoot — without that hold the player falls through a planet
+that has not been built yet.
+
+## Tools
+
+Everything a tool does goes through one interface, `ITool`: what it works
+(`Works`), what it points at (`TryTarget`), `Mine`, `Place`, and `Outline` for
+its highlight. `Tool` supplies the common half; a tool only ever targets and
+outlines the form of node it works, so the pickaxe shows nothing over sand and
+the shovel nothing over bare rock.
+
+| Tool | Works | Left (mine) | Right (place) |
+|---|---|---|---|
+| `PickaxeTool` | raw nodes | removes the node | puts stone against the face |
+| `ShovelTool` | particle nodes | applies the selected mode | nothing |
+
+The shovel is a **terrain tool with modes**. **R** steps through them -- the
+mode bar above the hotbar shows which is selected -- and holding the left
+button shapes the ground gradually in that mode:
+
+| Mode | What it does |
+|---|---|
+| Raise sharp / Raise gradual | lifts the ground |
+| Lower sharp / Lower gradual | sinks the ground; stops at rock |
+| Level | flattens toward the height of the ground where the press began, so dragging carries one level across the terrain |
+| Smooth | softens bumps and edges, moving ground around without adding or removing any |
+
+The **brush** is two circles: full strength inside the inner one, fading to
+nothing at the outer. Every mode shares the outer circle; *sharp* has a small
+inner circle, concentrating a change into a point, and *gradual* a large one,
+spreading it evenly. The shovel reaches 6 units, as the pickaxe does.
+
+The circles lie **on the ground** (`SurfaceDisc`): every point is the radius
+from the centre measured along the surface, so the brush lies flat on flat
+ground, stands up on a wall, hangs upside down on a ceiling and folds over an
+edge, always covering the same area. It is found by walking: paths set out
+from the centre in every direction, settling back onto the surface after each
+small step and turning to follow it. The highlight draws those paths, and the
+shaping weighs every cell by the nearest point of them -- what is drawn is
+what changes, and nothing past it moves, so building straight up raises a
+column as wide as the brush rather than a mountain whose foot spreads. There
+is no height limit beyond the rate.
+
+Every mode works **along the surface** (`ParticleSculpt`), on the fill field
+itself: a fill is a distance to the surface, so adding to it pushes the surface
+out along its own facing. Raise builds a wall out sideways and a ceiling
+downward, Lower digs into either, Level cuts and fills toward the plane of the
+surface where the press began, and Smooth smooths whatever face it is on. A
+fill clamped at the edge of its range only says "at least this far", so it is
+placed by its neighbours (a distance changes by at most a node between lattice
+points) rather than pulled into a surface that has not reached it. Byte-sized
+fills would round a faint edge's per-frame change away, so the last step is
+rounded up or down at random in proportion (`NodeFill.FromLevelDithered`).
+Each step first copies the patch of fills around the brush (`ParticleField`),
+so the thousands of field reads a frame are array lookups, and every change is
+worked out from one steady picture of the ground.
+
+**Every mine and place is checked** against an `IMaterialLedger` first, and
+recorded after. Nothing is collected yet, so the only ledger is
+`UnlimitedLedger`; an inventory-backed ledger plugs in there without touching
+any tool.
+
+Items become tools by id (`ToolRegistry`): the `pickaxe` and `shovel` item
+resources are ordinary `ItemType`s. `ToolController`, under the player, reads
+the held item, aims down the crosshair, drives the highlight and turns the two
+buttons into tool actions — discrete tools once per click with hold-to-repeat
+(each tool sets its own pace), continuous tools every frame. A tool with modes
+(`ITool.Modes`) steps through them on the `tool_mode` action (R); each tool
+remembers its own mode, and `ToolModeBar` shows them above the hotbar while
+that tool is held. A press keeps one `ToolStroke` for as long as the button is
+down, even if the crosshair slips off the ground for a moment -- which is what
+lets Level hold to the height it was pressed at.
+
+### The highlight
+
+One shader (`ToolHighlight.gdshader`) draws both tools' highlights after the
+stylised filter, so it stays crisp:
+
+- a **thin outline**, sized by distance from the eye so it is a few pixels
+  wide at any range;
+- a **thin, faint gradient on the face being worked**, strongest at the
+  outline and falling off quickly toward the middle, with a pulse that
+  travels inward;
+- **small square particles** in lanes along the outline, gliding inward and
+  fading slowly as they near the middle -- precise, high-tech, and now and
+  then glitching. Most are a single square; some chain two to four in a row
+  along their path. Once in a while one stutters: two or three quick jumps
+  within a quarter second, then back on its path. Each square is exactly as
+  thick on screen as the outline at the same distance -- sized in screen
+  pixels, so it keeps its shape on ground seen at a low angle.
+
+All three are one gold off-white (`Palette.Highlight`), for both tools on
+every material.
+
+The pickaxe outlines every edge of the node and glows on each face, working in
+from that face's edges. The shovel draws its brush ON the ground, like a texture: a thin skin laid
+flush over the ground the brush covers, whose every point carries where it is
+in a flat circle -- the disc wrapped onto the surface like a sticker. The
+shader draws everything from that position, mathematically, after snapping
+each fragment to the stylised filter's own pixel grid (the filter's settings
+are copied onto the material): the outer circle, and for the raise and lower
+modes the inner one, as pixel-art circles one world pixel thick -- a pixel is
+lit when the circle passes through it -- then the gradient, and particles one
+world pixel each, all on the same pixels as the world. Level and Smooth draw
+no inner circle: they have one brush each, which still fades out toward the
+rim so the patch they work blends into the ground around it. The disc lies on
+the fill field, which the drawn mesh follows closely but not exactly, so the
+skin is settled onto the drawn ground by rays at a sparse grid of its points,
+blended between. Glow surfaces are fanned from their
+middle, one wedge per outline edge, so "along the outline" and "in from the
+outline" are exact in every wedge.
+
+## Palette
+
+`Modules/Core/Palette.cs` is every colour in the game, taken from the space
+background (`space_pixel_art.jpg`): the plum ground `#28061e`, the star ramp
+`#8c445c` / `#ba6976` / `#fee1ea`, and steps between them, plus the off-white
+sand and plum-tinted stone. The interface keeps its own two colours against
+the plum: `Gold` (`#e98b0f`, the crosshair's dashes, hover, focus and progress)
+and `Cream` (`#ffebc2`, text, the crosshair's ring, slot borders). The
+interface theme (`PaletteTheme`) is merged into Godot's default theme at
+start-up, so every button, panel and bar is drawn in it without per-scene
+styling.
+
+Particle colours in the palette are what the player should *see*;
+`NodeMaterials.Albedo` converts them to the albedo that renders at that
+lightness under the level's moonlight (`LitExposure`), with the moonlight's
+warm cast. Re-measure it with the capture tool if the lighting changes.
+
+## Lighting
+
+`LightingRig` (drop `Modules/Lighting/LightingRig.tscn` into a level beside a
+`Skybox`) is the scene's light:
+
+- **Moonlight** is the key light: a warm, off-white gold directional light cast
+  from exactly where the skybox's moon hangs (`Skybox.MoonDirection`), so the
+  light and the moon can never disagree -- move the moon and the light follows.
+- **Ambient** is what fills its shadows: the backdrop's plum
+  (`AmbientColor`), leaned a little toward the moonlight's warmth
+  (`AmbientWarmth`), so the shadows stay plum while the scene sits in warm
+  light.
+
+The skybox only draws the background; ambient light is the rig's to set.
+
+## Tests
+
+A small headless suite: grid geometry, the store and fill encoding, the
+planet generator, both meshers (flatness, winding, closed solids, watertight
+seams, the buried shell drawing nothing, the shell staying put when
+undermined), the tools against real collision (targeting, raising and
+lowering, nothing moving outside the brush, sharp against gradual, lowering
+stopping at rock, Level flattening to the press height, Smooth spreading a
+peak, the ledger check, mode cycling, highlights) and the inventory.
+
+```sh
+godot --headless --path . res://Tests/TestRunner.tscn
+godot --headless --path . res://Tests/TestRunner.tscn -- --filter=Tool
+```
+
+The runner exits with 0 when everything passes and 1 otherwise. A suite is any
+`TestSuite` subclass; each `[Test]` method (void or `Task`) runs on a fresh
+instance, with anything it adds to the tree freed afterwards.
+
+`Tests/Capture/LevelCapture.tscn` is the visual check. It needs a window, and
+loads the real level, times loading and frame rate, and saves screenshots of
+the horizon, the moon, both highlights (with a strip of frames to see the
+particles move), a dug pit and the menu. It then drives the real input path —
+the player's own camera, inventory, the mode key and the left button — raises
+and lowers the ground, raises a bump and levels it by dragging from flat
+ground, and raises a column under the player's own feet and lowers it back,
+reporting how wide its base spread and checking every physics frame that the
+player never sinks into the ground or falls through it.
+
+```sh
+godot --path . res://Tests/Capture/LevelCapture.tscn -- --out=C:/some/folder
+```
 
 ## Painting your own skybox
 
@@ -105,8 +356,13 @@ seam to worry about. `SpaceSky.gdshader` is a worked example.
 ### Tuning the placeholder
 
 With `Source = Procedural` the sky is drawn as **pixel art** matching
-`space_pixel_art.jpg`, in three layers that composite in order. Each has its
+`space_pixel_art.jpg`, in four layers that composite in order. Each has its
 own export group and can be dialled to zero independently.
+
+**Brightness.** Space, nebulae and stars each have a brightness from 0 (black)
+to 1 (the layer's full, calibrated luminosity): `SpaceBrightness` (0.25),
+`NebulaBrightness` (0.5) and `StarBrightness` (0.75, shooting stars included).
+Those defaults are what make it night.
 
 **Everything snaps to a pixel grid.** `PixelGrid` sets the art's pixel size:
 every layer samples at cell centres, so colour is flat across a cell and edges
@@ -117,9 +373,8 @@ absent — the shader uses `step`, never `smoothstep`, for anything visible.
 **Layer 1 — Space.** A flat plum ground: the reference's `#28061e` halved
 toward black, i.e. `#14030f`.
 
-**Layer 2 — Nebulae.** Clouds quantized into **three flat tones** with hard
-stepped contours, like a topographic map, plus a muted warm accent on a
-minority of them. They orbit `NebulaAxis` at `NebulaSpin` — the player sits in
+**Layer 2 — Nebulae.** Clouds quantized into **three flat plum tones** with
+hard stepped contours, like a topographic map. They orbit `NebulaAxis` at `NebulaSpin` — the player sits in
 the eye of a very slow hurricane, a full turn taking about nine minutes — and
 `NebulaMorph` reshapes them as they travel so they are not rigid stamps sliding
 past. `NebulaFloor` is a threshold rather than a power curve: `pow()` never
@@ -201,6 +456,16 @@ degrees** of sky (`ShootingArc`) — a blink across a small patch, roughly
 circles on the sphere, and the trail is drawn only *behind* the head with the
 same stepped falloff and colour ramp as a twinkle arm.
 
+**Layer 4 — Moon.** A still, pixel-drawn moon (`MoonDirection`, `MoonSize` as
+an angular radius in degrees) on its own pixel grid as fine as the sky's:
+off-white gold highlands (`MoonLight`) with grey maria (`MoonShade`) from a
+stepped noise, round craters (`MoonCraters`) each with a lit and a shadowed
+rim, two hard steps of limb darkening, and a faint stepped halo in the sky's
+dusty rose (`MoonHaloColor`). It keeps its place while the stars and clouds
+turn, and it hides whatever is behind it. Its colours are kept below the
+tonemapper's shoulder, or the Filmic curve flattens highlands and maria into
+one pale disc.
+
 Shots work in **direction space, not on a single cube face**. Confining them to
 one face made five sixths of them invisible from any given view — they were
 being generated correctly and simply never rendered where the camera was
@@ -209,14 +474,15 @@ looking.
 **Two calibration notes.** The colour constants are *pre-tonemap* and were
 measured against a render, not computed: the environment's Filmic curve crushes
 darks so hard that the naive linear value for `#14030f` lands on screen at
-about `#050104`. Re-measure if the tonemapper, `SkyEnergy` or `AmbientEnergy`
-change. And any threshold applied to `fbm()` has to be centred on its real
-range — two octaves span 0..0.75 with mean ~0.38, not 0..1 — which is what made
-the warm nebula tint silently never appear in an earlier version.
+about `#050104`. Re-measure if the tonemapper, `SkyEnergy` or the lighting
+rig's ambient change. And any threshold applied to `fbm()` has to be centred on
+its real range — two octaves span 0..0.75 with mean ~0.38, not 0..1 — or it
+silently never (or always) fires.
 
-Measured against the reference art, the defaults land at 89% empty background /
-10% nebula / 0.8% star pixels, versus 88% / 11% / 1.0%. Star hue matches too:
-the render's faint tier is `#90425a` against the reference's `#8c445c`.
+Measured against the reference art (at full brightness), the layers land at
+89% empty background / 10% nebula / 0.8% star pixels, versus 88% / 11% / 1.0%.
+Star hue matches too: the render's faint tier is `#90425a` against the
+reference's `#8c445c`.
 
 ### Performance notes
 
@@ -236,148 +502,6 @@ accidentally expensive:
   `Quality` uses importance sampling that costs far more and buys nothing for
   a smooth nebula gradient. If you author a sky with sharp bright features that
   should show up in reflections, `Quality` may be worth it — measure first.
-
-## Porting a module to another project
-
-1. Copy the module folder into the target project **at the same
-   `res://Modules/...` path** (scene files reference scripts by absolute
-   `res://` path).
-2. `Modules/Core` is required by the Settings/Pause/Player modules. Register it
-   as an autoload in the target `project.godot`:
-   ```ini
-   [autoload]
-   SettingsService="*res://Modules/Core/SettingsService.tscn"
-   ```
-   (The UI and player degrade gracefully without it, but nothing persists.)
-3. Copy the `[input]` section of `project.godot` (or define your own actions —
-   every action name used by the player is an exported variable).
-4. Build the C# project.
-
-## Design notes / knobs
-
-- **Everything tunable is exported.** Speeds, gravity, camera distance, terrain
-  size/seed/colors, scene paths, action names, settings defaults — all editable
-  in the inspector without touching code.
-- **Settings screen is tabbed** (Video / Audio / HUD / Controls, a default
-  Godot `TabContainer`). Video holds fullscreen, vsync and the first/third-person
-  camera toggle; Audio holds master volume; HUD holds the crosshair line count;
-  Controls holds sensitivity and the keybind list.
-- **Dynamic keybinds:** the settings screen lists every InputMap action that
-  doesn't start with a `NonRebindablePrefixes` entry (default: `ui_`). Add a new
-  action in Project Settings → Input Map and it shows up automatically.
-  Rebinding uses physical keycodes (layout-independent), steals the key from any
-  other action bound to it (no double bindings), and persists to
-  `user://settings.cfg`. Delete that file to fully reset.
-- **One binding per action** is the persistence model (`RebindAction` replaces
-  all events). Extend `SettingsService.SerializeEvent`/`DeserializeEvent` if you
-  need joystick axes or multi-bind.
-- **Player rig:** the first/third-person choice lives in
-  `SettingsService.ThirdPerson` (persisted; the rig reacts live via the
-  `SettingsChanged` signal, falling back to its `ThirdPersonFallback` export
-  when the autoload is absent). `CameraDistance` sets the third-person
-  spring-arm length, with `ShoulderOffset`/`ShoulderHeight` placing the
-  character left of the crosshair so the model never covers the aim point;
-  the character model auto-hides in first person. Camera pitch spans a full
-  vertical sweep (`MinPitchDegrees` -89 to `MaxPitchDegrees` +89, stopping
-  just short of the poles to avoid gimbal flip). The **head** is what stays
-  limited — `PlayerAnimator`'s `MaxHeadPitchUp/DownDegrees` clamp how far the
-  neck turns, so at extreme angles the head stops at a natural limit while
-  the view keeps going. Input
-  action names are exports, so the rig works with whatever action names a
-  project already uses.
-- **Crouch & slide:** hold crouch to crouch (capsule shrinks, camera lowers,
-  slower speed; standing up is blocked while under a ceiling via a shape
-  query). Pressing crouch above `SlideMinSpeed` starts a slide: a speed boost
-  up to `SlideBoostSpeed` decaying at `SlideFriction`, steerable with
-  `SlideSteerStrength`, ending on release/slow-down/leaving the ground —
-  jumping out of a slide works. All speeds/heights/frictions are exports.
-  The animator has matching crouch (bent-leg sneak) and slide (lean-back,
-  front leg extended) poses, plus clip slots named `crouch`/`sneak`/`slide`.
-- **Character model & animations:** the player shows a Mixamo dummy
-  (`Assets/Characters/XBot`) instanced under `%CharacterRig` in `Player.tscn`
-  — swap the instanced scene to change characters (e.g. YBot). `PlayerAnimator`
-  (on the rig node) animates it in two modes:
-  - **Clip mode** — if an `AnimationPlayer` under the rig has clips whose
-    names contain `idle` / `walk` / `run` / `sprint` / `jump` / `fall`, it
-    cross-fades between them based on movement. To use real Mixamo clips:
-    download animations for the same character ("without skin"), import them,
-    and add their animations to an `AnimationPlayer` under the rig with those
-    names — the animator picks them up automatically.
-  - **Procedural mode** (active fallback for the T-pose dummies) — a
-    footstep-planner + IK locomotion system, not a canned cycle:
-    - **Phase-locked gait oscillator**: both legs share one gait clock, hard
-      offset by half a cycle (they structurally cannot sync into a gallop),
-      with a **duty factor** that shrinks with speed — above 0.5 at a walk
-      (double support, trailing foot) and below 0.5 at a run (a real flight
-      phase with both feet airborne). Cadence = speed / step length, with
-      stride warping at a run. Idle repositioning steps are distance-based
-      (covers turning in place).
-    - Each swing **predicts its landing spot from velocity** (where home
-      will be at touch-down, plus half the upcoming stance), then snaps it to
-      the ground with a raycast. Sideways travel is handled separately from
-      forward travel: the foot on the side of travel **leads** out
-      (`ShuffleLeadScale`) while the other only **closes up underneath**
-      (`ShuffleTrailScale`), giving a human sidestep shuffle instead of wide
-      splits — with a center-line clamp (`StanceWidthKeep`) so legs never
-      crisscross.
-    - **Body orientation**: while running the rig yaws partway toward its
-      movement direction (`RunTurnTowardMovement`, capped by
-      `MaxBodyTurnDegrees`), so a sideways sprint reads as an angled run
-      while the character still faces roughly toward the screen center. The
-      turn is scaled down for walking (`WalkTurnScale`), off by default when
-      crouched (`CrouchTurnScale`) so crouch-strafing stays a square
-      shuffle, and full during a slide. Backward movement never turns the
-      model around — it keeps facing forward and walks in reverse, with
-      back-diagonals angling to their respective side. Only the model
-      rotates — the collision body and camera keep facing where the player
-      aims.
-    - **Head aim**: the head (and neck, sharing the turn via `NeckAimShare`)
-      continuously lerps toward the camera's look direction, so the model
-      always shows where the player is aiming. Clamped by
-      `MaxHeadYaw/PitchDegrees`, eased at `HeadAimSpeed`, and layered on top
-      of the gait and crouch head pose. The aim source defaults to the
-      player's camera; override with `AimSourcePath`.
-    - Planted feet are **world-locked**; swinging feet travel a smootherstep
-      arc with a sine height profile and per-frame terrain clearance.
-    - **Analytic two-bone IK** (law of cosines, forward knee pole) drives
-      each thigh/knee/foot independently to reach its target; feet align to
-      the sampled ground normal. Crouching just lowers the pelvis — the IK
-      bends the knees to keep the feet planted.
-    - Torso lean/twist/sway and arm counter-swing are driven by the
-      measured forwardness of each leg; acceleration-based weight shift
-      leans into speed-ups and turns; air/slide leg poses are authored and
-      blended over the IK with critically damped springs.
-    - Finds bones by Mixamo-style name suffixes and works in model space
-      from the rest pose, so it works on any `mixamorig` humanoid. Every
-      distance/height/duration/angle is exported.
-- **Terrain:** attach `WorkshopTerrain.cs` to any `StaticBody3D`. Generates a
-  flat dark-gray checkerboard floor plus seeded box platforms reached by
-  full-width triangular-prism ramps — hard right angles, flat shading, no thin
-  geometry. Some structures are multi-staged: terraced boxes in a line with
-  roof-to-roof ramps and a walkable landing on each roof (`MultiStageChance`,
-  `MaxStages`, `LandingCells`). The checkerboard covers everything: floor,
-  ramp walking surfaces, and platform tops and side walls, all aligned to one
-  world grid (side walls checker vertically in `CellSize` rows from y=0).
-  Ramp sides/undersides use the separate `StructureColor*` trim grays. Everything is exported:
-  floor size, cell size, platform count/footprint, height step and min/max
-  steps, ramp slope, spawn-clear radius, seed, colors.
-  It's a `[Tool]` script, so after the assembly is built any export change
-  regenerates the mesh live in the editor. Collision is an exact trimesh of
-  the render mesh, and platforms never spawn within `SpawnClearRadius` of the
-  node's origin.
-- **Pause menu** can be instanced into any gameplay scene; it runs with
-  `ProcessMode.Always` so it works while the tree is paused, and closes/opens
-  the shared `SettingsMenu` scene internally.
-
-## Scene lighting
-
-`Game/World.tscn` enables sky-based ambient light on its `Environment`
-(`ambient_light_source = 3`, sky contribution 1.0). Without an ambient source a
-`DirectionalLight3D` is the only light in the scene, so every surface facing
-away from it receives zero light and renders black. Flat blocky terrain mostly
-hides this; rounded meshes such as the character do not - their shadowed side
-goes solid black. Any new scene wanting the same look needs the same ambient
-setup.
 
 ## Stylized filter
 
@@ -419,9 +543,9 @@ persisted like any other setting:
     the snapped UV lets a pixel near a silhouette land on a sky texel (or the
     reverse), so objects would sample the sky's grid along every edge.
 
-  `PixelNearDistance`/`PixelFarDistance` default to 3-22 m, which is the range
-  the pillar level actually occupies (its visible ground runs about 3.5-14 m).
-  A range wider than the scene contains leaves the ramp doing nothing visible.
+  `PixelNearDistance`/`PixelFarDistance` default to 3-22 m, the range where
+  the ground near the player is. A range wider than the scene contains leaves
+  the ramp doing nothing visible.
 - **Dither** (off by default) - 4x4 ordered Bayer dither, applied in real
   screen pixels so the pattern stays fine even while pixelating.
 
@@ -432,442 +556,6 @@ camera - the pixel grid is fixed to the screen while the world moves, so
 surfaces shimmer as you turn. It is exposed as an option rather than the
 default for that reason; low-res textures with nearest-neighbour filtering are
 the more stable route to a chunky look.
-
-## Bismuth blobs
-
-`Modules/Bismuth/BismuthBlob.tscn` prototypes the terrain art direction from
-`project-infinite-world/.docs` (WP05 — the bismuth gate). Attach to any
-`StaticBody3D`; it is a `[Tool]` script, so every export regenerates the mesh
-live in the editor.
-
-**What it implements from the spec**
-
-- **Hopper-crystal stepping** — concentric terraces stepping inward as they
-  rise, each tier twisted (`TierTwistDegrees`) and drifted (`TierDrift`) from
-  the one below, so tiers form a square spiral rather than flat contour rings.
-  This is the doc's stated distinction: rice terraces vs. crystal. Set
-  `Squareness` to 0 to see the rice-terrace failure mode for comparison.
-- **The recessed cavity** — `HopperTiers` reverses the innermost tiers back
-  downward, giving the skeletal rim-grows-faster-than-face signature. 0 gives
-  a solid stepped pyramid.
-- **Terrace quantizer mapping** — the tier solve corresponds to the doc's
-  `ITerraceQuantizer`: `TerraceLevel` = tier index, `QuantizeAltitude` =
-  tier x `StepHeight`, `LateralInset` = `InsetPerStep`, plus `StepJitter`.
-- **Determinism doctrine** — a jittered quad grid (never free-floating nodes),
-  all jitter from a pure position+seed hash, and every vertex snapped to
-  quarter-node increments, per the spec's fixed-jitter rule.
-- **Tessellation** — cells are the dual of the jittered node grid, so terrace
-  faces are irregular quads rather than a visible square lattice, while
-  remaining watertight.
-- **Checkerboard** — cells alternate between `ColorA` and `ColorB` by grid
-  parity, matching the world floor, so the tessellation is legible as colour
-  as well as silhouette (the doc's "material banding falls out for free").
-- **`Shape`** — `Mound` is the default stepped cone. `Sphere` switches the tier
-  profile to a full sphere sampled at uniform angle, with its lower half sunk
-  below ground, giving a terraced ball. Its radius and step height derive from
-  `TierCount` and `InsetPerStep` so the proportions stay round regardless of
-  the mound dials.
-
-**Three non-obvious details that the look depends on**
-
-1. Tier membership is classified at each cell's *unjittered lattice*
-   position. Jitter shapes the cell outline, but if it also moves the sample
-   point, boundaries fragment and the silhouette combs into gaps.
-2. Terrace-edge wobble uses smoothed patch noise at `EdgePatchSize`, which
-   must stay several times `NodeSpacing`. Per-cell noise produces sawtooth
-   rubble instead of clean ledges.
-3. The cavity floor sits one step above the base, and the outermost tier takes
-   no edge jitter — otherwise the pit vanishes into the surrounding plate and
-   the silhouette breaks up.
-4. `Sphere` samples its profile at uniform *angle*, not uniform height. A
-   sphere is nearly flat near its equator, so height-sampled tiers come out at
-   almost identical widths and the result reads as a barrel.
-
-## Nodes and node types
-
-`Modules/Nodes/` renders the world grid as tiered bismuth crystal rather than
-plain cubes. `Bismuth = false` on the `NodeWorld` node returns it to cubes;
-everything else — the grid, picking, placing, mining — is unchanged either way.
-
-### What moves: EDGES and CORNERS, not faces
-
-Real bismuth grows fastest where the most free space meets — along edges and
-especially at corners — which is why a hopper crystal has raised rims around
-recessed faces. So the displacement lives on the **12 edges and 8 corners** of
-each node. Flat faces stay flat; the rim around them steps out or pulls back.
-A corner reaches **twice as far as an edge**, because three directions of free
-space meet there rather than two.
-
-### The interlock rule — why nodes fit like puzzle pieces
-
-A lattice edge is shared by 4 nodes; a lattice corner by 8. Rather than each
-node deciding independently how far to grow (which would collide or leave
-gaps), the contested region around each lattice feature is awarded **whole to a
-single owner**, chosen by hashing that feature's position. The winner fills it;
-the losers vacate it. Nothing is created and nothing is destroyed, so space
-stays exactly tiled — gaplessness is structural, not something the mesher
-checks for.
-
-Every node touching a feature computes the same hash from the same position
-and reaches the same verdict, so **a node never inspects its neighbours to
-find its shape.** That is what makes planet scale affordable: a cube placed
-mid-game gets exactly the shape it would have had if the planet had generated
-it, so placement never re-shapes anything around it, and generation works in
-any order, on any thread.
-
-The winner is not uniformly random. A flowing 3D vector field is sampled at the
-feature and whichever contender lies furthest **along that flow** takes it.
-Because the flow varies smoothly, neighbouring features favour the same
-direction, so growth reads as a current running through the rock rather than as
-per-node static.
-
-### The 4x4x4 subdivision
-
-Each cell is 4x4x4 quarter-cells, classified by how many coordinates sit on a
-border:
-
-| Border coords | Region | Cells | Behaviour |
-|---|---|---|---|
-| 0 | **core** 2x2x2 | 8 | always solid, never contested |
-| 1 | face | 24 | fixed — flat faces stay flat |
-| 2 | **edge** | 24 | awarded per lattice edge |
-| 3 | **corner** | 8 | awarded per lattice corner |
-
-A winner's territory extends **outside** its own cell, into the space the
-losers vacated: an edge win takes a 2x2 run straddling the lattice edge, a
-corner win takes a 2x2x2 straddling the lattice corner. That straddling is what
-gives corners their double reach.
-
-Two partition details the correctness depends on:
-
-1. **Edges own only their middle** (t = 1..2), and the cells at each end belong
-   to the corners that terminate them. A full-length edge run double-claims
-   those cells, which overlaps wherever a node wins an edge but loses the
-   corner beside it.
-2. **An uncontested feature still has an owner** — it falls to the node that
-   nominally contains it. Letting `Growth` simply skip a contest leaves the
-   region claimed by nobody, which is a hole.
-
-### Why it is cheap
-
-A node's shape is 12 edge bits plus 8 corner bits, so the occupancy is built
-straight from the bitmask and meshed with a greedy merge, cached per distinct
-shape. Winners are memoized per lattice feature — each corner is shared by 8
-nodes and each edge by 4, so meshing a region would otherwise re-ask the same
-question 4-8 times. Measured **0.7M shape lookups/sec** (~47 ms for a 32³
-chunk), averaging **73 quads per node**.
-
-Greedy merging keys on WHICH NEIGHBOUR owns the space in front of a quad, not
-on the exact quarter-cell. Keying on the cell makes every tag unique so nothing
-ever merges, which nearly doubles the triangle count; keying on the neighbour
-lets flat runs fuse, and the runtime then checks each quarter-cell of the
-merged rectangle individually.
-
-### Verified properties
-
-Checked against the shipped code, not a model of it:
-
-- **Watertight** — across six seed/scale/roughness/growth regimes: 0 overlaps,
-  0 gaps over 4096 interior quarter-cells, core never lost.
-- **Exactly one winner per contest** — 0/512 corners and 0/1536 edges wrong.
-- **Rims move, faces do not** — 0 face-centre cells lost; 1727/1728 nodes show
-  rim growth.
-- **Corner reach is double an edge's** — corner wins spread along 3 axes, edge
-  wins along 2.
-- **Encloses exactly the solid set** — by the divergence theorem, mesh volume
-  equals occupancy exactly (delta 0).
-- **Culling opens no holes** — across seven seed/scale/roughness/growth
-  regimes, every quarter-face ground truth calls visible is emitted (0
-  missing). Some buried faces are still drawn, which costs triangles and never
-  a hole.
-- **Deterministic** — same seed, same shapes, across instances.
-
-### Edit cost
-
-The world is split into **8x8x8 chunks**, each with its own mesh and collision
-shape, and an edit re-meshes only the chunks it touches. On the 42k-node
-pillar level a full rebuild is ~560 ms — a visible freeze — while a one-node
-edit re-meshes 512 nodes in **~3.4 ms**, 162x quicker.
-
-**The occupancy map is maintained incrementally**, and this matters more than
-the chunking. Culling asks "is this quarter-cell solid in the world", answered
-from a map of every occupied quarter-cell. Rebuilding that map wholesale meant
-re-inserting ~2.7 million entries for a one-node change: **228 ms, 98% of the
-cost of an edit**, and enough to make placing a node feel broken even with
-chunked meshing in place. Adding or removing a node now stamps only its own
-~50 quarter-cells in and out (0.002 ms), which took an edit from 192 ms to
-**3.4 ms** — a fifth of a 60 fps frame.
-
-The map counts owners per quarter-cell rather than storing a plain set. The
-interlock guarantees exactly one owner (verified: max refcount is 1 across
-every configuration tried), so a set would in fact work — but the count makes
-removal correct by construction instead of dependent on an invariant proved
-elsewhere. Incremental stamping is verified to match a from-scratch rebuild
-exactly across 400 random adds and removes.
-
-Chunk size is not "smaller is better": an edit dirties the 3x3x3 of chunks
-around it, so at size 6 that region spans 8 chunks instead of 2 and the cost
-climbs back to ~7 ms. 16/12/8/6 were measured; 8 won.
-
-A node's rim reaches one node outward and its neighbours' culling depends on
-it, so the dirty region is the 3x3x3 around the edit, not just the one chunk.
-Chunked output is verified bit-identical to a whole-world rebuild (84,946
-quads, 0 missing, 0 extra) — anything less would leave seams at chunk borders.
-
-Three more things keep the per-chunk pass cheap, each measured:
-
-- **Occupancy is built once per rebuild**, as one set of global quarter-cells
-  every node stamps into, and culling is then a single hash lookup. Asking
-  per-quad which of the 27 surrounding nodes might reach into a quarter-cell
-  re-derives the same answer thousands of times and measured **15x slower**.
-- **Collision uses the node hull, not the rendered surface.** The physics
-  engine builds a BVH over every triangle it is given, and crystal rims
-  multiply that count for relief no player can feel through a collision
-  capsule. Colliding against plain cube faces is **9.8x fewer triangles**
-  (1,816 vs 17,756) and is the single largest saving on an edit.
-- **One shared material**, not a fresh `StandardMaterial3D` per rebuild, which
-  would mean a new shader instance and a cold pipeline cache every edit.
-
-`Batch(...)` wraps several edits into one rebuild — a rebuild costs the same
-whether one node changed or a hundred, so any multi-node operation should use
-it.
-
-### Culling is the subtle part
-
-Face culling is the ONE place a neighbour is consulted, and getting it wrong
-costs either holes or triangles.
-
-The question asked is **"is this space solid in the world"**, not "does one
-particular neighbour fill it". Two failure modes sit either side of that:
-
-- Culling on *presence* of a neighbouring node tears holes. Under
-  edge-and-corner growth a rim can retreat inward, so the shared boundary is
-  genuinely exposed even with a solid node next door.
-- Culling only against the *one* neighbour a bake-time tag names leaves buried
-  faces drawn. Rims reach diagonally, so the node that actually buries a quad
-  is frequently not the face neighbour. That left **67% of emitted faces
-  buried but still rendered** — 94k triangles where 18k would do.
-
-A quad is dropped only when every quarter-cell it covers is solid, checked
-against the world's real occupancy. Residual over-draw is ~11%, all of it
-geometry that genuinely borders air somewhere along the merged rectangle.
-
-Note the mesh has T-junctions where a merged quad meets several smaller ones.
-The surfaces coincide exactly, so there is no hole, but if hairline seams ever
-show up under a specific renderer setting, that is where to look.
-
-### Knobs
-
-On the `NodeWorld` node, under **Bismuth**:
-
-- `Seed` — same seed, same planet.
-- `FlowScale` — cells per lobe of the flow. Larger gives long, lazy currents;
-  smaller gives a busier, more granular crystal.
-- `Roughness` — 0 lets the flow decide every contest, so growth runs in long
-  directional currents; 1 makes contests essentially random and the crystal
-  chaotic.
-- `Growth` — how many contests are awarded at all. 0 leaves every rim flat
-  (plain cubes); 1 claims every one.
-
-Under **Starter Fill**: `StarterSize` / `StarterDepth` lay down a slab sitting
-**on** the ground (its underside at y=0 — the workshop floor is the plane y=0,
-so sinking it below that z-fights), and `DemoSphereSize` / `DemoSphereHeight`
-float a ball of nodes overhead for inspecting the shaping from every angle,
-undersides included. Set either size to 0 to omit it.
-
-The surface is intentionally bumpy at this stage.
-
-
-## The pillar level
-
-`Game/PillarLevel.tscn` is the node level, and it is made **entirely of
-nodes** — there is no mesh terrain in it at all. `Modules/NodeLevel/`
-generates it into a single `NodeWorld`, so every part of it is editable and
-minable exactly like something the player built.
-
-- A **rounded pillar** falling away into the void, ~42k nodes, tapering with
-  depth and perturbed by smooth angular noise so the silhouette reads as
-  weathered rock. The noise fades out toward the top, so the rim under the
-  surface stays clean.
-- Its **top is cut flat** at y = -1 as a plain disc with no wobble, so the
-  walkable surface has a crisp edge and no bites taken out of it. The player
-  spawns standing on it at the origin.
-- **Primitive solids** scattered across the surface — cubes, rectangular
-  prisms, triangular prisms, pyramids and spheres — with roughly a quarter left
-  floating overhead. They are rasterised into the node grid (a pyramid is a
-  stack of shrinking squares, a sphere a distance test), not instanced meshes,
-  which is what lets the bismuth shaping treat them as ordinary rock.
-
-Everything is exported on the `Generator` node: pillar radius/depth/taper, rim
-noise, prop count, floating fraction, and seed. It is a `[Tool]` script, so
-changes regenerate live in the editor. `AutoBuild` off lets you hand-edit a
-level without it being regenerated underneath you.
-
-Three placement details worth knowing:
-
-1. **Prop dimensions are rolled before placement**, not after, so the footprint
-   test bounds the actual solid. Estimating from a single "size" let long
-   prisms overhang the rim.
-2. **Triangular prisms are centred on their origin** along the run rather than
-   growing out from it, for the same reason.
-3. **Floating props only clear other floating props.** A ball ten nodes up and
-   a cube below it do not collide, and forcing them apart in plan view starved
-   the level of props — it built 12 of 26 before this was separated.
-
-`Game/World.tscn` is kept as the training level: the workshop terrain with no
-nodes in it, for testing the player rig on its own.
-
-
-## Loading
-
-A 42k-node level takes ~0.5 s to mesh, and the player is a live physics body
-the moment the scene loads. Without a gate it spawns into a world that has no
-collision yet and **falls straight through the floor** — which is exactly what
-happened. Freezing the game for the duration instead would read as a hang.
-
-So `Modules/LoadingScreen/` covers the screen with a progress bar while
-`NodeWorld` meshes a few chunks per frame (`ChunksPerFrame`, default 6 —
-about 23 frames for the pillar level), then drops the player in and fades out.
-
-Four things this depends on:
-
-1. **The player is held by disabling its processing**, not by delaying its
-   instantiation. The scene tree stays exactly as authored and the camera is
-   live, so the level is already drawn behind the fade. Physics is the part
-   that must stop; `SetProcessUnhandledInput(false)` also stops mouse-look
-   swinging the camera while the bar is up.
-2. **`NodeWorld._Ready` must not rebuild when an incremental build is already
-   running.** Godot readies children first, so the generator starts the
-   incremental build and then the world's own `_Ready` would throw it away and
-   mesh everything synchronously — reintroducing the freeze. There is a guard,
-   and a test that fails without it.
-3. **The screen checks `IsWorldReady` as well as subscribing to `WorldReady`.**
-   A world that finished before the screen readied would otherwise never fire
-   the event the screen is waiting on, and the player would stay frozen.
-4. **The player is placed by searching down for the highest solid node** over
-   its spawn column, rather than at a fixed height, so it lands on the surface
-   whatever the level generator produced.
-
-### The first edit
-
-Everything the first edit would otherwise pay for is done during loading:
-
-- **`deferMesh` clears the full-rebuild flag.** `Batch(wholesale: true)` sets a
-  flag meaning "re-mesh everything at the end"; handing meshing to the
-  incremental loader dropped the queued rebuild but left that flag set, so the
-  player's very first mined node took the whole-world path — a ~520 ms stall
-  on the first edit and only the first. This was the bug.
-- **A warm-up edit runs behind the loading bar.** One node is removed and put
-  straight back, through the ordinary edit path, before the world reports
-  ready. That forces the engine's one-time work for a *modified* (rather than
-  newly created) mesh — pipeline recompiles, physics buffer growth, JIT over
-  the dirty-rebuild path — into the loading screen. It is verified lossless:
-  node count, occupancy map, and all 84,946 quads are identical afterwards.
-- **Collision shapes are assigned once.** Writing `Data` updates a shape in
-  place; re-assigning `Shape` re-registers it with the physics server.
-
-Level generation also passes `wholesale: true` to `Batch`, which skips
-per-node dirty marking — marking the 3x3x3 around each of 42k nodes is about
-a million wasted hash operations when a full rebuild follows anyway.
-
-
-## Targeted-node outline
-
-`Modules/NodeEditor/NodeHighlight.cs` outlines whichever node the crosshair is
-on. It traces the node's **real silhouette**, not a box around its cell: a raw
-node is a bismuth crystal whose faces are recessed and whose edge and corner
-wins branch a quarter-cell out past the cell boundary, so a cube outline sits
-off the surface on the flats and cuts straight through the rims.
-
-### Convex folds only
-
-The node's occupancy is walked at quarter-cell resolution, and a bar is drawn
-along every lattice edge where the surface folds **outward**. Of the four
-quarter-cells around an edge:
-
-| filled | meaning | drawn |
-| --- | --- | --- |
-| 1 | convex corner — the surface turns outward | **yes** |
-| 0 or 4 | interior or empty | no |
-| 2 adjacent | the boundary is a straight plane: the surface is **flat** here | no |
-| 2 diagonal | a pinch, with no single outward direction | no |
-| 3 | concave — the inside corner of an indent | no |
-
-Rejecting the `2` cases matters most by volume: an adjacent pair is an interior
-line ruled across a flat face, and they were **272 of 490** bars on a typical
-node. Drawing them turned the outline into a wireframe.
-
-Concave folds are skipped for a different reason. They are real geometry, but a
-bar laid inside a crevice is enclosed by surface on both sides, so its clearance
-offset has nowhere to go and it clips through the walls instead of tracing them.
-An outline is for the node's outer form; indents are interior detail.
-
-Collinear runs are merged into single boxes before meshing — a straight edge
-four quarter-cells long is one box, not four — which removes about **56%** of
-the geometry.
-
-### Clearance has to exceed the bar's own width
-
-A bar straddles the convex edge it traces and is pushed out along the 45°
-diagonal. To clear the node corner underneath, that offset must exceed the bar's
-half-width *measured along the diagonal*, `(Thickness/2) * sqrt(2)`.
-
-This is not a nicety. At `Thickness` 0.025 the minimum is **0.0177**, and an
-offset of 0.006 left the corner protruding **0.0117 into the bar** — splitting
-it lengthwise, so every outline rendered as two thin lines with a slot of node
-surface down the middle. The minimum is now computed from `Thickness`, and
-`Expand` is the margin on top of it.
-
-### Picking: a DDA, not a fixed step
-
-`NodeWorld.RayPick` walks quarter-cells with an Amanatides-Woo DDA, stepping one
-axis at a time to the nearest grid plane, so **every** quarter-cell the ray
-passes through is visited in order.
-
-A fixed-step march cannot do this. On a body-diagonal ray the mean travel per
-quarter-cell is `0.577` of a cell, so even a half-cell step samples barely once
-per cell, and a cell the ray merely clips near a corner has a chord approaching
-zero and is skipped outright. That showed up in play as picking a node **past**
-the one under the crosshair. Measured against a fine reference walk over 3,000
-rays: fixed-step scored 94.2%, the DDA scores **100%** with no missed hits.
-
-Two further rules the picker depends on:
-
-- **Occupancy is tested, not cell membership.** A shaped node does not fill its
-  own cell, so `_nodes.Contains` picks a node while the ray is still in the
-  empty air of its indent, and misses one whose rim is the thing actually under
-  the crosshair.
-- **A quarter-cell's index cannot name its owner.** Occupancy spans `-1..Sub` in
-  node-local coordinates, so a node's wins stamp quarter-cells whose global
-  index divides into a *neighbour's* cell — 128 of them on a fully-won node.
-  Every cell that could reach the quarter-cell is asked directly, in its own
-  local coordinates, via `INodeType.Occupies`.
-
-Unshaped worlds keep the old cell-granularity path, where a node fills its cell
-exactly and there is nothing finer to march through.
-
-### Colour and thickness
-
-Warm off-white `#fff6e2`, the same colour the crosshair's outline uses, so the
-two read as one targeting system. Bars are **0.025** of a node thick — at the
-far end of `Reach` that spans 1.02 virtual pixels on the stylized filter's
-320-row grid; anything thinner drops below one pixel and flickers as the camera
-moves (0.018 measures 0.73px).
-
-**Depth testing stays on.** Disabling it (the obvious way to keep an outline
-visible) pushes the mesh into a later draw pass, after the stylized filter has
-sampled the screen — the filter then paints its full-screen quad over the top
-and the outline never appears at all. The clearance offset is what keeps the
-bars visible and stops them z-fighting.
-
-The mesh is rebuilt only when the target changes, not every frame.
-
-
-## Crosshair colours
-
-Gold `#f5c344`, chosen to sit in the same family as the sky's plum and the
-nebulae's warm accent rather than cutting across them, with a warm off-white
-`#fff6e2` outline behind the dashes so they stay legible against terrain.
 
 ## Sandbox mode
 
@@ -897,69 +585,22 @@ Four details the mode depends on:
    into a node, and the character model would fill the view from inside. The
    player's real camera preference is restored on the way out.
 
-The node editor's don't-place-inside-yourself guard is skipped while in
-sandbox, since an intangible free-flying player has no reason to be blocked
-from building where they float.
+The pickaxe's don't-place-inside-yourself guard is skipped while in sandbox,
+since an intangible free-flying player has no reason to be blocked from
+building where they float.
 
+## Porting a module to another project
 
-## Node editing
-
-**Hold to repeat.** Holding a button carves or builds continuously at ~12.5
-nodes/sec, for stress-testing the node world. The repeat is keyboard-style:
-one edit on press, nothing until `RepeatDelay`, then one every
-`RepeatInterval`.
-
-`RepeatDelay` defaults to **0.35 s**, and that number is load-bearing: the
-window in which a click stays a single node is the delay minus about one
-frame, and a deliberate click commonly runs 100-300 ms. At 0.25 s a slow click
-placed two nodes — exactly the failure the delay exists to prevent. Verified
-single-edit for clicks up to 300 ms.
-
-Repeats are capped at **one edit per frame**, with any backlog dropped rather
-than carried. A single edit can reach ~22 ms once carving exposes interior
-faces, so letting a slow frame catch up several at once stacks them into one
-frame and turns a smooth hold into a stutter. Falling behind the nominal rate
-is the better trade — the repeat just tracks the frame rate.
-
-Sustained holding costs about 7% of one core. Per-edit cost is not constant: it
-starts near 1.5 ms and rises to ~19 ms as a tunnel deepens. That is not a leak
-— the same 488 nodes are re-meshed either way, but carving exposes interior
-faces that were previously culled, so they go from emitting almost nothing to
-~1,300 quads. Revealing new surface is inherently more work than not revealing
-it.
-
-`Modules/NodeEditor` raycasts from the camera centre (matching the crosshair)
-and edits whichever `BismuthBlob` it hits — left click places, right click
-destroys, both as rebindable input actions. It is instanced under the player
-and finds the active camera itself.
-
-The ray is cast from the **camera**, so the crosshair always edits what it
-covers and the character model is never in the way; `Reach` is measured from
-the *player* rather than the camera, or the camera's set-back distance would
-silently shorten it when standing away from a ledge. A placement is refused
-only when the cube would genuinely overlap the player capsule (a real
-box-vs-capsule test — a keep-out box around the body origin rejected valid
-placements near the feet, which is what made ledge edges refuse to build).
-
-Picking hands the blob the **ray**, not the contact point, and the blob marches
-along it to the first solid cell. A raycast hit lands exactly on a node face —
-a cell boundary — so mapping that single point to a cell rounds ambiguously
-between neighbours and can target an empty cell, which is why some clicks
-appeared to do nothing. Marching resolves faces, edges and corners
-consistently; measured 38/38 removals across angles and heights on a full blob.
-
-Edits are stored as **sparse per-node deltas on the blob** — keyed by
-(cell x, cell z, tier), not by column — applied on top of the generated field
-rather than baked into it. Per-node is what makes single-cube editing
-possible: a per-column "top tier" can only raise or clear a whole stack, so
-removing carved out the entire column and placing always landed on top of it.
-The mesher works from an explicit node set and emits only faces whose
-neighbour is absent, so a cube can be carved from the middle of a stack or
-stuck onto any one face. That is the
-diff-against-seed model from the terrain design: the blob still regenerates
-from its seed, and changing `Seed` or any terrace dial keeps player edits
-intact. `ClearEdits()` discards them.
-
-Note that each edit triggers a full blob rebuild (mesh plus trimesh collision),
-which is fine at these blob sizes but is the thing to replace with a dirty-chunk
-rebuild if blobs get much larger.
+1. Copy the module folder into the target project **at the same
+   `res://Modules/...` path** (scene files reference scripts by absolute
+   `res://` path).
+2. `Modules/Core` is required by almost everything. Register its autoloads in
+   the target `project.godot`:
+   ```ini
+   [autoload]
+   SettingsService="*res://Modules/Core/SettingsService.tscn"
+   UiStateService="*res://Modules/Core/UiStateService.tscn"
+   ```
+3. Copy the `[input]` section of `project.godot` (or define your own actions —
+   every action name used by the player and the tools is an exported property).
+4. Build the C# project.

@@ -1,1682 +1,814 @@
 using Godot;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
+using GameBase.Nodes.Meshing;
 
 namespace GameBase.Nodes;
 
 /// <summary>
-/// A world of cube blocks on the quad sphere, meshed and collided in sections.
+/// The world's nodes: their data, their geometry and their collision.
 ///
-/// A cell is (u, v, shell) on a <see cref="QuadSphereGrid"/>, stored as one
-/// byte of material in a <see cref="NodeChunkStore"/>. Geometry is built per
-/// SECTION -- an 8-cell cube of cells -- so one edit rebuilds a few hundred
-/// cells rather than a chunk's thirty thousand.
+/// Data lives in a <see cref="NodeChunkStore"/>, one chunk (32 cells a side) at
+/// a time. Geometry is built per SECTION (8 cells a side) so an edit rebuilds a
+/// few hundred cells rather than a chunk's thirty thousand. Each section is
+/// built by running every <see cref="INodeMesher"/> over it -- one per
+/// <see cref="NodeForm"/> -- on a worker thread; only the upload happens on the
+/// main thread, under a per-frame time budget, with edits served ahead of the
+/// streaming backlog so a dig shows on the next frame or two.
 ///
-/// THE MESHING RULE, IN FULL
+/// Raw and particle nodes collide on separate bodies, so a ray that hits the
+/// world knows which form it touched without guessing from the point.
 ///
-/// A block is a full cell, so a face is visible exactly when the neighbour on
-/// that side is not solid. There is nothing else to it: no shape variants, no
-/// sub-cell occupancy, no spill into adjoining cells. Six neighbour lookups per
-/// block decide six faces.
-///
-/// That simplicity is deliberate and hard-won. The previous mesher solved a
-/// per-node SHAPE, stamped its sub-cells into a map, and culled faces by
-/// probing that map -- which meant the map's coverage and the probe's reach had
-/// to agree exactly. They did not, and the disagreement drew faces between
-/// solid cells: 74.7% of all emitted geometry was buried inside the planet,
-/// rendering as sphere nested inside sphere. A rule with no map cannot drift
-/// out of step with itself.
-///
-/// WHAT "SOLID" MEANS AT THE EDGES
-///
-/// Two directions leave the grid, and they answer differently:
-///
-///   - OUTWARD past shell 0 is the sky, which is empty, so the surface shows;
-///   - INWARD past the deepest shell is the solid core, which is rock, so the
-///     bottom of the world is not drawn.
-///
-/// Getting the second wrong draws a complete sphere of geometry against the
-/// core that nothing can ever see.
+/// Everything here is in the world's local space, with the planet's centre at
+/// the origin; the public queries take and return global positions.
 /// </summary>
-public partial class NodeWorld : StaticBody3D
+public partial class NodeWorld : Node3D
 {
-    // ------------------------------------------------------------ appearance
+    public const int SectionSize = SectionSample.Size;
+    private const int SectionShift = 3;
+    private const int SectionsPerChunkShift = 2;
 
-    private float _nodeSize = 1f;
-    private Color _colorA = new(0.155f, 0.155f, 0.170f);
-    private Color _colorB = new(0.245f, 0.245f, 0.265f);
+    /// <summary>Milliseconds a frame may spend uploading finished sections.</summary>
+    [Export(PropertyHint.Range, "0.5,20,0.5")]
+    public float MeshBudgetMs { get; set; } = 4f;
 
-    [Export(PropertyHint.Range, "0.1,4,0.05")]
-    public float NodeSize
+    /// <summary>Worker threads building sections. 0 picks half the machine.</summary>
+    [Export(PropertyHint.Range, "0,32,1")]
+    public int MeshWorkers { get; set; }
+
+    /// <summary>The physics layer both collision bodies sit on.</summary>
+    [Export(PropertyHint.Layers3DPhysics)]
+    public uint CollisionLayer { get; set; } = 1;
+
+    public VoronoiGrid Grid { get; private set; }
+
+    public NodeChunkStore Store { get; } = new();
+
+    private static readonly INodeMesher[] Meshers = { new RawNodeMesher(), new ParticleNodeMesher() };
+
+    // ------------------------------------------------------------ lifecycle
+
+    /// <summary>Points the world at a grid, dropping everything it held.</summary>
+    public void Configure(VoronoiGrid grid)
     {
-        get => _nodeSize;
-        set { _nodeSize = Mathf.Max(0.05f, value); RebuildIfReady(); }
+        Clear();
+        Grid = grid;
     }
 
-    /// <summary>One of the two checkerboard shades.</summary>
-    [Export]
-    public Color ColorA { get => _colorA; set { _colorA = value; RebuildIfReady(); } }
-
-    /// <summary>The other. Alternating on a 3D checkerboard is what makes a
-    /// field of identical cubes readable -- without the shade break the eye
-    /// cannot tell where one block ends and the next begins.</summary>
-    [Export]
-    public Color ColorB { get => _colorB; set { _colorB = value; RebuildIfReady(); } }
-
-    // ----------------------------------------------------------------- grid
-
-    /// <summary>
-    /// The grid this world's nodes live on.
-    ///
-    /// Required: this world has no flat mode. Everything from face culling to
-    /// collision asks the grid what lies next to a node, because on a sphere
-    /// that question has no arithmetic answer.
-    ///
-    /// Held as the INTERFACE, not as one grid, so the same world can be a
-    /// cubed sphere of four-walled arcs or an icosphere of hexagonal prisms.
-    /// Nothing below here knows which -- a node is a polygon swept between two
-    /// radii either way.
-    /// </summary>
-    public INodeGrid Grid { get; set; }
-
-    // ---------------------------------------------------------------- store
-
-    private readonly NodeChunkStore _store = new();
-
-    public NodeChunkStore Store => _store;
-    public int NodeCount => _store.NodeCount;
-    public int LoadedChunks => _store.ChunkCount;
-    public long ApproximateBytes => _store.ApproximateBytes();
-
-    public const int ChunkSize = NodeChunkStore.ChunkSize;
-
-    /// <summary>
-    /// Cells along a section's edge.
-    ///
-    /// The unit of meshing, and deliberately far smaller than a chunk: an edit
-    /// dirties the sections within its reach, and a section is a
-    /// twenty-seventh of a chunk's volume. That ratio is what keeps mining one
-    /// block off the frame budget.
-    /// </summary>
-    public const int SectionSize = 8;
-
-    private const int SectionsPerChunk = ChunkSize / SectionSize;
-
-    private static Vector3I SectionOf(Vector3I cell) => new(
-        FloorDiv(cell.X, SectionSize),
-        FloorDiv(cell.Y, SectionSize),
-        FloorDiv(cell.Z, SectionSize));
-
-    private static Vector3I SectionOrigin(Vector3I section) => new(
-        section.X * SectionSize, section.Y * SectionSize, section.Z * SectionSize);
-
-    private static Vector3I ChunkOf(Vector3I cell) => NodeChunkStore.ChunkOf(cell);
-
-    /// <summary>Floor division, so negatives map to the cell below rather than
-    /// truncating toward zero.</summary>
-    internal static int FloorDiv(int value, int divisor)
+    /// <summary>Drops every chunk, section and pending build.</summary>
+    public void Clear()
     {
-        int q = value / divisor;
-        return value % divisor != 0 && (value < 0) != (divisor < 0) ? q - 1 : q;
+        foreach (SectionNodes nodes in _sections.Values)
+            nodes.Free();
+
+        _sections.Clear();
+        _urgent.Clear();
+        _urgentOrder.Clear();
+        _group = null;
+        _backlog.Clear();
+        _backlogOrder.Clear();
+        _tickets.Clear();
+        Store.Clear();
+
+        // Anything still building describes the world just dropped; its
+        // results are discarded on arrival.
+        Interlocked.Increment(ref _generation);
     }
 
-    // ------------------------------------------------------------- the faces
+    public override void _Process(double delta) => Pump(MeshBudgetMs);
 
-    /// <summary>
-    /// The six faces of a cube, in the cell's own frame.
-    ///
-    /// The offset is (du, dv, dOut) as <see cref="QuadSphereGrid.Neighbour"/>
-    /// reads it, so +Z is OUTWARD. Corners are listed so the quad winds
-    /// correctly when the grid maps them; see <see cref="AddFace"/>.
-    /// </summary>
-    private readonly struct Face
+    public override void _ExitTree()
     {
-        public readonly Vector3I Step;
-        public readonly Vector3 C0, C1, C2, C3;
-
-        public Face(Vector3I step, Vector3 c0, Vector3 c1, Vector3 c2, Vector3 c3)
-        {
-            Step = step;
-            C0 = c0; C1 = c1; C2 = c2; C3 = c3;
-        }
+        Interlocked.Increment(ref _generation);
     }
-
-    /// <summary>
-    /// Every face, with its corners in cell-local 0..1 coordinates.
-    ///
-    /// Ordered CLOCKWISE seen from outside the block, which is what Godot's
-    /// front-face test wants -- the opposite of the usual maths convention, and
-    /// the thing to check first when a surface renders invisible from the side
-    /// it should be seen from. Listing them explicitly rather than deriving
-    /// them from the axis keeps the winding a fact of the table instead of a
-    /// rule to get wrong per face.
-    ///
-    /// Every entry was once wound the other way, so all six faces of every
-    /// block were built back-to-front: the stored normal and the triangle
-    /// order agreed with EACH OTHER -- which is why a winding-vs-normal check
-    /// alone could not see it -- but both pointed into the block. What that
-    /// looked like was a planet whose ground could be stood on and mined but
-    /// never seen, with its far inner surface showing through from below the
-    /// horizon. MeshAudit's winding count is the regression test.
-    /// </summary>
-    private static readonly Face[] Faces =
-    {
-        // Outward (+Z): the face that points at the sky.
-        new(new Vector3I(0, 0, 1),
-            new Vector3(0, 1, 1), new Vector3(1, 1, 1),
-            new Vector3(1, 0, 1), new Vector3(0, 0, 1)),
-
-        // Inward (-Z): toward the core.
-        new(new Vector3I(0, 0, -1),
-            new Vector3(0, 0, 0), new Vector3(1, 0, 0),
-            new Vector3(1, 1, 0), new Vector3(0, 1, 0)),
-
-        // +u
-        new(new Vector3I(1, 0, 0),
-            new Vector3(1, 0, 1), new Vector3(1, 1, 1),
-            new Vector3(1, 1, 0), new Vector3(1, 0, 0)),
-
-        // -u
-        new(new Vector3I(-1, 0, 0),
-            new Vector3(0, 1, 1), new Vector3(0, 0, 1),
-            new Vector3(0, 0, 0), new Vector3(0, 1, 0)),
-
-        // +v
-        new(new Vector3I(0, 1, 0),
-            new Vector3(1, 1, 1), new Vector3(0, 1, 1),
-            new Vector3(0, 1, 0), new Vector3(1, 1, 0)),
-
-        // -v
-        new(new Vector3I(0, -1, 0),
-            new Vector3(0, 0, 1), new Vector3(1, 0, 1),
-            new Vector3(1, 0, 0), new Vector3(0, 0, 0)),
-    };
-
-    /// <summary>
-    /// Is the cell one step this way solid?
-    ///
-    /// The whole face-culling rule. Off the grid INWARD is the solid core and
-    /// counts as solid; off it OUTWARD is the sky and does not.
-    ///
-    /// UNKNOWN COUNTS AS SOLID. A neighbour whose chunk is not resident yet is
-    /// not air — it is unmeasured, and the two must not be confused. The
-    /// asymmetry is in what each mistake costs: hiding a face that should have
-    /// been drawn is repaired the moment the neighbour lands and the chunk is
-    /// re-meshed, while drawing one that should have been hidden is a hole
-    /// straight through the world that nothing later takes back. So the
-    /// unknown resolves to "covered", and the streamer's job is to re-mesh on
-    /// arrival rather than to guarantee the answer was known up front.
-    /// </summary>
-    private bool RadialSolid(Vector3I cell, int dOut)
-    {
-        if (!Grid.RadialNeighbour(cell, dOut, out Vector3I at))
-        {
-            // Left the grid. Inward is the solid core; outward is the sky.
-            return dOut < 0;
-        }
-
-        return Covered(at);
-    }
-
-    /// <summary>
-    /// Is the node past one of this node's side walls solid?
-    ///
-    /// A wall with nothing beyond it is drawn: that only happens where the
-    /// lattice itself ends, which is the edge of the world rather than the
-    /// inside of it.
-    /// </summary>
-    private bool WallSolid(Vector3I cell, int wall)
-    {
-        if (!Grid.WallNeighbour(cell, wall, out Vector3I at))
-            return false;
-
-        return Covered(at);
-    }
-
-    /// <summary>
-    /// Does this node hide the face pointing at it?
-    ///
-    /// UNKNOWN COUNTS AS SOLID. A neighbour whose chunk is not resident yet is
-    /// not air — it is unmeasured, and the two must not be confused. The
-    /// asymmetry is in what each mistake costs: hiding a face that should have
-    /// been drawn is repaired the moment the neighbour lands and the chunk is
-    /// re-meshed, while drawing one that should have been hidden is a hole
-    /// straight through the world that nothing later takes back. So the
-    /// unknown resolves to "covered", and the streamer's job is to re-mesh on
-    /// arrival rather than to guarantee the answer was known up front.
-    /// </summary>
-    private bool Covered(Vector3I at)
-    {
-        // Canonical first: on a grid whose seam sites have several spellings,
-        // the store only ever holds one of them, and asking under another
-        // reports solid rock as empty air.
-        at = Grid.Canonical(at);
-
-        bool solid = _store.Has(at, out bool known);
-
-        // Not resident: assume covered. This is what keeps the underside of the
-        // loaded region from opening onto the core, whose shells are on the
-        // grid but were never streamed in.
-        return !known || solid;
-    }
-
-    // ----------------------------------------------------------- scene nodes
-
-    private sealed class SectionNodes
-    {
-        public readonly MeshInstance3D MeshInstance;
-        public readonly CollisionShape3D CollisionShape;
-        public ConcavePolygonShape3D Trimesh;
-
-        public SectionNodes(Node parent, Vector3I coord)
-        {
-            MeshInstance = new MeshInstance3D { Name = $"Mesh{coord.X}_{coord.Y}_{coord.Z}" };
-            CollisionShape = new CollisionShape3D { Name = $"Col{coord.X}_{coord.Y}_{coord.Z}" };
-            parent.AddChild(MeshInstance);
-            parent.AddChild(CollisionShape);
-        }
-
-        public void Dispose()
-        {
-            MeshInstance.QueueFree();
-            CollisionShape.QueueFree();
-        }
-    }
-
-    private readonly Dictionary<Vector3I, SectionNodes> _sections = new();
-
-    /// <summary>Sections whose geometry no longer matches the store.</summary>
-    private readonly HashSet<Vector3I> _dirty = new();
-
-    /// <summary>Chunks whose sections have been built.</summary>
-    /// <remarks>
-    /// Recorded rather than inferred from whether a scene node exists, because
-    /// a chunk can legitimately mesh to NOTHING -- every section empty, or
-    /// every face buried. Judging by scene nodes told the streamer such a chunk
-    /// still owed geometry, so it re-queued it forever and the world never
-    /// finished loading.
-    /// </remarks>
-    private readonly HashSet<Vector3I> _meshed = new();
-
-    private readonly List<Vector3I> _scratch = new();
-
-    // Batch state: whether edits are deferred, and what is owed.
-    private bool _deferRebuild;
-    private bool _rebuildPending;
-    private bool _fullRebuildNeeded;
-
-    // --------------------------------------------------------------- scratch
-
-    /// <summary>
-    /// Buffers for building one section.
-    ///
-    /// Reused rather than allocated per section: a build appends a few thousand
-    /// vertices, and letting the lists keep their capacity turns a stream of
-    /// allocations into none after the first few sections.
-    /// </summary>
-    private sealed class MeshScratch
-    {
-        public readonly List<Vector3> Vertices = new();
-        public readonly List<Vector3> Normals = new();
-        public readonly List<Color> Colors = new();
-        public readonly List<int> Indices = new();
-        public readonly List<Vector3> CollisionVertices = new();
-
-        public void Clear()
-        {
-            Vertices.Clear();
-            Normals.Clear();
-            Colors.Clear();
-            Indices.Clear();
-            CollisionVertices.Clear();
-        }
-    }
-
-    private readonly MeshScratch _scratchMesh = new();
-
-    private StandardMaterial3D _material;
-
-    /// <summary>One material for the whole world: the colour rides on the
-    /// vertices, so every section can share a single shader instance.</summary>
-    private StandardMaterial3D SharedMaterial => _material ??= new StandardMaterial3D
-    {
-        VertexColorUseAsAlbedo = true,
-        Roughness = 1f,
-    };
 
     // --------------------------------------------------------------- queries
 
-    /// <summary>The material in a cell, or Raw where there is nothing.</summary>
-    public NodeMaterial MaterialAt(Vector3I cell)
+    /// <summary>The kind of node in a cell, or null for air (or unloaded).</summary>
+    public NodeType TypeAt(Vector3I cell) => NodeTypes.Of(Store.MaterialAt(cell));
+
+    /// <summary>A particle cell's fill; <see cref="NodeFill.Full"/> for raw, empty for air.</summary>
+    public byte FillAt(Vector3I cell)
     {
-        byte raw = _store.Get(cell);
-        return raw == NodeChunkStore.Air ? NodeMaterial.Raw : (NodeMaterial)raw;
+        byte material = Store.MaterialAt(cell);
+
+        if (material == NodeChunkStore.Air)
+            return NodeFill.Empty;
+
+        return NodeTypes.IsRaw(material) ? NodeFill.Full : Store.FillAt(cell);
     }
 
-    /// <summary>Is there a block in this cell?</summary>
-    public bool HasNode(Vector3I cell) => _store.Has(cell);
+    /// <summary>The node whose region contains a global point.</summary>
+    public Vector3I CellAt(Vector3 globalPoint) => Grid.CellAt(ToLocal(globalPoint));
+
+    /// <summary>A node's site, in global space.</summary>
+    public Vector3 SiteOf(Vector3I cell) => ToGlobal(Grid.SiteOf(cell));
+
+    /// <summary>A cell's lattice point, in global space.</summary>
+    public Vector3 LatticePoint(Vector3I cell) => ToGlobal(Grid.LatticePoint(cell));
+
+    public float NodeSize => Grid?.NodeSize ?? 1f;
+
+    public bool IsChunkLoaded(Vector3I chunk) => Store.IsLoaded(chunk);
+
+    public bool IsCellLoaded(Vector3I cell) => Store.IsLoaded(NodeChunkStore.ChunkOf(cell));
+
+    // ----------------------------------------------------------------- edits
 
     /// <summary>
-    /// Is there a block here, in a cell the grid actually has?
-    ///
-    /// The store does no bounds checking -- it cannot, because on a flat world
-    /// every coordinate is a real place. Here a sky point has a NEGATIVE shell,
-    /// and a negative index does not fail, it wraps: shell -1 lands in chunk -1
-    /// at local slot 31, the top cell of a chunk that may well be solid rock.
-    /// So the store cheerfully reported open sky as stone and a ray cast at the
-    /// ground stopped a block short of it.
+    /// Puts a node in a cell, replacing whatever was there. Raw nodes are always
+    /// full; a particle takes the fill given. Returns whether anything changed.
     /// </summary>
-    public bool HasSolid(Vector3I cell) => Grid.Contains(cell) && _store.Has(cell);
-
-    /// <summary>The cell containing a world point.</summary>
-    public Vector3I CellAt(Vector3 worldPoint) => Grid.CellAt(ToLocal(worldPoint));
-
-    /// <summary>The world position of a cell's centre.</summary>
-    public Vector3 CellCentre(Vector3I cell) => ToGlobal(Grid.CentreOf(cell));
-
-    /// <summary>
-    /// The corners of a node, for anything drawing an outline around it.
-    ///
-    /// Handed out rather than recomputed by the caller so a highlight traces
-    /// the same shape the mesh does -- a cube drawn from a centre and a size
-    /// sits visibly off a curved block, and badly off a hexagonal one.
-    ///
-    /// Writes the outer ring first and then the inner, and returns how many are
-    /// in EACH ring -- so corner `n` and corner `count + n` are the two ends of
-    /// the same vertical edge. A caller wanting the whole node needs room for
-    /// twice <see cref="INodeGrid.MaxWalls"/>.
-    /// </summary>
-    public int CellCorners(Vector3I cell, Span<Vector3> corners)
+    public bool SetNode(Vector3I cell, NodeType type, byte fill = NodeFill.Full)
     {
-        int walls = Grid.MaxWalls;
+        if (type == null)
+            return ClearNode(cell);
 
-        if (corners.Length < walls * 2)
-            return 0;
-
-        int count = Grid.TopCorners(cell, corners[..walls]);
-        Grid.BottomCorners(cell, corners.Slice(walls, walls));
-
-        // Compacted so the two rings are adjacent even when a node has fewer
-        // walls than the grid's maximum, which a pentagon does.
-        for (int n = 0; n < count; n++)
-            corners[count + n] = corners[walls + n];
-
-        for (int n = 0; n < count * 2; n++)
-            corners[n] = ToGlobal(corners[n]);
-
-        return count;
-    }
-
-    // ---------------------------------------------------------------- edits
-
-    /// <summary>Puts a block in a cell. False if one was already there.</summary>
-    public bool AddNode(Vector3I cell, NodeMaterial material = NodeMaterial.Stone)
-    {
-        if (!Grid.Contains(cell) || !_store.Set(cell, (byte)material))
+        if (!IsCellLoaded(cell))
             return false;
 
-        MarkDirty(cell);
-        RebuildOrDefer();
+        byte stored = type.Form == NodeForm.Raw ? NodeFill.Full : fill;
+
+        if (!Store.Set(cell, (byte)type.Material, stored))
+            return false;
+
+        MarkEdited(cell);
         return true;
     }
 
-    /// <summary>Takes a block out. False if the cell was already empty.</summary>
-    public bool RemoveNode(Vector3I cell)
+    /// <summary>Empties a cell. Returns whether anything changed.</summary>
+    public bool ClearNode(Vector3I cell)
     {
-        if (!_store.Set(cell, NodeChunkStore.Air))
+        if (!IsCellLoaded(cell) || !Store.Set(cell, NodeChunkStore.Air, NodeFill.Empty))
             return false;
 
-        MarkDirty(cell);
-        RebuildOrDefer();
+        MarkEdited(cell);
         return true;
     }
 
-    /// <summary>Adds a block without triggering a rebuild, for bulk loading.</summary>
-    public bool AddNodeGenerated(Vector3I cell, NodeMaterial material) =>
-        Grid.Contains(cell) && _store.Set(cell, (byte)material);
+    /// <summary>
+    /// Sets a particle cell's surface distance (see <see cref="NodeFill"/>),
+    /// turning the cell to air once it holds nothing. Raw cells are left alone.
+    /// Returns whether anything changed.
+    /// </summary>
+    public bool SetParticleLevel(Vector3I cell, ParticleNode type, float level) =>
+        SetParticleFill(cell, type, NodeFill.FromLevel(level));
 
     /// <summary>
-    /// Marks every section an edit at this cell can change.
-    ///
-    /// A block's faces depend only on its six neighbours, so an edit changes
-    /// geometry at most one cell away -- but that cell may be in an adjoining
-    /// section, and on the sphere "one cell away" is a grid step rather than an
-    /// addition. Walking the step through the grid is what makes an edit at a
-    /// face fold rebuild the sections on both sides of it.
+    /// <see cref="SetParticleLevel"/> with the fill byte already chosen, for
+    /// edits that round it themselves.
     /// </summary>
-    private void MarkDirty(Vector3I cell)
+    public bool SetParticleFill(Vector3I cell, ParticleNode type, byte fill)
     {
-        _dirty.Add(SectionOf(cell));
+        if (NodeTypes.IsRaw(Store.MaterialAt(cell)))
+            return false;
 
-        // Every node that shares a face with this one: the two radial
-        // neighbours and one per side wall. Asked of the grid rather than added
-        // to the address, which is what makes an edit at a seam rebuild the
-        // sections on both sides of it.
-        if (Grid.RadialNeighbour(cell, 1, out Vector3I above))
-            _dirty.Add(SectionOf(above));
+        return fill == NodeFill.Empty ? ClearNode(cell) : SetNode(cell, type, fill);
+    }
 
-        if (Grid.RadialNeighbour(cell, -1, out Vector3I below))
-            _dirty.Add(SectionOf(below));
+    /// <summary>
+    /// A particle cell's surface distance in nodes: fully outside for air,
+    /// fully inside for raw (rock counts as buried), the stored level otherwise.
+    /// </summary>
+    public float ParticleLevel(Vector3I cell)
+    {
+        byte material = Store.MaterialAt(cell);
 
-        int walls = Grid.WallCount(cell);
+        if (material == NodeChunkStore.Air)
+            return -NodeFill.Range;
 
-        for (int w = 0; w < walls; w++)
+        return NodeTypes.IsRaw(material) ? NodeFill.Range : NodeFill.ToLevel(Store.FillAt(cell));
+    }
+
+    /// <summary>
+    /// Queues every section an edit at this cell can change, ahead of the
+    /// streaming backlog.
+    ///
+    /// TWO cells out. The particle surface through a cell depends on the cells
+    /// around it, one out. But whether a cell hides the rock face turned toward
+    /// it depends on ITS neighbours (see <see cref="SectionSample.Covers"/>),
+    /// so emptying one cell can uncover a rock face two cells away -- and a
+    /// section left unbuilt there keeps a hole where that face should be.
+    /// </summary>
+    private void MarkEdited(Vector3I cell)
+    {
+        Vector3I reach = Vector3I.One * SectionSample.Border;
+        Vector3I low = SectionOf(cell - reach);
+        Vector3I high = SectionOf(cell + reach);
+
+        for (int x = low.X; x <= high.X; x++)
+        for (int y = low.Y; y <= high.Y; y++)
+        for (int z = low.Z; z <= high.Z; z++)
         {
-            if (Grid.WallNeighbour(cell, w, out Vector3I at))
-                _dirty.Add(SectionOf(at));
+            var section = new Vector3I(x, y, z);
+
+            if (Store.IsLoaded(ChunkOfSection(section)) && _urgent.Add(section))
+                _urgentOrder.Enqueue(section);
+        }
+    }
+
+    // --------------------------------------------------------------- chunks
+
+    /// <summary>
+    /// Installs a generated chunk and queues its geometry, plus the bordering
+    /// sections of chunks already here: their faces toward this chunk were
+    /// hidden while it was unknown and can now be drawn properly.
+    /// </summary>
+    public void InstallChunk(Vector3I chunk, byte[] materials, byte[] fills)
+    {
+        Store.Install(chunk, materials, fills);
+
+        Vector3I origin = NodeChunkStore.OriginOf(chunk);
+        Vector3I low = SectionOf(origin - Vector3I.One);
+        Vector3I high = SectionOf(origin + Vector3I.One * NodeChunkStore.ChunkSize);
+
+        for (int x = low.X; x <= high.X; x++)
+        for (int y = low.Y; y <= high.Y; y++)
+        for (int z = low.Z; z <= high.Z; z++)
+        {
+            var section = new Vector3I(x, y, z);
+
+            if (Store.IsLoaded(ChunkOfSection(section)) && _backlog.Add(section))
+                _backlogOrder.Enqueue(section);
+        }
+    }
+
+    /// <summary>Drops a chunk's data and geometry.</summary>
+    public void UnloadChunk(Vector3I chunk)
+    {
+        Store.Unload(chunk);
+
+        Vector3I first = new(chunk.X << SectionsPerChunkShift, chunk.Y << SectionsPerChunkShift,
+            chunk.Z << SectionsPerChunkShift);
+        int count = 1 << SectionsPerChunkShift;
+
+        for (int x = 0; x < count; x++)
+        for (int y = 0; y < count; y++)
+        for (int z = 0; z < count; z++)
+        {
+            var section = new Vector3I(first.X + x, first.Y + y, first.Z + z);
+
+            if (_sections.Remove(section, out SectionNodes nodes))
+                nodes.Free();
+
+            _urgent.Remove(section);
+            _backlog.Remove(section);
+            _tickets.Remove(section);
+        }
+    }
+
+    // --------------------------------------------------------------- meshing
+
+    private readonly Dictionary<Vector3I, SectionNodes> _sections = new();
+
+    /// <summary>
+    /// Sections an edit changed and that are waiting to be built, in the order
+    /// they were first marked. They go out together, as one
+    /// <see cref="EditGroup"/>, ahead of anything streaming queued.
+    ///
+    /// IN ORDER. A held shovel re-marks the same few dozen sections every
+    /// frame. Taken in a set's own order, the ones that happened to come first
+    /// were rebuilt every time and the rest could wait for as long as the
+    /// button was held -- the ground under the player kept its old collision
+    /// while the particle surface rose past it, and swallowed them. A section keeps its
+    /// place in the queue when it is marked again, so every one is reached.
+    /// </summary>
+    private readonly HashSet<Vector3I> _urgent = new();
+    private readonly Queue<Vector3I> _urgentOrder = new();
+
+    /// <summary>
+    /// Every section a round of edits changed, built together and uploaded in
+    /// the same frame -- never some before others.
+    ///
+    /// One edit reshapes a surface that runs across several sections. Uploaded
+    /// one by one as each worker finished, a pit's floor could leave the
+    /// section above before it arrived in the section below: a frame or two
+    /// with a hole in the ground, which showed the sky through the planet and
+    /// could drop a player standing on it. Only one group is out at a time;
+    /// edits made while it builds wait for the next.
+    /// </summary>
+    private sealed class EditGroup
+    {
+        public int Remaining;
+        public readonly ConcurrentQueue<SectionGeometry> Done = new();
+    }
+
+    private EditGroup _group;
+
+    /// <summary>Sections streaming queued, built in the order they arrived.</summary>
+    private readonly HashSet<Vector3I> _backlog = new();
+    private readonly Queue<Vector3I> _backlogOrder = new();
+
+    /// <summary>
+    /// The newest build uploaded for each section. Every build takes a ticket
+    /// from one rising counter, and a result is uploaded only if its ticket is
+    /// newer than what is already there -- so a slow worker finishing an old
+    /// build can never overwrite geometry from a newer one.
+    ///
+    /// NEWER, NOT NEWEST. A section being dug is rebuilt every frame, and while
+    /// the button is held there is always a newer build in flight; uploading
+    /// only the very latest would show nothing until the digging stopped.
+    /// </summary>
+    private readonly Dictionary<Vector3I, long> _tickets = new();
+    private long _nextTicket;
+
+    private readonly ConcurrentQueue<SectionGeometry> _finished = new();
+    private readonly ConcurrentBag<SectionGeometry> _spare = new();
+    private int _inFlight;
+    private int _generation;
+
+    [ThreadStatic] private static SectionSample _sample;
+
+    /// <summary>Sections uploaded since the world was configured.</summary>
+    public int BuiltSections { get; private set; }
+
+    /// <summary>Sections queued or building.</summary>
+    public int PendingSections => _urgent.Count + _backlog.Count + Volatile.Read(ref _inFlight);
+
+    public bool HasPendingMeshes => PendingSections > 0 || !_finished.IsEmpty || _group != null;
+
+    private int WorkerCount => MeshWorkers > 0
+        ? MeshWorkers
+        : Math.Max(1, System.Environment.ProcessorCount / 2);
+
+    /// <summary>Uploads finished sections and starts new builds, within a budget.</summary>
+    public void Pump(float budgetMs)
+    {
+        if (Grid == null)
+            return;
+
+        ulong deadline = Time.GetTicksUsec() + (ulong)(Math.Max(0.1f, budgetMs) * 1000f);
+
+        // A finished edit group goes up whole, whatever the budget: half of one
+        // is exactly the hole the group exists to prevent.
+        if (_group != null && Volatile.Read(ref _group.Remaining) == 0)
+        {
+            while (_group.Done.TryDequeue(out SectionGeometry edited))
+                Apply(edited);
+
+            _group = null;
         }
 
+        while (Time.GetTicksUsec() < deadline && _finished.TryDequeue(out SectionGeometry done))
+            Apply(done);
+
+        if (_group == null && _urgent.Count > 0)
+            StartGroup();
+
+        // Streaming goes out in batches, since a task per section spends more
+        // on scheduling than on the build of an empty section of sky.
+        while (Volatile.Read(ref _inFlight) < WorkerCount)
+        {
+            var batch = new List<Vector3I>(StreamBatch);
+
+            while (batch.Count < StreamBatch && TryTakeBacklog(out Vector3I section))
+                batch.Add(section);
+
+            if (batch.Count == 0)
+                break;
+
+            Dispatch(batch, null);
+        }
+    }
+
+    /// <summary>Sections one streaming task builds.</summary>
+    private const int StreamBatch = 16;
+
+    /// <summary>Sends every edited section out as one group, spread over the workers.</summary>
+    private void StartGroup()
+    {
+        var sections = new List<Vector3I>(_urgent.Count);
+
+        while (TryTakeUrgent(out Vector3I section))
+            sections.Add(section);
+
+        var group = new EditGroup { Remaining = sections.Count };
+        _group = group;
+
+        int tasks = Math.Min(WorkerCount, sections.Count);
+
+        for (int t = 0; t < tasks; t++)
+        {
+            var share = new List<Vector3I>(sections.Count / tasks + 1);
+
+            for (int n = t; n < sections.Count; n += tasks)
+                share.Add(sections[n]);
+
+            Dispatch(share, group);
+        }
     }
 
     /// <summary>
-    /// How many sections an edit at this cell would mark dirty. Diagnostic
-    /// only -- it runs MarkDirty's enumeration without touching the dirty set.
+    /// Builds and uploads everything queued, on the calling thread, and waits
+    /// for any worker still running. For tests and tools with no frame loop.
     /// </summary>
-    /// <summary>
-    /// Triangles currently uploaded across every section. Diagnostic: it is
-    /// what proves an edit reached the GEOMETRY and not just the store.
-    /// </summary>
-    /// <summary>
-    /// A hash of every uploaded vertex. Diagnostic.
-    ///
-    /// TriangleCount cannot tell a mesh that changed from one that did not: a
-    /// rebuild that adds as many triangles as it removes leaves the count
-    /// identical, which read as 3 of 20 digs "not redrawing" when all 20 had.
-    /// This changes whenever any vertex moves.
-    /// </summary>
-    public ulong GeometryHash
+    public void MeshAllNow()
     {
-        get
+        while (Volatile.Read(ref _inFlight) > 0)
+            Thread.Yield();
+
+        if (_group != null)
         {
-            ulong hash = 1469598103934665603UL;
+            while (_group.Done.TryDequeue(out SectionGeometry edited))
+                Apply(edited);
 
-            foreach (var kv in _sections)
+            _group = null;
+        }
+
+        while (_finished.TryDequeue(out SectionGeometry done))
+            Apply(done);
+
+        while (TryTakeUrgent(out Vector3I section) || TryTakeBacklog(out section))
+        {
+            SectionGeometry geometry = Build(section, ++_nextTicket, Volatile.Read(ref _generation));
+            Apply(geometry);
+        }
+    }
+
+    private bool TryTakeUrgent(out Vector3I section)
+    {
+        while (_urgentOrder.Count > 0)
+        {
+            section = _urgentOrder.Dequeue();
+
+            if (_urgent.Remove(section))
+                return true;
+        }
+
+        section = default;
+        return false;
+    }
+
+    private bool TryTakeBacklog(out Vector3I section)
+    {
+        while (_backlogOrder.Count > 0)
+        {
+            section = _backlogOrder.Dequeue();
+
+            if (_backlog.Remove(section))
+                return true;
+        }
+
+        section = default;
+        return false;
+    }
+
+    /// <summary>
+    /// Builds sections on a worker. Results go to the group, when there is
+    /// one, and otherwise straight to the upload queue.
+    /// </summary>
+    private void Dispatch(List<Vector3I> sections, EditGroup group)
+    {
+        var tickets = new long[sections.Count];
+        for (int n = 0; n < sections.Count; n++)
+            tickets[n] = ++_nextTicket;
+
+        int generation = Volatile.Read(ref _generation);
+
+        Interlocked.Increment(ref _inFlight);
+
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            try
             {
-                Mesh mesh = kv.Value.MeshInstance.Mesh;
-
-                if (mesh == null || mesh.GetSurfaceCount() == 0)
-                    continue;
-
-                var verts = mesh.SurfaceGetArrays(0)[(int)Mesh.ArrayType.Vertex]
-                    .AsVector3Array();
-
-                foreach (Vector3 v in verts)
+                for (int n = 0; n < sections.Count; n++)
                 {
-                    // Quantised, so float noise between rebuilds does not read
-                    // as a change while a real move of a millimetre does.
-                    hash ^= (ulong)Mathf.RoundToInt(v.X * 1000f);
-                    hash *= 1099511628211UL;
-                    hash ^= (ulong)Mathf.RoundToInt(v.Y * 1000f);
-                    hash *= 1099511628211UL;
-                    hash ^= (ulong)Mathf.RoundToInt(v.Z * 1000f);
-                    hash *= 1099511628211UL;
+                    if (generation != Volatile.Read(ref _generation))
+                        break;
+
+                    // A section that fails still counts off, or its group
+                    // would wait forever.
+                    try
+                    {
+                        SectionGeometry built = Build(sections[n], tickets[n], generation);
+                        (group?.Done ?? _finished).Enqueue(built);
+                    }
+                    catch (Exception error)
+                    {
+                        GD.PushError($"NodeWorld: building section {sections[n]} failed - {error}");
+                    }
+                    finally
+                    {
+                        if (group != null)
+                            Interlocked.Decrement(ref group.Remaining);
+                    }
                 }
             }
-
-            return hash;
-        }
+            finally
+            {
+                Interlocked.Decrement(ref _inFlight);
+            }
+        });
     }
 
+    /// <summary>Runs every mesher over one section. Pure computation; any thread.</summary>
+    private SectionGeometry Build(Vector3I section, long ticket, int generation)
+    {
+        if (!_spare.TryTake(out SectionGeometry geometry))
+            geometry = new SectionGeometry();
+
+        geometry.Clear();
+        geometry.Section = section;
+        geometry.Ticket = ticket;
+        geometry.Generation = generation;
+
+        // Open sky, border and all: nothing to draw, and no need to read a cell
+        // to know it. Most of the sky around a player is this.
+        Vector3I origin = SectionOrigin(section);
+        Vector3I border = Vector3I.One * SectionSample.Border;
+
+        if (Store.IsUniformAir(origin - border, origin + Vector3I.One * (SectionSample.Size - 1) + border))
+            return geometry;
+
+        SectionSample sample = _sample ??= new SectionSample();
+        sample.Read(Store, Grid, origin);
+
+        foreach (INodeMesher mesher in Meshers)
+            mesher.Build(sample, Grid, geometry);
+
+        return geometry;
+    }
+
+    /// <summary>Hands a finished section to the renderer and the physics server.</summary>
+    private void Apply(SectionGeometry geometry)
+    {
+        Vector3I section = geometry.Section;
+
+        bool current = geometry.Generation == Volatile.Read(ref _generation)
+            && (!_tickets.TryGetValue(section, out long uploaded) || geometry.Ticket > uploaded)
+            && Store.IsLoaded(ChunkOfSection(section));
+
+        if (current)
+        {
+            _tickets[section] = geometry.Ticket;
+            Upload(section, geometry);
+            BuiltSections++;
+        }
+
+        _spare.Add(geometry);
+    }
+
+    private void Upload(Vector3I section, SectionGeometry geometry)
+    {
+        if (geometry.IsEmpty)
+        {
+            if (_sections.Remove(section, out SectionNodes gone))
+                gone.Free();
+
+            return;
+        }
+
+        if (!_sections.TryGetValue(section, out SectionNodes nodes))
+        {
+            EnsureBodies();
+            nodes = new SectionNodes(this, _rawBody, _particleBody, section,
+                Grid.LatticePoint(SectionOrigin(section)));
+            _sections[section] = nodes;
+        }
+
+        var mesh = new ArrayMesh();
+
+        if (!geometry.Raw.IsEmpty)
+        {
+            mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, geometry.Raw.ToArrays());
+            mesh.SurfaceSetMaterial(mesh.GetSurfaceCount() - 1, NodeMaterials.Raw);
+        }
+
+        var particleCollision = new List<Vector3>();
+
+        foreach (byte material in geometry.ParticleMaterials)
+        {
+            MeshBuffers buffers = geometry.Particle(material);
+
+            if (buffers.IsEmpty)
+                continue;
+
+            mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, buffers.ToArrays());
+            mesh.SurfaceSetMaterial(mesh.GetSurfaceCount() - 1,
+                NodeMaterials.Particle((ParticleNode)NodeTypes.Of(material)));
+
+            particleCollision.AddRange(buffers.Collision);
+        }
+
+        nodes.Mesh.Mesh = mesh;
+        nodes.SetCollision(geometry.Raw.Collision, particleCollision);
+    }
+
+    // -------------------------------------------------------------- physics
+
+    private StaticBody3D _rawBody;
+    private StaticBody3D _particleBody;
+
+    private void EnsureBodies()
+    {
+        if (_rawBody != null)
+            return;
+
+        _rawBody = new StaticBody3D { Name = "RawBody", CollisionLayer = CollisionLayer };
+        _particleBody = new StaticBody3D { Name = "ParticleBody", CollisionLayer = CollisionLayer };
+        AddChild(_rawBody);
+        AddChild(_particleBody);
+    }
+
+    /// <summary>
+    /// The first node surface between two global points.
+    ///
+    /// Asked of the physics server, which holds exactly the surfaces that are
+    /// drawn, so the hit is the thing under the crosshair. Which body was hit
+    /// says the form; the cell comes from nudging the point just inside the
+    /// surface.
+    /// </summary>
+    public bool Raycast(Vector3 from, Vector3 to, out NodeHit hit,
+        Godot.Collections.Array<Rid> exclude = null)
+    {
+        hit = default;
+
+        if (Grid == null || _rawBody == null || !IsInsideTree())
+            return false;
+
+        var query = PhysicsRayQueryParameters3D.Create(from, to, CollisionLayer);
+        if (exclude != null)
+            query.Exclude = exclude;
+
+        Godot.Collections.Dictionary result = GetWorld3D().DirectSpaceState.IntersectRay(query);
+
+        if (result.Count == 0)
+            return false;
+
+        var collider = result["collider"].As<GodotObject>();
+        var point = (Vector3)result["position"];
+        var normal = ((Vector3)result["normal"]).Normalized();
+        float nudge = NodeSize * 0.02f;
+
+        if (collider == _rawBody)
+            return RawHit(point, normal, (to - from).Normalized(), nudge, out hit);
+
+        if (collider == _particleBody)
+        {
+            hit = ParticleHit(point, normal);
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool RawHit(Vector3 point, Vector3 normal, Vector3 direction, float nudge, out NodeHit hit)
+    {
+        Vector3I cell = CellAt(point - normal * nudge);
+
+        // Right at an edge the nudge along the normal can land in the
+        // neighbour; stepping along the ray itself resolves it.
+        if (TypeAt(cell) is not RawNode)
+            cell = CellAt(point + direction * nudge);
+
+        if (TypeAt(cell) is not RawNode type)
+        {
+            hit = default;
+            return false;
+        }
+
+        hit = new NodeHit(point, normal, type, cell, CellAt(point + normal * nudge));
+        return true;
+    }
+
+    private NodeHit ParticleHit(Vector3 point, Vector3 normal)
+    {
+        Vector3I cell = CellAt(point - normal * NodeSize * 0.25f);
+        NodeType type = TypeAt(cell);
+
+        // The smooth surface does not follow cell walls, so the cell just under
+        // it may be air or rock; the nearest particle names the material.
+        if (type is not ParticleNode)
+        {
+            type = NodeTypes.Sand;
+
+            for (int n = 0; n < 27; n++)
+            {
+                var step = new Vector3I(n % 3 - 1, n / 3 % 3 - 1, n / 9 - 1);
+
+                if (TypeAt(cell + step) is ParticleNode near)
+                {
+                    type = near;
+                    break;
+                }
+            }
+        }
+
+        return new NodeHit(point, normal, type, cell, CellAt(point + normal * NodeSize * 0.25f));
+    }
+
+    // -------------------------------------------------------------- helpers
+
+    public static Vector3I SectionOf(Vector3I cell) =>
+        new(cell.X >> SectionShift, cell.Y >> SectionShift, cell.Z >> SectionShift);
+
+    public static Vector3I SectionOrigin(Vector3I section) =>
+        new(section.X << SectionShift, section.Y << SectionShift, section.Z << SectionShift);
+
+    private static Vector3I ChunkOfSection(Vector3I section) =>
+        new(section.X >> SectionsPerChunkShift, section.Y >> SectionsPerChunkShift,
+            section.Z >> SectionsPerChunkShift);
+
+    /// <summary>Triangles currently drawn. Diagnostic.</summary>
     public int TriangleCount
     {
         get
         {
             int total = 0;
 
-            foreach (var kv in _sections)
+            foreach (SectionNodes nodes in _sections.Values)
             {
-                Mesh mesh = kv.Value.MeshInstance.Mesh;
-
-                if (mesh == null || mesh.GetSurfaceCount() == 0)
+                if (nodes.Mesh.Mesh is not ArrayMesh mesh)
                     continue;
 
-                total += mesh.SurfaceGetArrays(0)[(int)Mesh.ArrayType.Index]
-                    .AsInt32Array().Length / 3;
+                for (int s = 0; s < mesh.GetSurfaceCount(); s++)
+                    total += mesh.SurfaceGetArrayIndexLen(s) / 3;
             }
 
             return total;
         }
     }
 
-    /// <summary>Which section a cell belongs to. Diagnostic.</summary>
-    public Vector3I SectionOfCell(Vector3I cell) => SectionOf(cell);
-
-    public int DirtyCountFor(Vector3I cell) => SectionsDirtiedBy(cell).Count;
-
     /// <summary>
-    /// The sections an edit at this cell would mark dirty.
-    ///
-    /// Runs MarkDirty's own enumeration without touching the dirty set, so a
-    /// test asks the world what it would rebuild rather than reimplementing the
-    /// rule and proving only that the copy agrees with itself.
+    /// The meshes currently drawn, each with the local position its vertices
+    /// are relative to. For tests and tools.
     /// </summary>
-    public HashSet<Vector3I> SectionsDirtiedBy(Vector3I cell)
-    {
-        var seen = new HashSet<Vector3I> { SectionOf(cell) };
-
-        if (Grid.RadialNeighbour(cell, 1, out Vector3I above))
-            seen.Add(SectionOf(above));
-
-        if (Grid.RadialNeighbour(cell, -1, out Vector3I below))
-            seen.Add(SectionOf(below));
-
-        int walls = Grid.WallCount(cell);
-
-        for (int w = 0; w < walls; w++)
-        {
-            if (Grid.WallNeighbour(cell, w, out Vector3I at))
-                seen.Add(SectionOf(at));
-        }
-
-        return seen;
-    }
-
-    // ------------------------------------------------------------ ray picking
-
-    /// <summary>
-    /// Steps a ray through the grid and returns the first block it enters, plus
-    /// the empty cell it passed through just before -- the face it arrived
-    /// through, which is where a placed block belongs.
-    /// </summary>
-    public bool RayPick(Vector3 worldFrom, Vector3 worldDir, float maxDistance,
-        out Vector3I hitCell, out Vector3I emptyCell)
-    {
-        hitCell = default;
-        emptyCell = default;
-
-        // Stepped against the GRID's node size, not the world's exported one.
-        // They are the same on the sphere worlds and not on the organic
-        // planet, whose nodes are twice the default -- and a step sized to the
-        // wrong number either walks past cells or samples each of them many
-        // times over.
-        float node = Grid?.NodeSize ?? _nodeSize;
-
-        // A TWENTIETH OF A NODE, not a fifth.
-        //
-        // The step decides how far past a surface the first sample inside it
-        // can land, and that overshoot is along the RAY -- so at the shallow
-        // angle a player looks at the ground ahead of them, a fifth of a node
-        // of overshoot is several units sideways and the pick lands one or two
-        // nodes past the one under the crosshair. Measured at a fifth, 137 of
-        // 300 rays picked the wrong node.
-        //
-        // The cost is linear and small: a few hundred samples over a reach of
-        // a few nodes, once per frame.
-        float step = node * 0.05f;
-
-        Vector3I previous = CellAt(worldFrom);
-        bool started = false;
-
-        for (float travelled = 0f; travelled <= maxDistance; travelled += step)
-        {
-            Vector3I cell = CellAt(worldFrom + worldDir * travelled);
-            if (started && cell == previous)
-                continue;
-
-            if (HasSolid(cell))
-            {
-                hitCell = cell;
-
-                // The empty cell is what a right-click builds into. Reported as
-                // the cell the ray last passed through, whether or not the grid
-                // contains it -- a caller that wants to BUILD there must test
-                // Contains, and on a planet whose surface is a hard boundary
-                // the honest answer above the outermost node is often "nowhere",
-                // which is not the same as "here".
-                emptyCell = started ? previous : cell;
-                return true;
-            }
-
-            previous = cell;
-            started = true;
-        }
-
-        return false;
-    }
-
-    // --------------------------------------------------------------- meshing
-
-    /// <summary>
-    /// Builds one section's render geometry and collision hull.
-    ///
-    /// PURE COMPUTATION -- touches no engine object, so it can run on any
-    /// thread. It reads the store, which is immutable while a mesh job is
-    /// outstanding, and writes only into the scratch it was handed.
-    /// </summary>
-    private void BuildSectionGeometry(Vector3I section, MeshScratch scratch)
-    {
-        scratch.Clear();
-
-        Vector3I origin = SectionOrigin(section);
-
-        // A grid whose nodes are not prisms hands over its faces directly.
-        //
-        // Taken BEFORE the shell test below, because that test does not apply
-        // here: on a polyhedral grid the address is a position in space, so its
-        // Z is an axis like any other rather than a depth. Rejecting negative Z
-        // there threw away everything on one side of the planet -- exactly half
-        // the world, which is what it looked like.
-        if (Grid is IPolyhedralGrid polyhedral)
-        {
-            BuildPolyhedralSection(origin, polyhedral, scratch);
-            return;
-        }
-
-        // A section spans one range of shells, and a shell outside the planet
-        // holds nothing -- so a section wholly above the surface or below the
-        // core is settled without looking at a cell.
-        if (origin.Z + SectionSize <= 0 || origin.Z >= Grid.ShellCount)
-            return;
-
-        int maxWalls = Grid.MaxWalls;
-
-        Span<Vector3> top = stackalloc Vector3[maxWalls];
-        Span<Vector3> bottom = stackalloc Vector3[maxWalls];
-        Span<Vector3> quad = stackalloc Vector3[4];
-
-        for (int lu = 0; lu < SectionSize; lu++)
-        {
-            for (int lv = 0; lv < SectionSize; lv++)
-            {
-                for (int ls = 0; ls < SectionSize; ls++)
-                {
-                    var cell = new Vector3I(origin.X + lu, origin.Y + lv, origin.Z + ls);
-
-                    byte raw = _store.Get(cell);
-                    if (raw == NodeChunkStore.Air)
-                        continue;
-
-                    if (!Grid.Contains(cell))
-                        continue;
-
-                    // Only the address the node is stored under builds
-                    // geometry. On a grid where a seam site has several
-                    // spellings, meshing each of them would stack the same
-                    // node's faces on top of one another.
-                    if (Grid.Canonical(cell) != cell)
-                        continue;
-
-                    Color color = ShadeOf(cell, (NodeMaterial)raw);
-
-                    int walls = Grid.TopCorners(cell, top);
-                    if (walls < 3)
-                        continue;
-
-                    Grid.BottomCorners(cell, bottom);
-
-                    // OUTER FACE, toward the sky.
-                    if (!RadialSolid(cell, 1))
-                        AddPolygon(top, walls, color, scratch, false);
-
-                    // INNER FACE, toward the core. Wound the other way so it
-                    // faces inward.
-                    if (!RadialSolid(cell, -1))
-                        AddPolygon(bottom, walls, color, scratch, true);
-
-                    // SIDE WALLS. Wall w spans corner w to corner w+1 at both
-                    // radii, which is the contract INodeGrid guarantees -- so a
-                    // wall is built without asking the grid anything more.
-                    for (int w = 0; w < walls; w++)
-                    {
-                        if (WallSolid(cell, w))
-                            continue;
-
-                        int next = (w + 1) % walls;
-
-                        quad[0] = bottom[w];
-                        quad[1] = bottom[next];
-                        quad[2] = top[next];
-                        quad[3] = top[w];
-
-                        AddFace(quad, color, scratch);
-                        AddCollisionQuad(quad, scratch);
-                    }
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Builds one section of a world whose nodes are arbitrary polyhedra.
-    ///
-    /// The rule is the same as for prisms and simpler to state: a face is drawn
-    /// when the node behind it is not solid. What differs is that the faces
-    /// come from the grid rather than being derived from two caps and a corner
-    /// ring, because an organic cell has no top and bottom to derive them from.
-    /// </summary>
-    private void BuildPolyhedralSection(Vector3I origin, IPolyhedralGrid polyhedral,
-        MeshScratch scratch)
-    {
-        int maxWalls = Grid.MaxWalls;
-
-        Span<Vector3I> walls = stackalloc Vector3I[maxWalls];
-        Span<int> sides = stackalloc int[maxWalls];
-        Span<Vector3> corners = stackalloc Vector3[polyhedral.MaxFaceCorners];
-        Span<Vector3> face = stackalloc Vector3[Hull.MaxCorners];
-
-        float minArea = MinFaceArea;
-        float grainNode = Grid?.NodeSize ?? _nodeSize;
-
-        for (int lu = 0; lu < SectionSize; lu++)
-        {
-            for (int lv = 0; lv < SectionSize; lv++)
-            {
-                for (int ls = 0; ls < SectionSize; ls++)
-                {
-                    var cell = new Vector3I(origin.X + lu, origin.Y + lv, origin.Z + ls);
-
-                    byte raw = _store.Get(cell);
-                    if (raw == NodeChunkStore.Air)
-                        continue;
-
-                    if (!Grid.Contains(cell))
-                        continue;
-
-                    Color color = ShadeOf(cell, (NodeMaterial)raw);
-
-                    int count = polyhedral.Faces(cell, walls, sides, corners);
-                    int at = 0;
-
-                    for (int n = 0; n < count; n++)
-                    {
-                        int span = sides[n];
-
-                        if (span < 3)
-                        {
-                            at += span;
-                            continue;
-                        }
-
-                        // A face named by the node itself is the planet's own
-                        // surface: there is nothing behind it to cover it, so it
-                        // is always drawn.
-                        bool boundary = walls[n] == cell;
-
-                        if (!boundary && Covered(walls[n]))
-                        {
-                            at += span;
-                            continue;
-                        }
-
-                        int written = Mathf.Min(span, face.Length);
-
-                        for (int c = 0; c < written; c++)
-                            face[c] = corners[at + c];
-
-                        // A SLIVER IS NOT DRAWN.
-                        //
-                        // A Voronoi cell here has about fifteen faces, which is
-                        // what a jittered cubic lattice gives -- and roughly
-                        // one of them is a real polygon of almost no area, a
-                        // bisector that grazes the cell rather than cutting it.
-                        //
-                        // Too thin to read as a surface, and not harmless: it
-                        // lies in the same place as whatever is behind it and
-                        // the two fight for the depth buffer, which is what
-                        // shows as faces flickering through one another. The
-                        // solid is unchanged by leaving it out -- it has no
-                        // volume behind it to reveal.
-                        if (AreaOf(face, written) < minArea)
-                        {
-                            at += span;
-                            continue;
-                        }
-
-                        AddPolygon(face, written, color, scratch, false);
-
-                        at += span;
-                    }
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Emits one cap of a node, fanned from its first corner.
-    ///
-    /// A fan rather than a strip because the polygon is convex by construction
-    /// -- it is a Voronoi cell -- and a fan from a convex polygon needs no
-    /// tessellation pass.
-    /// </summary>
-    private static void AddPolygon(ReadOnlySpan<Vector3> corners, int count,
-        Color color, MeshScratch scratch, bool flip)
-    {
-        Span<Vector3> triangle = stackalloc Vector3[4];
-
-        for (int c = 1; c + 1 < count; c++)
-        {
-            if (flip)
-            {
-                triangle[0] = corners[0];
-                triangle[1] = corners[c + 1];
-                triangle[2] = corners[c];
-            }
-            else
-            {
-                triangle[0] = corners[0];
-                triangle[1] = corners[c];
-                triangle[2] = corners[c + 1];
-            }
-
-            // A degenerate fourth corner keeps AddFace's quad shape; the
-            // duplicate vertex costs nothing and collapses to a triangle.
-            triangle[3] = triangle[2];
-
-            AddFace(triangle, color, scratch);
-            AddCollisionQuad(triangle, scratch);
-        }
-    }
-
-    /// <summary>Adds a quad's two triangles to the collision hull.</summary>
-    private static void AddCollisionQuad(ReadOnlySpan<Vector3> quad, MeshScratch scratch)
-    {
-        // Collision uses the same quads as the render mesh. They are the same
-        // surface, and building one from the other is what keeps what you stand
-        // on identical to what you see.
-        scratch.CollisionVertices.Add(quad[0]);
-        scratch.CollisionVertices.Add(quad[1]);
-        scratch.CollisionVertices.Add(quad[2]);
-        scratch.CollisionVertices.Add(quad[0]);
-        scratch.CollisionVertices.Add(quad[2]);
-        scratch.CollisionVertices.Add(quad[3]);
-    }
-
-    /// <summary>
-    /// Which of the two shades a node takes.
-    ///
-    /// Alternating so neighbouring nodes rarely share a shade, because a field
-    /// of identical blocks is unreadable without the break -- the eye cannot
-    /// tell where one ends and the next begins.
-    ///
-    /// HASHED, NOT SUMMED. The obvious parity -- (x + y + z) odd or even --
-    /// two-colours a square lattice properly but fails on a triangular one:
-    /// stepping along its axes changes the sum by one in a pattern that lines
-    /// up diagonally, so the world comes out in wide zigzag STRIPES rather than
-    /// in nodes. Hashing the address scatters the choice instead, so adjacent
-    /// nodes differ about half the time whatever the lattice is shaped like,
-    /// and the eye reads individual cells.
-    /// </summary>
-    private Color ShadeOf(Vector3I cell, NodeMaterial material)
-    {
-        bool even = Scatter(cell);
-
-        // Stone alone takes the world's exported colours, so the cubed sphere
-        // and the icosphere can still be recoloured from the inspector. Every
-        // other kind answers for itself.
-        if (material == NodeMaterial.Stone)
-            return even ? _colorA : _colorB;
-
-        NodeType kind = NodeTypes.Of(material);
-        return even ? kind.ShadeA : kind.ShadeB;
-    }
-
-    /// <summary>
-    /// One bit of hash from a node's address.
-    ///
-    /// A cheap integer mix: the exact constants matter less than that nearby
-    /// addresses land on uncorrelated bits, which is what keeps the shading
-    /// from forming a pattern of its own.
-    /// </summary>
-    private static bool Scatter(Vector3I cell)
-    {
-        unchecked
-        {
-            int hash = cell.X * 73856093 ^ cell.Y * 19349663 ^ cell.Z * 83492791;
-
-            hash ^= hash >> 13;
-            hash *= 1274126177;
-            hash ^= hash >> 16;
-
-            return (hash & 1) == 0;
-        }
-    }
-
-    /// <summary>
-    /// Emits one quad, with a flat normal and the winding Godot wants.
-    ///
-    /// The normal is computed from the corners rather than taken from the face
-    /// table, because on a sphere a face is not flat in world space -- its
-    /// normal depends on where the cell sits, and a table could only hold the
-    /// direction it would have had on a flat lattice. Deriving it here is also
-    /// what guarantees the normal and the winding agree: both come from the
-    /// same three corners.
-    /// </summary>
-    /// <summary>Twice the area of a fan over a convex polygon, halved.</summary>
-    private static float AreaOf(ReadOnlySpan<Vector3> corners, int count)
-    {
-        if (count < 3)
-            return 0f;
-
-        Vector3 total = Vector3.Zero;
-
-        for (int c = 1; c + 1 < count; c++)
-            total += (corners[c] - corners[0]).Cross(corners[c + 1] - corners[0]);
-
-        return total.Length() * 0.5f;
-    }
-
-    /// <summary>
-    /// The smallest face worth drawing, as a fraction of a node's cross
-    /// section.
-    ///
-    /// A cell of side n has about 6n^2 of surface over some thirteen faces, so
-    /// a typical face is near n^2/2. A HUNDREDTH of that is the cut: measured
-    /// on the organic planet it drops 0.9 faces per cell and leaves 13.2,
-    /// which is what a jittered cubic lattice should give.
-    ///
-    /// Kept as a fraction rather than an area so it means the same thing on a
-    /// world whose nodes are a different size.
-    /// </summary>
-    private const float MinFaceFraction = 0.005f;
-
-    /// <summary>The smallest face worth drawing on this world, in square units.</summary>
-    private float MinFaceArea
+    public IEnumerable<(Vector3 Origin, ArrayMesh Mesh)> SectionMeshes
     {
         get
         {
-            float node = Grid?.NodeSize ?? _nodeSize;
-            return node * node * MinFaceFraction;
-        }
-    }
-
-    private static void AddFace(ReadOnlySpan<Vector3> corners, Color color,
-        MeshScratch scratch)
-    {
-        // (c2 - c0) x (c1 - c0), NOT the other way round.
-        //
-        // Godot's front face is the one whose triangle winds CLOCKWISE as seen
-        // from the front, which is the opposite of the usual maths convention.
-        // So the normal agreeing with the winding is the reversed cross
-        // product, and MeshAudit's winding check tests exactly this.
-        //
-        // Swapping the operands to the textbook order makes every quad in the
-        // world inside-out: the normal points into the planet while the
-        // triangles still wind for the outward face. Measured after doing just
-        // that: 0 quads agreed and 47264 were inside out, and the surface went
-        // invisible from above while the planet's far side showed through it.
-        Vector3 normal = (corners[2] - corners[0]).Cross(corners[1] - corners[0]);
-
-        float length = normal.Length();
-
-        // A FACE WITH NO AREA IS NOT EMITTED.
-        //
-        // Twice the triangle's area, so this is a face collapsed to a line or a
-        // point. Its normal is whatever direction the float noise in the cross
-        // product happened to land on, which is as likely to be inward as out.
-        // Measured, one such quad survived the surface clip with edges of 0.4
-        // and 1.6 millimetres and zero area, and the mesh audit reported it as
-        // an inside-out face -- correctly, and about nothing a player could
-        // see. Dropping it costs a comparison already being made.
-        if (length < 0.000001f)
-            return;
-
-        normal /= length;
-
-        int start = scratch.Vertices.Count;
-
-        for (int i = 0; i < 4; i++)
-        {
-            scratch.Vertices.Add(corners[i]);
-            scratch.Normals.Add(normal);
-            scratch.Colors.Add(color);
-        }
-
-        scratch.Indices.Add(start);
-        scratch.Indices.Add(start + 1);
-        scratch.Indices.Add(start + 2);
-        scratch.Indices.Add(start);
-        scratch.Indices.Add(start + 2);
-        scratch.Indices.Add(start + 3);
-    }
-
-    /// <summary>
-    /// Hands finished geometry to the rendering and physics servers.
-    ///
-    /// MAIN THREAD ONLY. Also the cheap half: measured at 0.03 ms to upload a
-    /// section's mesh against several milliseconds to compute it.
-    /// </summary>
-    private void ApplySectionGeometry(Vector3I section, MeshScratch scratch)
-    {
-        if (scratch.Vertices.Count == 0)
-        {
-            // Nothing to draw: drop the scene nodes rather than leaving an
-            // empty mesh behind, so a section carved away stops costing.
-            if (_sections.TryGetValue(section, out SectionNodes empty))
+            foreach (SectionNodes nodes in _sections.Values)
             {
-                empty.Dispose();
-                _sections.Remove(section);
+                if (nodes.Mesh.Mesh is ArrayMesh mesh)
+                    yield return (nodes.Mesh.Position, mesh);
+            }
+        }
+    }
+
+    /// <summary>The scene nodes that draw and collide one section.</summary>
+    private sealed class SectionNodes
+    {
+        public readonly MeshInstance3D Mesh;
+        private readonly CollisionShape3D _raw;
+        private readonly CollisionShape3D _particle;
+
+        public SectionNodes(Node3D parent, StaticBody3D rawBody, StaticBody3D particleBody,
+            Vector3I section, Vector3 origin)
+        {
+            string name = $"{section.X}_{section.Y}_{section.Z}";
+
+            Mesh = new MeshInstance3D { Name = "Section" + name, Position = origin };
+            _raw = new CollisionShape3D { Name = "Raw" + name, Position = origin };
+            _particle = new CollisionShape3D { Name = "Particle" + name, Position = origin };
+
+            parent.AddChild(Mesh);
+            rawBody.AddChild(_raw);
+            particleBody.AddChild(_particle);
+        }
+
+        /// <summary>
+        /// Particle collision is solid from BOTH sides. Its triangles come from
+        /// a surface that is reshaped every frame a shovel is held, and a
+        /// one-sided sheet lets anything that ends up a hair behind it -- a
+        /// frame of collision lag, one triangle wound the wrong way -- drop
+        /// straight through and on down into the planet.
+        /// </summary>
+        public void SetCollision(List<Vector3> raw, List<Vector3> particle)
+        {
+            Assign(_raw, raw, twoSided: false);
+            Assign(_particle, particle, twoSided: true);
+        }
+
+        private static void Assign(CollisionShape3D target, List<Vector3> triangles, bool twoSided)
+        {
+            if (triangles.Count == 0)
+            {
+                target.Shape = null;
+                return;
             }
 
-            return;
-        }
-
-        if (!_sections.TryGetValue(section, out SectionNodes target))
-        {
-            target = new SectionNodes(this, section);
-            _sections[section] = target;
-        }
-
-        var mesh = new ArrayMesh();
-        var arrays = new Godot.Collections.Array();
-        arrays.Resize((int)Mesh.ArrayType.Max);
-        arrays[(int)Mesh.ArrayType.Vertex] = scratch.Vertices.ToArray();
-        arrays[(int)Mesh.ArrayType.Normal] = scratch.Normals.ToArray();
-        arrays[(int)Mesh.ArrayType.Color] = scratch.Colors.ToArray();
-        arrays[(int)Mesh.ArrayType.Index] = scratch.Indices.ToArray();
-        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
-        mesh.SurfaceSetMaterial(0, SharedMaterial);
-
-        target.MeshInstance.Mesh = mesh;
-
-        if (scratch.CollisionVertices.Count == 0)
-        {
-            target.CollisionShape.Shape = null;
-            return;
-        }
-
-        // Reusing the shape instance lets the physics server update in place;
-        // re-assigning Shape would re-register it every rebuild.
-        if (target.Trimesh == null)
-        {
-            target.Trimesh = new ConcavePolygonShape3D
-            {
-                Data = scratch.CollisionVertices.ToArray(),
-            };
-
-            target.CollisionShape.Shape = target.Trimesh;
-        }
-        else
-        {
-            target.Trimesh.Data = scratch.CollisionVertices.ToArray();
-        }
-    }
-
-    /// <summary>
-    /// Builds and uploads one section on the CALLING thread.
-    ///
-    /// The synchronous path, for the editor rebuild and the whole-world build
-    /// where there is no frame to protect. Streaming uses
-    /// <see cref="FlushQueuedMeshes"/> instead, which hands the building half
-    /// to workers and keeps only the upload here.
-    ///
-    /// Safe alongside those workers because it does not share their buffers:
-    /// this one owns _scratchMesh and each worker is handed its own. The two
-    /// write to different sections, and the upload is main-thread either way.
-    /// </summary>
-    private void MeshSection(Vector3I section)
-    {
-        BuildSectionGeometry(section, _scratchMesh);
-        ApplySectionGeometry(section, _scratchMesh);
-        _built++;
-    }
-
-    // ----------------------------------------------------------- rebuilding
-
-    /// <summary>Rebuilds every resident section. For a wholesale change.</summary>
-    public void Rebuild()
-    {
-        DiscardEmptyChunks();
-
-        foreach (var kv in _store.Chunks)
-        {
-            if (kv.Value.SolidCount > 0)
-                QueueChunkSections(kv.Key);
-        }
-
-        foreach (Vector3I section in _dirty)
-            MeshSection(section);
-
-        _dirty.Clear();
-        BuildProgress = 1f;
-
-        if (!_ready)
-        {
-            _ready = true;
-            WorldReady?.Invoke();
-        }
-    }
-
-    /// <summary>Re-meshes only the sections marked dirty.</summary>
-    private void RebuildDirty()
-    {
-        if (_dirty.Count == 0)
-            return;
-
-        foreach (Vector3I section in _dirty)
-            MeshSection(section);
-
-        _dirty.Clear();
-    }
-
-    private void RebuildOrDefer()
-    {
-        if (_deferRebuild)
-        {
-            _rebuildPending = true;
-            return;
-        }
-
-        // QUEUE THE WORK; DO NOT DO IT HERE.
-        //
-        // An edit dirties about three sections, some sixteen hundred cells, to
-        // change the dozen-odd faces that actually moved. Meshing that inline
-        // put the whole cost between two frames: measured at 131 ms a dig
-        // against a 16.67 ms frame, with a worst case near two seconds.
-        //
-        // The streaming path already solves this -- workers build off the
-        // frame and FlushQueuedMeshes uploads under a time budget -- and an
-        // edit's sections are the same kind of work. Leaving them dirty hands
-        // them to that path, so a dig costs the store write and nothing else.
-        //
-        // WHEN NOTHING DRIVES THE FLUSH, mesh inline as before. The editor
-        // rebuild and the headless checks have no streamer calling them back,
-        // and a dig that merely queued would never be drawn.
-        if (DrivesOwnMeshing)
-        {
-            RebuildDirty();
-            return;
-        }
-
-        EditPending = true;
-    }
-
-    /// <summary>
-    /// Is something calling <see cref="FlushEdits"/> every frame?
-    ///
-    /// An edit only queues its meshing when someone will come back for it. The
-    /// streamer says so each frame it pumps; when it stops -- or was never
-    /// there, as in the editor and the headless checks -- this lapses and edits
-    /// go back to building their own geometry inline.
-    ///
-    /// A LAPSE RATHER THAN A FLAG SET ONCE, because the failure it prevents is
-    /// silent: an edit queued against a pump that has gone away leaves a hole
-    /// you can walk into and cannot see. Measured directly -- with the flag
-    /// latched, 25 of 25 self-driven digs left the mesh untouched.
-    /// </summary>
-    public bool DrivesOwnMeshing => _externalDriveFrames <= 0;
-
-    /// <summary>
-    /// Frames of external pumping still credited.
-    ///
-    /// A couple, so a pump that skips a frame does not bounce meshing back
-    /// inline, while a pump that stops for good is noticed almost at once.
-    /// </summary>
-    private int _externalDriveFrames;
-
-    /// <summary>
-    /// Says a caller will flush this world's meshing this frame.
-    ///
-    /// Called every frame by whoever pumps; the credit expires if they stop.
-    /// </summary>
-    public void DriveMeshingExternally() => _externalDriveFrames = 2;
-
-    /// <summary>
-    /// Spends one frame of the external-drive credit.
-    ///
-    /// Called from the world's own frame tick rather than from the flush, so
-    /// the credit lapses whether or not there were edits to serve -- a pump
-    /// that stops while the world is quiet must still be noticed.
-    /// </summary>
-    public override void _Process(double delta)
-    {
-        if (_externalDriveFrames > 0)
-            _externalDriveFrames--;
-    }
-
-    /// <summary>
-    /// Drops the external-drive credit at once. For tests, which run a whole
-    /// scenario inside one frame and cannot wait for it to tick away.
-    /// </summary>
-    public void ForgetExternalDrive() => _externalDriveFrames = 0;
-
-    /// <summary>
-    /// Has an edit left sections dirty that the flush has not reached yet?
-    ///
-    /// The streamer drains its own backlog before taking more work, and an
-    /// edit must not wait behind a queue of streamed chunks -- the player is
-    /// looking at the hole they just made.
-    /// </summary>
-    public bool EditPending { get; private set; }
-
-    /// <summary>
-    /// Meshes the sections an edit dirtied, ahead of any streaming backlog.
-    ///
-    /// Same budget and the same workers as the streaming flush; what differs is
-    /// only that this runs first, so a dig appears on the next frame rather
-    /// than behind however many chunks are queued.
-    /// </summary>
-    public bool FlushEdits(float budgetMs)
-    {
-        if (!EditPending)
-            return false;
-
-
-        // A QUARTER OF THE BUDGET FOR THE WAIT, NOT ALL OF IT.
-        //
-        // The dispatch below can itself spend the full budget, so waiting for
-        // the workers afterwards must be bounded well inside it or the frame
-        // overshoots. The share trades frame time against how soon the hole
-        // appears, and both were measured over 57 digs:
-        //
-        //   share   worst frame   frames to draw (median / p90)
-        //   1/4      3.08 ms       2 / 21
-        //   1/2      7.33 ms       2 / 15
-        //   3/4      8.66 ms       1 / 13
-        //   all      9.82 ms       1 / 10
-        //
-        // A QUARTER, because a steady frame rate is worth more than the tail
-        // of the draw latency: the typical dig draws in two frames at every
-        // setting, while the worst frame triples across them. At a quarter the
-        // whole flush stays inside the 4 ms it was given.
-        ulong deadline = Time.GetTicksUsec()
-            + (ulong)(Mathf.Max(1f, budgetMs) * 250f);
-
-        FlushQueuedMeshes(budgetMs);
-
-        // KEEP COLLECTING UNTIL THE BUDGET IS SPENT.
-        //
-        // An edit dirties about four sections and they are dispatched in one
-        // go, so what remains is waiting for workers rather than doing work.
-        // The streaming flush collects once per frame and returns, which is
-        // right for a backlog of hundreds of sections and wrong for four: the
-        // sections were finished within a millisecond and the hole still took
-        // twenty-odd frames to appear, every one of them nearly empty.
-        //
-        // Collecting in place spends the frame's own budget -- already
-        // reserved for meshing -- on the tail of the edit, which is what turns
-        // a third of a second of latency into a frame or two. The budget is
-        // still the ceiling, so a pathological edit degrades to the old
-        // behaviour rather than stalling the frame.
-        while (HasQueuedMeshes && Time.GetTicksUsec() < deadline)
-        {
-            CollectMeshed();
-
-            if (_dirty.Count > 0)
-            {
-                FlushQueuedMeshes(budgetMs);
-                continue;
-            }
-
-            // Nothing left to start: what remains is a worker still running.
-            // YIELD rather than spin -- burning the rest of the budget in a
-            // tight loop measured a 10.5 ms worst frame against a 4 ms budget,
-            // because the spin competes with the very workers it waits on.
-            // Handing the core over lets them finish and costs nothing.
-            if (_building > 0)
-                System.Threading.Thread.Yield();
-        }
-
-        // HasQueuedMeshes, not what the flush returned. The flush reports
-        // dirty and in-flight work only; a section a worker has finished sits
-        // in the upload queue counted by neither, and clearing the flag there
-        // would leave the last of the geometry uncollected -- the hole stays
-        // shut until something else happens to flush.
-        bool more = HasQueuedMeshes;
-
-        if (!more)
-            EditPending = false;
-
-        return more;
-    }
-
-    private void RebuildIfReady()
-    {
-        if (_ready)
-            Rebuild();
-    }
-
-    /// <summary>
-    /// Defers rebuilds until <see cref="EndBatch"/>, for a run of edits that
-    /// would otherwise each pay for their own re-mesh.
-    /// </summary>
-    public void BeginBatch() => _deferRebuild = true;
-
-    public void EndBatch()
-    {
-        _deferRebuild = false;
-
-        if (_fullRebuildNeeded)
-        {
-            _fullRebuildNeeded = false;
-            _rebuildPending = false;
-            Rebuild();
-            return;
-        }
-
-        if (_rebuildPending)
-        {
-            _rebuildPending = false;
-
-            // Through the same path a single edit takes: a batch is the case
-            // that most needs the budget, since it has dirtied more sections
-            // than one edit ever does.
-            if (DrivesOwnMeshing)
-                RebuildDirty();
+            if (target.Shape is ConcavePolygonShape3D shape)
+                shape.Data = triangles.ToArray();
             else
-                EditPending = true;
-        }
-    }
-
-    /// <summary>Drops chunks that turned out to hold nothing.</summary>
-    private void DiscardEmptyChunks()
-    {
-        _scratch.Clear();
-
-        foreach (var kv in _store.Chunks)
-        {
-            if (kv.Value.SolidCount == 0)
-                _scratch.Add(kv.Key);
-        }
-
-        foreach (Vector3I chunk in _scratch)
-            _store.Unload(chunk);
-    }
-
-    private void QueueChunkSections(Vector3I chunk)
-    {
-        Vector3I baseSection = new(
-            chunk.X * SectionsPerChunk,
-            chunk.Y * SectionsPerChunk,
-            chunk.Z * SectionsPerChunk);
-
-        for (int x = 0; x < SectionsPerChunk; x++)
-            for (int y = 0; y < SectionsPerChunk; y++)
-                for (int z = 0; z < SectionsPerChunk; z++)
+                target.Shape = new ConcavePolygonShape3D
                 {
-                    _dirty.Add(new Vector3I(
-                        baseSection.X + x, baseSection.Y + y, baseSection.Z + z));
-                }
-    }
-
-    // --------------------------------------------------------- streaming API
-
-    public bool IsChunkLoaded(Vector3I chunk) => _store.IsLoaded(chunk);
-
-    /// <summary>
-    /// Does this chunk have geometry built?
-    ///
-    /// Distinct from having DATA: the streamer generates a margin of chunks
-    /// beyond what it draws, purely so the chunks inside can cull their
-    /// boundary faces against real neighbours.
-    /// </summary>
-    public bool HasChunkMesh(Vector3I chunk) => _meshed.Contains(chunk);
-
-    /// <summary>
-    /// How many SECTIONS have had geometry built.
-    ///
-    /// The honest numerator for a progress bar. Chunks are the wrong unit: a
-    /// chunk of pure sky is marked meshed the instant residency rejects it,
-    /// without any work being done, so the chunk count starts in the hundreds
-    /// and barely moves -- measured, it sat at 115 of 179 for an entire load
-    /// and the bar read a constant 64%.
-    ///
-    /// A section is only counted when its geometry has actually been uploaded,
-    /// so this rises with the work the player is waiting through.
-    /// </summary>
-    public int BuiltSections => _built;
-
-    /// <summary>Sections whose geometry has been uploaded.</summary>
-    private int _built;
-
-    public void MarkChunkMeshed(Vector3I chunk) => _meshed.Add(chunk);
-
-    /// <summary>Queues a chunk for meshing, for the streamer.</summary>
-    public void QueueChunkMesh(Vector3I chunk)
-    {
-        QueueChunkSections(chunk);
-        _meshed.Add(chunk);
-    }
-
-    /// <summary>
-    /// Is there meshing still to do?
-    ///
-    /// Counts work IN FLIGHT as well as work queued. A section handed to a
-    /// worker has left the dirty set but has not been uploaded, and reporting
-    /// the world finished at that moment lets the streamer call itself ready
-    /// with geometry still on its way.
-    /// </summary>
-    public bool HasQueuedMeshes =>
-        _dirty.Count > 0 || _building > 0 || !_finished.IsEmpty;
-
-    /// <summary>
-    /// Builds queued sections until the budget runs out.
-    ///
-    /// Returns true while work remains. The budget is what keeps a burst of
-    /// newly streamed chunks from landing as one long frame.
-    /// </summary>
-    public bool FlushQueuedMeshes(float budgetMs)
-    {
-        // Take back whatever the workers finished, first: uploading is the
-        // cheap half and the frame should spend its budget on that rather than
-        // on starting more work it will not collect.
-        CollectMeshed();
-
-        if (_dirty.Count == 0)
-            return _building > 0;
-
-        ulong deadline = Time.GetTicksUsec() + (ulong)(Mathf.Max(1f, budgetMs) * 1000f);
-
-        _scratch.Clear();
-        _scratch.AddRange(_dirty);
-
-        int started = 0;
-
-        foreach (Vector3I section in _scratch)
-        {
-            if (ForceSingleThread)
-            {
-                _dirty.Remove(section);
-                MeshSection(section);
-                started++;
-                if ((started & 3) == 0 && Time.GetTicksUsec() >= deadline) break;
-                continue;
-            }
-
-            if (_building >= MeshWorkers)
-                break;
-
-            _dirty.Remove(section);
-            Dispatch(section);
-            started++;
-
-            if ((started & 3) == 0 && Time.GetTicksUsec() >= deadline)
-                break;
+                    Data = triangles.ToArray(),
+                    BackfaceCollision = twoSided,
+                };
         }
 
-        return _dirty.Count > 0 || _building > 0;
-    }
-
-    /// <summary>
-    /// Sections being built on worker threads, and the results waiting to be
-    /// uploaded.
-    ///
-    /// BUILDING A SECTION IS PURE COMPUTATION -- it reads the store and writes
-    /// into scratch it was handed, touching no engine object -- so it belongs
-    /// off the frame. Only the upload has to be on the main thread, and that
-    /// was measured at 0.03 ms against several milliseconds to compute.
-    ///
-    /// Leaving it all in the frame is what capped the even-node world at 47 fps
-    /// with 110 ms spikes: its nodes are hexagonal prisms whose corners come
-    /// from a neighbour ring, so a section costs several times what the cubed
-    /// sphere's does, and every millisecond of it landed between two frames.
-    /// </summary>
-    private readonly System.Collections.Concurrent.ConcurrentQueue<MeshResult> _finished = new();
-
-    private int _building;
-
-    /// <summary>
-    /// How many sections may be built at once.
-    ///
-    /// One per core, less the one the frame itself needs. Generation uses the
-    /// same pool, so this is a share of the machine rather than all of it.
-    /// </summary>
-    private static readonly int MeshWorkers =
-        Mathf.Max(1, System.Environment.ProcessorCount - 1);
-
-    /// <summary>
-    /// Build sections on the calling thread instead of on workers.
-    ///
-    /// For diagnosis: when geometry comes out wrong, this says in one run
-    /// whether threading is the cause or whether the mesher was already wrong.
-    /// It answered exactly that once -- the fault was a reversed neighbour ring,
-    /// not a race, and the single-threaded run failing identically is what
-    /// ruled the threading out.
-    /// </summary>
-    public static bool ForceSingleThread;
-
-    private sealed class MeshResult
-    {
-        public Vector3I Section;
-        public MeshScratch Scratch;
-        public int Generation;
-    }
-
-    /// <summary>
-    /// Bumped whenever the world is dropped or its grid replaced.
-    ///
-    /// A worker started against the old world finishes against the new one, and
-    /// uploading that would put the previous planet's geometry into this one.
-    /// Stamping each result and checking it on arrival is cheaper than waiting
-    /// for the workers to drain.
-    /// </summary>
-    private int _generation;
-
-    /// <summary>Scratch buffers handed back after upload, so a section does not
-    /// allocate a fresh set of lists every time it is rebuilt.</summary>
-    private readonly System.Collections.Concurrent.ConcurrentBag<MeshScratch> _spare = new();
-
-    /// <summary>Starts one section building on a worker.</summary>
-    private void Dispatch(Vector3I section)
-    {
-        if (!_spare.TryTake(out MeshScratch scratch))
-            scratch = new MeshScratch();
-
-        System.Threading.Interlocked.Increment(ref _building);
-
-        int generation = _generation;
-
-        System.Threading.Tasks.Task.Run(() =>
+        /// <summary>
+        /// Freed at once rather than queued, so the old collision is gone before
+        /// anything casts against the new -- a queued free leaves two surfaces
+        /// registered for the rest of the frame.
+        /// </summary>
+        public void Free()
         {
-            try
-            {
-                BuildSectionGeometry(section, scratch);
-
-                _finished.Enqueue(new MeshResult
-                {
-                    Section = section, Scratch = scratch, Generation = generation,
-                });
-            }
-            catch (System.Exception error)
-            {
-                // A worker that throws must not take the count with it, or the
-                // streamer waits forever on a section that will never arrive.
-                GD.PushError($"NodeWorld: meshing {section} failed - {error.Message}");
-                _finished.Enqueue(new MeshResult { Section = section, Scratch = null });
-            }
-            finally
-            {
-                System.Threading.Interlocked.Decrement(ref _building);
-            }
-        });
-    }
-
-    /// <summary>Uploads whatever the workers have finished.</summary>
-    private void CollectMeshed()
-    {
-        while (_finished.TryDequeue(out MeshResult done))
-        {
-            if (done.Scratch == null)
-                continue;
-
-            // Built against a world that has since been dropped.
-            if (done.Generation != _generation)
-            {
-                done.Scratch.Clear();
-                _spare.Add(done.Scratch);
-                continue;
-            }
-
-            ApplySectionGeometry(done.Section, done.Scratch);
-            _built++;
-
-            done.Scratch.Clear();
-            _spare.Add(done.Scratch);
+            Mesh.Free();
+            _raw.Free();
+            _particle.Free();
         }
-    }
-
-    public void UnloadChunk(Vector3I chunk)
-    {
-        Vector3I baseSection = new(
-            chunk.X * SectionsPerChunk,
-            chunk.Y * SectionsPerChunk,
-            chunk.Z * SectionsPerChunk);
-
-        for (int x = 0; x < SectionsPerChunk; x++)
-            for (int y = 0; y < SectionsPerChunk; y++)
-                for (int z = 0; z < SectionsPerChunk; z++)
-                {
-                    var section = new Vector3I(
-                        baseSection.X + x, baseSection.Y + y, baseSection.Z + z);
-
-                    if (_sections.TryGetValue(section, out SectionNodes scene))
-                    {
-                        scene.Dispose();
-                        _sections.Remove(section);
-                    }
-
-                    _dirty.Remove(section);
-                }
-
-        _store.Unload(chunk);
-        _meshed.Remove(chunk);
-    }
-
-    /// <summary>Drops everything: data, geometry and readiness.</summary>
-    public void Clear()
-    {
-        foreach (SectionNodes scene in _sections.Values)
-            scene.Dispose();
-
-        _sections.Clear();
-        _dirty.Clear();
-        _meshed.Clear();
-        _store.Clear();
-        _built = 0;
-
-        // Whatever the workers are still building describes the world that was
-        // just dropped. Their results are discarded on arrival rather than
-        // waited for, since the store they would be uploaded against is gone.
-        _generation++;
-
-        while (_finished.TryDequeue(out _))
-        {
-        }
-
-        _ready = false;
-        BuildProgress = 0f;
-    }
-
-    // -------------------------------------------------------------- readiness
-
-    /// <summary>0..1 while the world is meshing, 1 once it is done.</summary>
-    public float BuildProgress { get; private set; }
-
-    public bool IsWorldReady => _ready;
-
-    /// <summary>Raised once, when the world first has geometry worth playing in.</summary>
-    public event Action WorldReady;
-
-    private bool _ready;
-
-    /// <summary>Marks the world ready, for a streamer that decides readiness by
-    /// its own rule rather than by everything being built.</summary>
-    public void MarkReady()
-    {
-        if (_ready)
-            return;
-
-        _ready = true;
-        BuildProgress = 1f;
-        WorldReady?.Invoke();
     }
 }

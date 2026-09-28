@@ -27,4 +27,26 @@ public static class NodeSearch
 
         return null;
     }
+
+    /// <summary>
+    /// First node at or under `root` that implements an interface, depth-first;
+    /// null if none. For finding a collaborator by what it can do rather than
+    /// by what it is.
+    /// </summary>
+    public static T FindImplementing<T>(Node root) where T : class
+    {
+        if (root == null)
+            return null;
+        if (root is T match)
+            return match;
+
+        foreach (Node child in root.GetChildren())
+        {
+            T found = FindImplementing<T>(child);
+            if (found != null)
+                return found;
+        }
+
+        return null;
+    }
 }

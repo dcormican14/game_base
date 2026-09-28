@@ -28,11 +28,8 @@ public partial class Crosshair : Control
     /// <summary>Dashes to draw when SettingsService is absent. 0 hides the crosshair.</summary>
     [Export(PropertyHint.Range, "0,4,1")] public int Lines { get; set; } = 2;
 
-    /// <summary>
-    /// Warm gold, picked to sit in the same family as the sky's plum and the
-    /// nebulae's warm accent rather than cutting across them.
-    /// </summary>
-    [Export] public Color BarColor { get; set; } = new(0.913f, 0.546f, 0.058f);
+    /// <summary>Warm gold, the interface's accent.</summary>
+    [Export] public Color BarColor { get; set; } = Palette.Gold;
     /// <summary>Alpha of the block nearest the centre gap.</summary>
     [Export(PropertyHint.Range, "0,1,0.01")] public float InnerAlpha { get; set; } = 0.95f;
     /// <summary>Alpha of the outermost block.</summary>
@@ -47,10 +44,8 @@ public partial class Crosshair : Control
     /// <summary>Blocks behind the dashes, so they stay visible against terrain.</summary>
     [Export] public bool Outline { get; set; } = true;
 
-    /// <summary>
-    /// Warm off-white, matching the gold rather than fighting it.
-    /// </summary>
-    [Export] public Color OutlineColor { get; set; } = new(1f, 0.922f, 0.761f, 0.85f);
+    /// <summary>Warm off-white, matching the gold rather than fighting it.</summary>
+    [Export] public Color OutlineColor { get; set; } = new(Palette.Cream, 0.85f);
 
     /// <summary>
     /// Height of the virtual low-res buffer the blocks are sized against —

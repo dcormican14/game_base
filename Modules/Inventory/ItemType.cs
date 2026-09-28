@@ -58,10 +58,10 @@ public partial class ItemType : Resource
     [Export] public IconShape Shape { get; set; } = IconShape.Mesh;
 
     /// <summary>Handle colour for a generated tool shape.</summary>
-    [Export] public Color HandleColor { get; set; } = new(0.42f, 0.27f, 0.15f);
+    [Export] public Color HandleColor { get; set; } = Core.Palette.Dusk;
 
     /// <summary>Head colour for a generated tool shape.</summary>
-    [Export] public Color HeadColor { get; set; } = new(0.62f, 0.64f, 0.68f);
+    [Export] public Color HeadColor { get; set; } = Core.Palette.Blush;
 
     /// <summary>Geometry drawn into the slot icon. Null slots render empty.</summary>
     [Export] public Mesh IconMesh { get; set; }
