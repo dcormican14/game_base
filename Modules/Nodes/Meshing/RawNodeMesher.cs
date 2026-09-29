@@ -24,7 +24,6 @@ internal sealed class RawNodeMesher : INodeMesher
             return;
 
         MeshBuffers buffers = output.Raw;
-        Vector3 origin = grid.LatticePoint(sample.Origin);
 
         Span<Vector3I> neighbours = stackalloc Vector3I[VoronoiGrid.MaxFaces];
         Span<int> sides = stackalloc int[VoronoiGrid.MaxFaces];
@@ -59,7 +58,7 @@ internal sealed class RawNodeMesher : INodeMesher
                 bool hidden = sample.Covers(SectionSample.Index(x + step.X, y + step.Y, z + step.Z));
 
                 if (!hidden)
-                    AddPolygon(buffers, corners.Slice(at, count), origin, color);
+                    AddPolygon(buffers, corners.Slice(at, count), color);
 
                 at += count;
             }
@@ -88,8 +87,7 @@ internal sealed class RawNodeMesher : INodeMesher
     /// only thing between them: leaving it out once seemed free, and made
     /// pinholes a ray could pass straight through the planet by.
     /// </summary>
-    private static void AddPolygon(MeshBuffers buffers, ReadOnlySpan<Vector3> corners,
-        Vector3 origin, Color color)
+    private static void AddPolygon(MeshBuffers buffers, ReadOnlySpan<Vector3> corners, Color color)
     {
         if (corners.Length < 3)
             return;
@@ -108,7 +106,7 @@ internal sealed class RawNodeMesher : INodeMesher
         int first = buffers.Vertices.Count;
 
         foreach (Vector3 corner in corners)
-            buffers.AddVertex(corner - origin, normal, color);
+            buffers.AddVertex(corner, normal, color);
 
         for (int c = 1; c + 1 < corners.Length; c++)
             buffers.AddTriangle(first, first + c, first + c + 1);

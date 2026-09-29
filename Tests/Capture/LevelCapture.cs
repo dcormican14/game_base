@@ -201,20 +201,20 @@ public partial class LevelCapture : Node
         // A fixed side view of the spot, so what the shovel did is legible.
         Vector3 viewFrom = at + up * 3f + Vector3.Right * 10f;
 
-        await SelectMode(controller, ShovelMode.RaiseSharp);
+        await SelectMode(controller, ShovelMode.Raise);
         await Hold("mine", 60);
         float raised = Height(world, at, up);
         await ShootFrom(viewFrom, at, "gameplay_raised");
 
-        await SelectMode(controller, ShovelMode.LowerGradual);
+        await SelectMode(controller, ShovelMode.Lower);
         await Hold("mine", 150);
         float dug = Height(world, at, up);
         await Frames(30);
         await ShootFrom(viewFrom, at, "gameplay_dug");
         await ShootFrom(at + up * 12f + Vector3.Right * 2f, at, "gameplay_dug_above");
 
-        GD.Print($"LevelCapture: gameplay - the shovel raised the ground {raised - before:0.00} (raise sharp), "
-            + $"then lowered it to {dug - before:0.00} (lower gradual), by the R key and the left button");
+        GD.Print($"LevelCapture: gameplay - the shovel raised the ground {raised - before:0.00} (raise), "
+            + $"then lowered it to {dug - before:0.00} (lower), by the R key and the left button");
 
         await Level(world, body, controller);
         await MoundDig(world, body, controller);
@@ -304,7 +304,7 @@ public partial class LevelCapture : Node
         Vector3 bump = controller.Highlight.Target.Point;
         float ground = Height(world, bump, up);
 
-        await SelectMode(controller, ShovelMode.RaiseGradual);
+        await SelectMode(controller, ShovelMode.Raise);
         await Hold("mine", 90);
 
         // The bump creeps toward the player as it grows -- the crosshair meets
@@ -376,7 +376,7 @@ public partial class LevelCapture : Node
         float start = Radial(world, body.GlobalPosition);
         float ground = Height(world, spot, up);
 
-        await SelectMode(controller, ShovelMode.RaiseGradual);
+        await SelectMode(controller, ShovelMode.Raise);
         float pileSink = await Watch(world, body, "mine", 480, start, exclude);
         float pile = Radial(world, body.GlobalPosition) - start;
         float top = Height(world, spot, up) - ground;
@@ -400,12 +400,12 @@ public partial class LevelCapture : Node
         ((GameBase.Player.PlayerController)body).PitchDegrees = -89f;
         await PhysicsFrames();
 
-        await SelectMode(controller, ShovelMode.LowerGradual);
+        await SelectMode(controller, ShovelMode.Lower);
         float digSink = await Watch(world, body, "mine", 480, start, exclude);
         float dug = Radial(world, body.GlobalPosition) - start;
         await ShootFrom(spot + up * 6f + Vector3.Right * 10f, spot, "mound_dug");
 
-        GD.Print($"LevelCapture: mound - raised a column {top:0.00} high on a base {baseRadius:0.0} in radius, "
+        GD.Print($"LevelCapture: mound - raised a mound {top:0.00} high on a base {baseRadius:0.0} in radius, "
             + $"the player riding it to {pile:0.00} "
             + $"(feet sank at most {pileSink:0.00}), lowered back to {dug:0.00} (feet sank at most {digSink:0.00}); "
             + (Mathf.Max(pileSink, digSink) > 0.6f ? "FELL THROUGH" : "held"));

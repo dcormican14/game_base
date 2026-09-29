@@ -8,10 +8,8 @@ namespace GameBase.Tools;
 /// <summary>The shovel's modes, in the order the mode key steps through them.</summary>
 public enum ShovelMode
 {
-    RaiseSharp,
-    RaiseGradual,
-    LowerSharp,
-    LowerGradual,
+    Raise,
+    Lower,
     Level,
     Smooth,
 }
@@ -21,29 +19,33 @@ public enum ShovelMode
 /// ground inside the brush moves gradually, in whichever mode is selected (the
 /// mode key steps through them; the mode bar shows which).
 ///
-///   - RAISE and LOWER lift or sink the ground. SHARP concentrates the change
-///     into a point; GRADUAL spreads it evenly over the brush.
+///   - RAISE lifts the ground under the brush as a flat top, and stops once a
+///     slope under it reaches 45 degrees: about a node high. To build higher,
+///     widen the base (see <see cref="ParticleSculpt"/>).
+///   - LOWER sinks the ground under the brush, flat-bottomed, down to rock.
 ///   - LEVEL flattens toward the height of the ground under the crosshair when
 ///     the press began, so dragging carries one level across the terrain.
+///     Ground much more than a node above or below that height -- more than
+///     a raise makes -- is left alone.
 ///   - SMOOTH softens bumps and edges without raising or lowering overall.
 ///
-/// THE BRUSH is two circles: full strength inside the inner, fading to nothing
-/// at the outer. Every mode shares the outer circle; the modes differ in the
-/// inner one. Nothing outside the outer circle ever moves -- building straight
-/// up raises a column as wide as the brush, never a mountain whose foot
-/// spreads as it grows (see <see cref="ParticleSculpt"/>).
+/// THE BRUSH is a circle, and nothing outside it ever moves. Raise and Lower
+/// work at full strength almost to its edge, so what they make is flat: a
+/// pointed top is the one shape the ground cannot be drawn growing smoothly
+/// (see <see cref="ParticleSculpt"/>). Level and Smooth fade out toward the
+/// edge, so the patch they work blends into the ground around it.
 ///
 /// The circles lie ON the ground (<see cref="SurfaceDisc"/>): flat on flat
 /// ground, standing on a wall, upside down on a ceiling, folded over an edge,
 /// always covering the same area. Every mode works along the surface the
-/// brush is on: raise pushes a wall out sideways and a ceiling down, and
-/// Level flattens to the plane of the surface where the press began.
+/// brush is on: raise pushes a wall out sideways and a ceiling down, and on a
+/// wall or a ceiling Level flattens to the plane of the face where the press
+/// began (on the ground, to the level through that point).
 ///
 /// The right button does nothing with the shovel.
 ///
-/// Its highlight is the brush drawn ON the ground, like a texture: the outer
-/// circle, and for the raise and lower modes the inner one too, alike, as
-/// pixel-art circles on the world's own pixel grid, with a glow over the
+/// Its highlight is the brush drawn ON the ground, like a texture: its circle,
+/// as pixel art on the world's own pixel grid, with a glow over the
 /// ground inside -- the face that will change -- strongest at the outer
 /// circle and working inward, particles drifting in toward the middle.
 /// </summary>
@@ -55,24 +57,23 @@ public sealed class ShovelTool : Tool
 
     public override ToolCadence Cadence => ToolCadence.Continuous;
 
-    private static readonly string[] ModeNames =
-    {
-        "Raise sharp", "Raise gradual", "Lower sharp", "Lower gradual", "Level", "Smooth",
-    };
+    private static readonly string[] ModeNames = { "Raise", "Lower", "Level", "Smooth" };
 
     public override IReadOnlyList<string> Modes => ModeNames;
 
     /// <summary>A few steps in front of the player: as far as the pickaxe.</summary>
     public override float Reach => 6f;
 
-    /// <summary>The brush's outer circle, shared by every mode.</summary>
+    /// <summary>The brush's circle, shared by every mode.</summary>
     public float OuterRadius { get; set; } = 3f;
 
-    /// <summary>The inner circle of the sharp modes: a small one, concentrating the change.</summary>
-    public float SharpInner { get; set; } = 0.6f;
-
-    /// <summary>The inner circle of the gradual modes: a large one, spreading the change evenly.</summary>
-    public float GradualInner { get; set; } = 2.2f;
+    /// <summary>
+    /// Where Raise and Lower start to fade out toward the edge: almost at it,
+    /// so everything under the brush moves together and the top (or the
+    /// bottom) stays flat. It must take in the lattice points diagonally out
+    /// from the middle (2.83 units), or the top grows corners.
+    /// </summary>
+    public float FlatInner { get; set; } = 2.9f;
 
     /// <summary>
     /// Where Level and Smooth start to fade out toward the rim, so the patch
@@ -132,12 +133,8 @@ public sealed class ShovelTool : Tool
         (ShovelMode)Mathf.PosMod(context.Mode, ModeNames.Length);
 
     /// <summary>The brush a mode works with.</summary>
-    public SculptBrush BrushFor(ShovelMode mode) => new(mode switch
-    {
-        ShovelMode.RaiseSharp or ShovelMode.LowerSharp => SharpInner,
-        ShovelMode.RaiseGradual or ShovelMode.LowerGradual => GradualInner,
-        _ => ShapingInner,
-    }, OuterRadius);
+    public SculptBrush BrushFor(ShovelMode mode) =>
+        new(mode is ShovelMode.Raise or ShovelMode.Lower ? FlatInner : ShapingInner, OuterRadius);
 
     /// <summary>Applies the selected mode for one frame.</summary>
     public override bool Mine(in ToolContext context, in NodeHit target)
@@ -151,8 +148,8 @@ public sealed class ShovelTool : Tool
 
         (SculptOperation operation, float amount) = mode switch
         {
-            ShovelMode.RaiseSharp or ShovelMode.RaiseGradual => (SculptOperation.Raise, Rate * delta),
-            ShovelMode.LowerSharp or ShovelMode.LowerGradual => (SculptOperation.Lower, Rate * delta),
+            ShovelMode.Raise => (SculptOperation.Raise, Rate * delta),
+            ShovelMode.Lower => (SculptOperation.Lower, Rate * delta),
             ShovelMode.Level => (SculptOperation.Level, LevelRate * delta),
             _ => (SculptOperation.Smooth, Mathf.Clamp(SmoothRate * delta, 0f, 1f)),
         };
@@ -171,17 +168,21 @@ public sealed class ShovelTool : Tool
         (ParticleField field, SurfaceDisc disc) = Brush(world, target);
         _laid = default;
 
-        // Level holds to the plane of the surface where the press began: its
-        // point, and the way the ground faced there.
+        // Level holds to the height where the press began: on the ground, the
+        // level through that point, square to gravity; on a wall or a ceiling,
+        // the plane of the face there.
         ToolStroke stroke = context.Stroke;
         if (stroke.IsNew)
-            stroke.Begin(target.Point, world.GlobalBasis * disc.Centre.Normal);
+        {
+            Vector3 facing = world.GlobalBasis * disc.Centre.Normal;
+            stroke.Begin(target.Point, ParticleSculpt.OnGround(context.Up, facing) ? context.Up : facing);
+        }
 
         Vector3 planePoint = world.ToLocal(stroke.Anchor);
         Vector3 planeNormal = world.GlobalBasis.Inverse() * stroke.AnchorNormal;
 
         SculptResult result = ParticleSculpt.Apply(field, type, disc, brush, operation, amount,
-            planePoint, planeNormal);
+            planePoint, planeNormal, world.GlobalBasis.Inverse() * context.Up);
 
         if (result.Added > 0f)
             context.Ledger.Placed(type, result.Added);
@@ -284,16 +285,11 @@ public sealed class ShovelTool : Tool
         NodeWorld world = context.World;
         SurfaceDisc disc = DiscAt(world, target);
 
-        ShovelMode mode = ModeOf(context);
-
-        // Only the raise and lower modes show their inner circle: each comes
-        // sharp and gradual, and the inner circle is the difference. Level and
-        // Smooth have one brush each -- still fading out toward the rim, so
-        // the patch they work blends into the ground around it -- and a
-        // circle there would mark a choice that does not exist.
+        // One circle: every mode has the one brush, so an inner circle would
+        // mark a choice that does not exist.
         builder.DiscRadius = OuterRadius;
-        builder.DiscInner = BrushFor(mode).Inner;
-        builder.ShowInner = mode is not (ShovelMode.Level or ShovelMode.Smooth) && builder.DiscInner > 0.05f;
+        builder.DiscInner = BrushFor(ModeOf(context)).Inner;
+        builder.ShowInner = false;
 
         int directions = disc.Directions;
         int rings = Mathf.Max(1, Mathf.CeilToInt(disc.Radius / SkinStep));

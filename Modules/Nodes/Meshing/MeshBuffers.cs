@@ -69,7 +69,8 @@ internal sealed class MeshBuffers
 
 /// <summary>
 /// Everything one section build produces: a surface for the raw nodes and one
-/// per particle material present, all in section-local space.
+/// per particle material present, all in the world's local space (see
+/// NodeWorld's section nodes for why not the section's own).
 /// </summary>
 internal sealed class SectionGeometry
 {

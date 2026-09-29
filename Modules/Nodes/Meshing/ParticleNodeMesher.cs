@@ -27,7 +27,9 @@ namespace GameBase.Nodes.Meshing;
 ///
 /// A section owns the edges leaving its own lattice points in +x, +y and +z,
 /// so every edge in the world is meshed by exactly one section and neighbouring
-/// sections never draw the same quad twice.
+/// sections never draw the same quad twice. The cubes along a section's edge
+/// are shared, though, and each section builds their vertices for itself --
+/// identically, bit for bit, or the seam between the two opens up.
 /// </summary>
 internal sealed class ParticleNodeMesher : INodeMesher
 {
@@ -100,7 +102,7 @@ internal sealed class ParticleNodeMesher : INodeMesher
                     continue;
 
                 EmitQuad(sample, levels, cubeVertex, cubeMaterial, output.Particle(material),
-                    material, grid.NodeSize, x, y, z, a, outwardPositive: insideHere);
+                    material, grid, x, y, z, a, outwardPositive: insideHere);
             }
         }
     }
@@ -110,17 +112,17 @@ internal sealed class ParticleNodeMesher : INodeMesher
     /// <paramref name="a"/>.
     /// </summary>
     private static void EmitQuad(SectionSample sample, float[] levels, int[] cubeVertex,
-        byte[] cubeMaterial, MeshBuffers buffers, byte material, float node,
+        byte[] cubeMaterial, MeshBuffers buffers, byte material, VoronoiGrid grid,
         int x, int y, int z, int a, bool outwardPositive)
     {
         Vector3I eb = Axes[(a + 1) % 3];
         Vector3I ec = Axes[(a + 2) % 3];
         var p = new Vector3I(x, y, z);
 
-        int v0 = CubeVertex(sample, levels, cubeVertex, cubeMaterial, buffers, material, node, p - eb - ec);
-        int v1 = CubeVertex(sample, levels, cubeVertex, cubeMaterial, buffers, material, node, p - ec);
-        int v2 = CubeVertex(sample, levels, cubeVertex, cubeMaterial, buffers, material, node, p);
-        int v3 = CubeVertex(sample, levels, cubeVertex, cubeMaterial, buffers, material, node, p - eb);
+        int v0 = CubeVertex(sample, levels, cubeVertex, cubeMaterial, buffers, material, grid, p - eb - ec);
+        int v1 = CubeVertex(sample, levels, cubeVertex, cubeMaterial, buffers, material, grid, p - ec);
+        int v2 = CubeVertex(sample, levels, cubeVertex, cubeMaterial, buffers, material, grid, p);
+        int v3 = CubeVertex(sample, levels, cubeVertex, cubeMaterial, buffers, material, grid, p - eb);
 
         // v0..v3 run counter-clockwise seen from +a. Godot's front face is
         // clockwise, so a surface facing +a takes them in reverse.
@@ -169,13 +171,20 @@ internal sealed class ParticleNodeMesher : INodeMesher
     /// (section-local), made on first use.
     /// </summary>
     private static int CubeVertex(SectionSample sample, float[] levels, int[] cubeVertex,
-        byte[] cubeMaterial, MeshBuffers buffers, byte material, float node, Vector3I min)
+        byte[] cubeMaterial, MeshBuffers buffers, byte material, VoronoiGrid grid, Vector3I min)
     {
+        float node = grid.NodeSize;
         int key = ((min.X + 1) * CubeSpan + (min.Y + 1)) * CubeSpan + (min.Z + 1);
 
         if (cubeMaterial[key] == material)
             return cubeVertex[key];
 
+        // Everything is worked out relative to the cube's own lowest corner,
+        // and only then placed in the world. A cube on a section's edge is
+        // built by both sections that share it, and this way both do exactly
+        // the same arithmetic and get exactly the same vertex -- to the last
+        // bit, which is what keeps the seam between them closed (see
+        // NodeWorld's section nodes).
         Span<float> level = stackalloc float[8];
         Span<Vector3> lattice = stackalloc Vector3[8];
         Span<Vector3> site = stackalloc Vector3[8];
@@ -187,8 +196,8 @@ internal sealed class ParticleNodeMesher : INodeMesher
             int index = SectionSample.Index(min.X + dx, min.Y + dy, min.Z + dz);
 
             level[i] = levels[index];
-            lattice[i] = new Vector3(min.X + dx, min.Y + dy, min.Z + dz) * node;
-            site[i] = sample.Sites[index];
+            lattice[i] = new Vector3(dx, dy, dz) * node;
+            site[i] = lattice[i] + sample.Jitters[index];
             rock[i] = SectionSample.IsRawOrUnknown(sample.Materials[index]);
         }
 
@@ -221,12 +230,16 @@ internal sealed class ParticleNodeMesher : INodeMesher
             crossings++;
         }
 
-        Vector3 position = crossings > 0
+        Vector3 offset = crossings > 0
             ? sum / crossings
             : (lattice[0] + lattice[7]) * 0.5f;
 
+        // The corner is a whole number of nodes from the world's middle, so
+        // it is exact, and one addition places the vertex.
+        Vector3 corner = grid.LatticePoint(sample.Origin + min);
+
         var kind = (ParticleNode)NodeTypes.Of(material);
-        int vertex = buffers.AddVertex(position, Normal(level, lattice), kind.Colour);
+        int vertex = buffers.AddVertex(corner + offset, Normal(level, lattice), kind.Colour);
 
         cubeMaterial[key] = material;
         cubeVertex[key] = vertex;

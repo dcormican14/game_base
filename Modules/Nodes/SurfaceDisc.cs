@@ -80,6 +80,9 @@ public sealed class SurfaceDisc
         return previous;
     }
 
+    /// <summary>How many times more steps than a clean walk needs a path may take before it is cut off.</summary>
+    private const int MaxStepsPerStride = 4;
+
     /// <summary>
     /// Walks a disc out from <paramref name="centre"/> (world-local, on or near
     /// the ground) over a patch of the field that covers it.
@@ -114,7 +117,13 @@ public sealed class SurfaceDisc
 
             walked.Clear();
 
-            while (arc < radius - 1e-4f)
+            // A path that catches on an edge can creep a hair at a time; it is
+            // cut off rather than walked for ever. Everything after the disc
+            // costs in proportion to its points, and a path of hundreds of
+            // thousands of them would stall the game.
+            int stepsLeft = MaxStepsPerStride * Mathf.CeilToInt(radius / step) + 8;
+
+            while (arc < radius - 1e-4f && stepsLeft-- > 0)
             {
                 float length = Mathf.Min(step, radius - arc);
                 Vector3 next = here + heading * length;

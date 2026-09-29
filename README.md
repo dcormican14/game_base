@@ -138,15 +138,15 @@ button shapes the ground gradually in that mode:
 
 | Mode | What it does |
 |---|---|
-| Raise sharp / Raise gradual | lifts the ground |
-| Lower sharp / Lower gradual | sinks the ground; stops at rock |
-| Level | flattens toward the height of the ground where the press began, so dragging carries one level across the terrain |
+| Raise | lifts the ground as a flat top, and stops about a node high (see below) |
+| Lower | sinks the ground, flat-bottomed; stops at rock |
+| Level | flattens toward the height of the ground where the press began, so dragging carries one level across the terrain; ground more than about a node (2.5 units, a little over what one Raise makes) above or below it is left alone |
 | Smooth | softens bumps and edges, moving ground around without adding or removing any |
 
-The **brush** is two circles: full strength inside the inner one, fading to
-nothing at the outer. Every mode shares the outer circle; *sharp* has a small
-inner circle, concentrating a change into a point, and *gradual* a large one,
-spreading it evenly. The shovel reaches 6 units, as the pickaxe does.
+The **brush** is one circle, 3 units across the ground from its middle.
+Raise and Lower work at full strength almost to its edge, so what they make is
+flat; Level and Smooth fade out toward it, so the patch they work blends into
+the ground around. The shovel reaches 6 units, as the pickaxe does.
 
 The circles lie **on the ground** (`SurfaceDisc`): every point is the radius
 from the centre measured along the surface, so the brush lies flat on flat
@@ -155,15 +155,39 @@ edge, always covering the same area. It is found by walking: paths set out
 from the centre in every direction, settling back onto the surface after each
 small step and turning to follow it. The highlight draws those paths, and the
 shaping weighs every cell by the nearest point of them -- what is drawn is
-what changes, and nothing past it moves, so building straight up raises a
-column as wide as the brush rather than a mountain whose foot spreads. There
-is no height limit beyond the rate.
+what changes, and nothing past it moves.
+
+**Raising grows a flat top, and stops at 45 degrees.** The ground is drawn
+with one vertex in each lattice cube (2 units), at the average of where the
+surface crosses the cube's edges (surface nets). A pointed top has no vertex
+of its own: the cubes around its tip average it with the lower slopes, so the
+drawn top sits below the real one -- by up to a node -- until the tip passes
+the next lattice point and a vertex appears right at it, and the drawn ground
+snaps up. Any raise that lifts its middle faster than its edge makes a pointed
+top. A flat top crosses each lattice layer all at once, as flat ground does,
+and flat ground is drawn exactly -- so a raise lifts everything under the
+brush together, and stops as a whole once any slope it is making steeper
+reaches 45 degrees, about a node above the ground around it. Held, the drawn
+ground never moves more than about 0.1 in a frame (the brush's own rate is
+0.04).
+
+To build higher, widen the base: a raise leaves ground already standing above
+where it was aimed alone, and fills in below it, so raising round a mound
+builds up the ground around it until the middle has room to rise again. On
+ground (a brush facing within 60 degrees of up) slopes are measured against
+the level, so mounds cannot stack flank on flank. On a wall or a ceiling a
+raise just pushes the face out, with no stop: a dug wall's own edges are far
+steeper than 45 degrees to it. Open cells all read as the edge of the fill
+range however far out they are, so slopes find their real distance by looking
+down to the ground beneath them, and only cells within a node of the surface
+count -- they are the ones that decide where it is drawn.
 
 Every mode works **along the surface** (`ParticleSculpt`), on the fill field
 itself: a fill is a distance to the surface, so adding to it pushes the surface
 out along its own facing. Raise builds a wall out sideways and a ceiling
-downward, Lower digs into either, Level cuts and fills toward the plane of the
-surface where the press began, and Smooth smooths whatever face it is on. A
+downward, Lower digs into either, Level cuts and fills toward the height where
+the press began (level on the ground; the plane of the face on a wall or a
+ceiling), and Smooth smooths whatever face it is on. A
 fill clamped at the edge of its range only says "at least this far", so it is
 placed by its neighbours (a distance changes by at most a node between lattice
 points) rather than pulled into a surface that has not reached it. Byte-sized
@@ -216,12 +240,10 @@ flush over the ground the brush covers, whose every point carries where it is
 in a flat circle -- the disc wrapped onto the surface like a sticker. The
 shader draws everything from that position, mathematically, after snapping
 each fragment to the stylised filter's own pixel grid (the filter's settings
-are copied onto the material): the outer circle, and for the raise and lower
-modes the inner one, as pixel-art circles one world pixel thick -- a pixel is
-lit when the circle passes through it -- then the gradient, and particles one
-world pixel each, all on the same pixels as the world. Level and Smooth draw
-no inner circle: they have one brush each, which still fades out toward the
-rim so the patch they work blends into the ground around it. The disc lies on
+are copied onto the material): the brush's circle, as a pixel-art circle one
+world pixel thick -- a pixel is lit when the circle passes through it -- then
+the gradient, and particles one world pixel each, all on the same pixels as
+the world. The disc lies on
 the fill field, which the drawn mesh follows closely but not exactly, so the
 skin is settled onto the drawn ground by rays at a sparse grid of its points,
 blended between. Glow surfaces are fanned from their
@@ -266,7 +288,8 @@ A small headless suite: grid geometry, the store and fill encoding, the
 planet generator, both meshers (flatness, winding, closed solids, watertight
 seams, the buried shell drawing nothing, the shell staying put when
 undermined), the tools against real collision (targeting, raising and
-lowering, nothing moving outside the brush, sharp against gradual, lowering
+lowering, nothing moving outside the brush, a held raise growing without a
+single jump and stopping at 45 degrees, widening its base, lowering
 stopping at rock, Level flattening to the press height, Smooth spreading a
 peak, the ledger check, mode cycling, highlights) and the inventory.
 

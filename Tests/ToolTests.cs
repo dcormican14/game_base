@@ -14,7 +14,7 @@ public sealed class ToolTests : TestSuite
     private static readonly Vector3 Eye = new(0.3f, Surface + 3f, 0.2f);
 
     private static ToolContext Looking(NodeWorld world, Vector3 eye, Vector3 aim,
-        IMaterialLedger ledger = null, float delta = 0.25f, ShovelMode mode = ShovelMode.RaiseSharp,
+        IMaterialLedger ledger = null, float delta = 0.25f, ShovelMode mode = ShovelMode.Raise,
         ToolStroke stroke = null) =>
         new(world, eye, aim, ledger, null, delta, 0f, stroke, (int)mode);
 
@@ -75,21 +75,20 @@ public sealed class ToolTests : TestSuite
         Check(shovel.TryTarget(context, out NodeHit target), "no target");
         Check(!shovel.Place(context, target), "the right button changed the ground");
 
-        await Shape(world, shovel, ShovelMode.RaiseGradual, Spot, 10);
+        await Shape(world, shovel, ShovelMode.Raise, Spot, 10);
         float raised = Height(world, Spot);
         Check(raised > before + 1f, $"raising only lifted the ground from {before:0.00} to {raised:0.00}");
 
-        await Shape(world, shovel, ShovelMode.LowerGradual, Spot, 20);
+        await Shape(world, shovel, ShovelMode.Lower, Spot, 20);
         float lowered = Height(world, Spot);
         Check(lowered < before - 1f, $"lowering only sank the ground from {before:0.00} to {lowered:0.00}");
     }
 
     /// <summary>
-    /// Nothing outside the brush moves, however long the button is held:
-    /// building straight up makes a column, not a spreading mountain. "Outside"
-    /// is a lattice step past the outer circle, because the fills are a node
-    /// apart and the ground between one inside the circle and one outside it
-    /// slopes across the gap.
+    /// Nothing outside the brush moves, however long the button is held.
+    /// "Outside" is a lattice step past the outer circle, because the fills
+    /// are a node apart and the ground between one inside the circle and one
+    /// outside it slopes across the gap.
     /// </summary>
     [Test]
     public async Task RaisingStaysInsideTheBrush()
@@ -99,32 +98,70 @@ public sealed class ToolTests : TestSuite
         Vector3 outside = Spot + Vector3.Right * (shovel.OuterRadius + world.NodeSize);
         float outsideBefore = Height(world, outside);
 
-        await Shape(world, shovel, ShovelMode.RaiseSharp, Spot, 30);
+        await Shape(world, shovel, ShovelMode.Raise, Spot, 30);
 
-        Check(Height(world, Spot) > Surface + 4f, "a held raise barely lifted the ground");
+        Check(Height(world, Spot) > Surface + 1f, "a held raise barely lifted the ground");
         Near(Height(world, outside), outsideBefore, 0.05f, "ground just outside the brush");
     }
 
-    /// <summary>Sharp concentrates a raise into a point; gradual spreads it over the brush.</summary>
+    /// <summary>The drawn ground's height under a spot: what the player sees.</summary>
+    private static float DrawnHeight(NodeWorld world, Vector3 spot) =>
+        world.Raycast(new Vector3(spot.X, Surface + 40f, spot.Z), new Vector3(spot.X, Surface - 40f, spot.Z),
+            out NodeHit hit) ? hit.Point.Y : float.NaN;
+
+    /// <summary>
+    /// Held, a raise grows a flat-topped mound SMOOTHLY -- the drawn ground
+    /// never jumps from one frame to the next -- and stops once its sides
+    /// reach 45 degrees, about a node high. Widening the base lets it grow on.
+    /// </summary>
     [Test]
-    public async Task SharpConcentratesGradualSpreads()
+    public async Task RaisingGrowsSmoothlyAndStops()
     {
         NodeWorld world = await Bed();
         var shovel = new ShovelTool();
-        Vector3 sharp = Spot + Vector3.Left * 12f;
-        Vector3 gradual = Spot + Vector3.Right * 12f;
-        var aside = Vector3.Forward * 2f;
+        float node = world.NodeSize;
+        var stroke = new ToolStroke();
+        float last = DrawnHeight(world, Spot), biggest = 0f;
 
-        await Shape(world, shovel, ShovelMode.RaiseSharp, sharp, 8);
-        await Shape(world, shovel, ShovelMode.RaiseGradual, gradual, 8);
+        // Four seconds at sixty frames a second, looking straight down.
+        for (int frame = 0; frame < 240; frame++)
+        {
+            var eye = new Vector3(Spot.X, last + 3f, Spot.Z);
+            ToolContext context = Looking(world, eye, Vector3.Down, null, 1f / 60f, ShovelMode.Raise, stroke);
 
-        float sharpMiddle = Height(world, sharp) - Surface, sharpAside = Height(world, sharp + aside) - Surface;
-        float gradualMiddle = Height(world, gradual) - Surface, gradualAside = Height(world, gradual + aside) - Surface;
+            if (shovel.TryTarget(context, out NodeHit target))
+                shovel.Mine(context, target);
 
-        Check(gradualAside > sharpAside + 0.3f,
-            $"two units out, gradual rose {gradualAside:0.00} and sharp {sharpAside:0.00}");
-        Check(sharpAside / sharpMiddle < gradualAside / gradualMiddle,
-            "the sharp raise is no more peaked than the gradual one");
+            world.MeshAllNow();
+            await PhysicsFrames(1);
+
+            float now = DrawnHeight(world, Spot);
+            biggest = Mathf.Max(biggest, Mathf.Abs(now - last));
+            last = now;
+        }
+
+        // The brush's own rate is 2.5 units a second: a frame moves 0.04.
+        Check(biggest < 0.15f, $"the drawn ground jumped {biggest:0.00} in one frame");
+
+        float stopped = Height(world, Spot);
+        Check(stopped > Surface + node * 0.75f, $"a held raise barely lifted the ground, to {stopped:0.00}");
+        Check(stopped < Surface + node * 1.25f, $"a held raise did not stop, reaching {stopped:0.00}");
+
+        // Flat on top: most of a node out from the middle, still at the top.
+        foreach (Vector3 way in new[] { Vector3.Right, Vector3.Left, Vector3.Forward, Vector3.Back })
+            Near(Height(world, Spot + way * node * 0.75f), stopped, 0.3f, $"the top {way} of the middle");
+
+        // Widen the base -- raise all the way round it -- and the middle grows on.
+        for (int k = 0; k < 8; k++)
+        {
+            float angle = Mathf.Tau * k / 8f;
+            await Shape(world, shovel, ShovelMode.Raise, Spot + new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * 3.5f, 40);
+        }
+
+        // By about a unit, give or take the dithering of the writes.
+        await Shape(world, shovel, ShovelMode.Raise, Spot, 40);
+        Check(Height(world, Spot) > stopped + 0.5f,
+            $"widening the base did not let the middle grow, {stopped:0.00} to {Height(world, Spot):0.00}");
     }
 
     /// <summary>Lowering takes particles away down to the rock, and never the rock itself.</summary>
@@ -147,7 +184,7 @@ public sealed class ToolTests : TestSuite
         int rock = RawCells();
 
         // Once the rock is bared there is nothing left for a shovel to aim at.
-        await Shape(world, shovel, ShovelMode.LowerGradual, Spot, 40);
+        await Shape(world, shovel, ShovelMode.Lower, Spot, 40);
 
         float bottom = Height(world, Spot);
         Check(bottom < Surface - 4f, $"lowering only got {Surface - bottom:0.00} down");
@@ -161,8 +198,8 @@ public sealed class ToolTests : TestSuite
         NodeWorld world = await Bed();
         var shovel = new ShovelTool();
 
-        await Shape(world, shovel, ShovelMode.RaiseGradual, Spot, 12);
-        Check(Height(world, Spot) > Surface + 2f, "no bump to level");
+        await Shape(world, shovel, ShovelMode.Raise, Spot, 12);
+        Check(Height(world, Spot) > Surface + 1f, "no bump to level");
 
         // Press on flat ground beside the bump, then drag onto it.
         var stroke = new ToolStroke();
@@ -170,6 +207,68 @@ public sealed class ToolTests : TestSuite
         await Shape(world, shovel, ShovelMode.Level, Spot, 25, stroke);
 
         Near(Height(world, Spot), Surface, 0.35f, "the bump's top after levelling");
+    }
+
+    /// <summary>Writes ground of a given height at each column around a spot, straight into the fills.</summary>
+    private static void Sculpt(NodeWorld world, Vector3 around, int span, System.Func<float, float, float> height)
+    {
+        Vector3I middle = world.Grid.NearestLattice(around);
+
+        for (int x = -span; x <= span; x++)
+        for (int z = -span; z <= span; z++)
+        for (int y = -2; y <= 8; y++)
+        {
+            var cell = new Vector3I(middle.X + x, y, middle.Z + z);
+            Vector3 at = world.Grid.LatticePoint(cell);
+            float top = height(at.X - around.X, at.Z - around.Z);
+            world.SetParticleLevel(cell, NodeTypes.Sand, (top - at.Y) / world.NodeSize);
+        }
+
+        world.MeshAllNow();
+    }
+
+    /// <summary>
+    /// Level leaves ground more than a node above or below the press height
+    /// alone: dragged from flat ground into a tall mound, the mound stays.
+    /// </summary>
+    [Test]
+    public async Task LevelLeavesFarGroundAlone()
+    {
+        NodeWorld world = await Bed();
+        var shovel = new ShovelTool();
+        Vector3 mound = Spot + Vector3.Right * 10f;
+
+        // A flat-topped mound 5 units high, far past a node.
+        Sculpt(world, mound, 5, (x, z) => Surface + Mathf.Clamp(8f - new Vector2(x, z).Length(), 0f, 5f));
+        await PhysicsFrames();
+        float before = Height(world, mound);
+
+        var stroke = new ToolStroke();
+        await Shape(world, shovel, ShovelMode.Level, Spot, 1, stroke);
+        await Shape(world, shovel, ShovelMode.Level, mound, 25, stroke);
+
+        Near(Height(world, mound), before, 0.2f, "the tall mound's top after levelling into it");
+    }
+
+    /// <summary>
+    /// Level flattens to the HEIGHT where the press began, level against
+    /// gravity -- pressed on a slope, it does not keep the slope's tilt.
+    /// </summary>
+    [Test]
+    public async Task LevelIsLevelOnASlope()
+    {
+        NodeWorld world = await Bed();
+        var shovel = new ShovelTool();
+
+        // A gentle slope rising along x, at the bed's height under the spot.
+        Sculpt(world, Spot, 7, (x, z) => Surface + 0.3f * x);
+        await PhysicsFrames();
+
+        var stroke = new ToolStroke();
+        await Shape(world, shovel, ShovelMode.Level, Spot, 25, stroke);
+
+        foreach (float x in new[] { -1.5f, 1.5f })
+            Near(Height(world, Spot + Vector3.Right * x), Surface, 0.25f, $"the ground {x} along the slope");
     }
 
     /// <summary>Smooth softens a peak, spreading it rather than removing it.</summary>
@@ -180,7 +279,21 @@ public sealed class ToolTests : TestSuite
         var shovel = new ShovelTool();
         var aside = Vector3.Forward * 2.2f;
 
-        await Shape(world, shovel, ShovelMode.RaiseSharp, Spot, 10);
+        // A cone 4 units high, written straight into the fills: a raise makes
+        // only flat tops.
+        var middle = world.Grid.NearestLattice(Spot);
+        for (int x = -3; x <= 3; x++)
+        for (int z = -3; z <= 3; z++)
+        for (int y = -2; y <= 6; y++)
+        {
+            var cell = new Vector3I(middle.X + x, y, middle.Z + z);
+            float top = Surface + Mathf.Max(0f, 4f - 1.5f * world.NodeSize * new Vector2(x, z).Length());
+            world.SetParticleLevel(cell, NodeTypes.Sand, (top - world.Grid.LatticePoint(cell).Y) / world.NodeSize);
+        }
+
+        world.MeshAllNow();
+        await PhysicsFrames();
+
         float peak = Height(world, Spot) - Surface;
         float flank = Height(world, Spot + aside) - Surface;
 
@@ -200,40 +313,32 @@ public sealed class ToolTests : TestSuite
         var shovel = new ShovelTool();
         float before = Height(world, Spot);
 
-        await Shape(world, shovel, ShovelMode.RaiseGradual, Spot, 3, ledger: refusing);
-        await Shape(world, shovel, ShovelMode.LowerGradual, Spot, 3, ledger: refusing);
+        await Shape(world, shovel, ShovelMode.Raise, Spot, 3, ledger: refusing);
+        await Shape(world, shovel, ShovelMode.Lower, Spot, 3, ledger: refusing);
 
         Near(Height(world, Spot), before, 0.001f, "ground after refused edits");
         Check(refusing.Asked >= 2, "the ledger was never consulted");
 
         var counting = new CountingLedger { Allow = true };
-        await Shape(world, shovel, ShovelMode.RaiseGradual, Spot, 3, ledger: counting);
+        await Shape(world, shovel, ShovelMode.Raise, Spot, 3, ledger: counting);
         Check(counting.Placed > 0f, "a raise was not recorded");
     }
 
-    /// <summary>
-    /// The raise and lower modes draw both circles; Level and Smooth, with one
-    /// brush each, draw only the outer.
-    /// </summary>
+    /// <summary>Every mode has the one brush, so none draws an inner circle.</summary>
     [Test]
-    public async Task OnlyRaiseAndLowerDrawTheInnerCircle()
+    public async Task NoModeDrawsAnInnerCircle()
     {
         NodeWorld world = await Bed();
         var shovel = new ShovelTool();
 
-        bool ShowsInner(ShovelMode mode)
+        foreach (ShovelMode mode in System.Enum.GetValues<ShovelMode>())
         {
             var builder = new HighlightBuilder();
             ToolContext context = Looking(world, Eye, Vector3.Down, mode: mode);
             shovel.TryTarget(context, out NodeHit target);
             shovel.Outline(context, target, builder);
-            return builder.ShowInner;
+            Check(!builder.ShowInner, $"{mode} draws an inner circle");
         }
-
-        Check(ShowsInner(ShovelMode.RaiseSharp), "raise sharp hides its inner circle");
-        Check(ShowsInner(ShovelMode.LowerGradual), "lower gradual hides its inner circle");
-        Check(!ShowsInner(ShovelMode.Level), "Level draws an inner circle");
-        Check(!ShowsInner(ShovelMode.Smooth), "Smooth draws an inner circle");
     }
 
     // --------------------------------------------------- walls, ceilings, edges
@@ -323,7 +428,7 @@ public sealed class ToolTests : TestSuite
         var eye = new Vector3(9f, 7.3f, 0.3f);
 
         float before = Along(world, eye, Vector3.Left);
-        await ShapeAlong(world, shovel, ShovelMode.RaiseGradual, eye, Vector3.Left, 10);
+        await ShapeAlong(world, shovel, ShovelMode.Raise, eye, Vector3.Left, 10);
         float after = Along(world, eye, Vector3.Left);
 
         Check(after < before - 1f, $"the wall only came out from {before:0.00} to {after:0.00} away");
@@ -355,7 +460,7 @@ public sealed class ToolTests : TestSuite
         Check(ceiling.Type is ParticleNode, "the ceiling is not particles");
 
         float before = Along(world, eye, Vector3.Up);
-        await ShapeAlong(world, shovel, ShovelMode.LowerGradual, eye, Vector3.Up, 8);
+        await ShapeAlong(world, shovel, ShovelMode.Lower, eye, Vector3.Up, 8);
         float after = Along(world, eye, Vector3.Up);
 
         Check(after > before + 0.8f, $"the ceiling only went from {before:0.00} to {after:0.00} away");
@@ -396,7 +501,7 @@ public sealed class ToolTests : TestSuite
 
             controller.CycleMode(pickaxe);
             Equal(controller.ModeOf(pickaxe), 0, "a tool without modes");
-            Equal(shovel.Modes.Count, 6, "the shovel's modes");
+            Equal(shovel.Modes.Count, 4, "the shovel's modes");
         }
         finally
         {

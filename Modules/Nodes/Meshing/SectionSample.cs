@@ -36,11 +36,13 @@ internal sealed class SectionSample
     public readonly byte[] Fills = new byte[Span * Span * Span];
 
     /// <summary>
-    /// Each sample's site, relative to the section's lowest lattice point. The
-    /// particle mesher measures the shell's crossings between sites where it meets
-    /// rock, because the midpoint of two sites lies on the wall between them.
+    /// How far each sample's site sits from its lattice point. The particle
+    /// mesher measures the shell's crossings between sites where it meets rock,
+    /// because the midpoint of two sites lies on the wall between them. Kept
+    /// apart from the lattice point, rather than as a position in the section,
+    /// so that two sections building the same vertex do the same arithmetic.
     /// </summary>
-    public readonly Vector3[] Sites = new Vector3[Span * Span * Span];
+    public readonly Vector3[] Jitters = new Vector3[Span * Span * Span];
 
     /// <summary>Whether each sample hides a rock face turned toward it.</summary>
     private readonly bool[] _covers = new bool[Span * Span * Span];
@@ -82,7 +84,7 @@ internal sealed class SectionSample
 
             Materials[i] = material;
             Fills[i] = fill;
-            Sites[i] = new Vector3(x, y, z) * grid.NodeSize + grid.JitterOf(cell);
+            Jitters[i] = grid.JitterOf(cell);
 
             if (NodeTypes.IsParticle(material))
                 HasParticles = true;

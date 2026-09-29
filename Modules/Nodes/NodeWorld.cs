@@ -563,8 +563,7 @@ public partial class NodeWorld : Node3D
         if (!_sections.TryGetValue(section, out SectionNodes nodes))
         {
             EnsureBodies();
-            nodes = new SectionNodes(this, _rawBody, _particleBody, section,
-                Grid.LatticePoint(SectionOrigin(section)));
+            nodes = new SectionNodes(this, _rawBody, _particleBody, section);
             _sections[section] = nodes;
         }
 
@@ -733,7 +732,7 @@ public partial class NodeWorld : Node3D
 
     /// <summary>
     /// The meshes currently drawn, each with the local position its vertices
-    /// are relative to. For tests and tools.
+    /// are relative to (the world's origin, for every section). For tests and tools.
     /// </summary>
     public IEnumerable<(Vector3 Origin, ArrayMesh Mesh)> SectionMeshes
     {
@@ -747,21 +746,34 @@ public partial class NodeWorld : Node3D
         }
     }
 
-    /// <summary>The scene nodes that draw and collide one section.</summary>
+    /// <summary>
+    /// The scene nodes that draw and collide one section.
+    ///
+    /// Every section sits at the world's own origin, its vertices in the
+    /// world's local space, NOT at its own corner with vertices relative to
+    /// that. The planet's surface is thousands of units out, and the renderer
+    /// combines a mesh's position with the camera's in single precision: each
+    /// section at its own corner came out a different fraction of a millimetre
+    /// off, so the edge two sections share was drawn twice a hair apart, and
+    /// pixels between the two showed the sky through the ground -- specks in
+    /// lines along the seams that flickered as the camera turned. With one
+    /// shared transform, a vertex both sections build identically (see
+    /// ParticleNodeMesher.CubeVertex) is drawn identically, and the seams are
+    /// closed.
+    /// </summary>
     private sealed class SectionNodes
     {
         public readonly MeshInstance3D Mesh;
         private readonly CollisionShape3D _raw;
         private readonly CollisionShape3D _particle;
 
-        public SectionNodes(Node3D parent, StaticBody3D rawBody, StaticBody3D particleBody,
-            Vector3I section, Vector3 origin)
+        public SectionNodes(Node3D parent, StaticBody3D rawBody, StaticBody3D particleBody, Vector3I section)
         {
             string name = $"{section.X}_{section.Y}_{section.Z}";
 
-            Mesh = new MeshInstance3D { Name = "Section" + name, Position = origin };
-            _raw = new CollisionShape3D { Name = "Raw" + name, Position = origin };
-            _particle = new CollisionShape3D { Name = "Particle" + name, Position = origin };
+            Mesh = new MeshInstance3D { Name = "Section" + name };
+            _raw = new CollisionShape3D { Name = "Raw" + name };
+            _particle = new CollisionShape3D { Name = "Particle" + name };
 
             parent.AddChild(Mesh);
             rawBody.AddChild(_raw);
