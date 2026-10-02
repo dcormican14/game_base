@@ -13,7 +13,9 @@ namespace GameBase.UI;
 /// tree is paused.
 ///
 /// It also shows the player's movement mode, so free-fly inspection is never
-/// a hidden state — double-tapping jump by accident is otherwise confusing.
+/// a hidden state — double-tapping jump by accident is otherwise confusing —
+/// and a line from anything in the scene that has one to give
+/// (<see cref="IStatsReport"/>): the terrain the player is in, on a planet.
 /// </summary>
 public partial class PerfStats : CanvasLayer
 {
@@ -28,6 +30,7 @@ public partial class PerfStats : CanvasLayer
     private Label _label;
     private double _accumulator;
     private PlayerController _player;
+    private IStatsReport _report;
 
     public override void _Ready()
     {
@@ -81,12 +84,16 @@ public partial class PerfStats : CanvasLayer
         double vram = Performance.GetMonitor(Performance.Monitor.RenderVideoMemUsed);
         double memory = Performance.GetMonitor(Performance.Monitor.MemoryStatic);
 
+        _report ??= NodeSearch.FindImplementing<IStatsReport>(GetTree().CurrentScene ?? GetParent());
+        string extra = _report?.StatsLine;
+
         _label.Text =
             $"FPS {fps:0}  ({frameMs:0.0} ms)\n" +
             $"Physics {physicsMs:0.0} ms\n" +
             $"Draw calls {drawCalls:0}\n" +
             $"Tris {FormatCount(primitives)}\n" +
-            $"VRAM {vram / (1024.0 * 1024.0):0} MB  |  Mem {memory / (1024.0 * 1024.0):0} MB";
+            $"VRAM {vram / (1024.0 * 1024.0):0} MB  |  Mem {memory / (1024.0 * 1024.0):0} MB" +
+            (string.IsNullOrEmpty(extra) ? "" : $"\n{extra}");
     }
 
     private static string FormatCount(double value)

@@ -46,6 +46,28 @@ horizontal_alignment = 1
 layout_mode = 2
 custom_minimum_size = Vector2(0, 24)
 
+[node name="SeedRow" type="HBoxContainer" parent="MenuRoot/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="SeedLabel" type="Label" parent="MenuRoot/VBoxContainer/SeedRow"]
+layout_mode = 2
+text = "Seed"
+
+[node name="SeedEdit" type="LineEdit" parent="MenuRoot/VBoxContainer/SeedRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+tooltip_text = "The world is built from this. Any number or word works; the same seed always gives the same world."
+max_length = 32
+select_all_on_focus = true
+
+[node name="RerollButton" type="Button" parent="MenuRoot/VBoxContainer/SeedRow"]
+unique_name_in_owner = true
+layout_mode = 2
+tooltip_text = "Pick a new random seed"
+text = "New"
+
 [node name="PlayButton" type="Button" parent="MenuRoot/VBoxContainer"]
 unique_name_in_owner = true
 layout_mode = 2

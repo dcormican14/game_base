@@ -17,7 +17,8 @@ public partial class PlayerController : CharacterBody3D
 {
     [ExportGroup("Movement")]
     [Export] public float WalkSpeed { get; set; } = 3.6f;
-    [Export] public float SprintSpeed { get; set; } = 6.5f;
+    /// <summary>Sprint speed when there is no SettingsService (which holds the player's own choice).</summary>
+    [Export] public float SprintSpeed { get; set; } = 18f;
     [Export] public float JumpVelocity { get; set; } = 5f;
     [Export] public float Gravity { get; set; } = 14f;
     [Export] public float GroundAcceleration { get; set; } = 12f;
@@ -85,6 +86,13 @@ public partial class PlayerController : CharacterBody3D
 
     [Export] public float SandboxSpeed { get; set; } = 8f;
     [Export] public float SandboxSprintSpeed { get; set; } = 20f;
+
+    /// <summary>
+    /// How fast a sprint goes now: the player's setting, or
+    /// <see cref="SprintSpeed"/> without the settings service. Sandbox flight
+    /// sprints at least this fast too.
+    /// </summary>
+    public float CurrentSprintSpeed => SettingsService.Instance?.SprintSpeed ?? SprintSpeed;
     /// <summary>How fast free-fly reaches its target velocity. Higher is
     /// snappier; the damping keeps it from feeling like ice.</summary>
     [Export] public float SandboxAcceleration { get; set; } = 14f;
@@ -326,7 +334,7 @@ public partial class PlayerController : CharacterBody3D
                 // Crouch limits speed only on the ground — mid-air it never
                 // bleeds momentum.
                 float targetSpeed = IsCrouching && IsOnFloor() ? CrouchSpeed
-                    : Input.IsActionPressed(SprintAction) ? SprintSpeed
+                    : Input.IsActionPressed(SprintAction) ? CurrentSprintSpeed
                     : WalkSpeed;
 
                 // Steered ACROSS gravity rather than across world XZ. The
@@ -485,7 +493,9 @@ public partial class PlayerController : CharacterBody3D
         if (wish.LengthSquared() > 1f)
             wish = wish.Normalized();
 
-        float speed = Input.IsActionPressed(SprintAction) ? SandboxSprintSpeed : SandboxSpeed;
+        float speed = Input.IsActionPressed(SprintAction)
+            ? Mathf.Max(SandboxSprintSpeed, CurrentSprintSpeed)
+            : SandboxSpeed;
         float weight = 1f - Mathf.Exp(-SandboxAcceleration * dt);
         Velocity = Velocity.Lerp(wish * speed, weight);
 

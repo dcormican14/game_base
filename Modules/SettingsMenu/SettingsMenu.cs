@@ -5,7 +5,7 @@ using GameBase.Core;
 namespace GameBase.UI;
 
 /// <summary>
-/// Reusable settings screen: video, audio, mouse sensitivity and a keybind
+/// Reusable settings screen: video, audio, mouse sensitivity, sprint speed and a keybind
 /// list generated dynamically from the InputMap (every rebindable action gets
 /// a row — no per-action code). Instance it hidden inside any menu, show it,
 /// and listen for BackPressed to close it.
@@ -29,6 +29,8 @@ public partial class SettingsMenu : Control
     private CheckButton _perfStatsCheck;
     private HSlider _volumeSlider;
     private HSlider _sensitivitySlider;
+    private HSlider _sprintSlider;
+    private Label _sprintValue;
     private HSlider _crosshairLinesSlider;
     private Label _crosshairLinesValue;
     private VBoxContainer _keybindList;
@@ -49,6 +51,8 @@ public partial class SettingsMenu : Control
         _perfStatsCheck = GetNode<CheckButton>("%PerfStatsCheck");
         _volumeSlider = GetNode<HSlider>("%MasterVolumeSlider");
         _sensitivitySlider = GetNode<HSlider>("%MouseSensitivitySlider");
+        _sprintSlider = GetNode<HSlider>("%SprintSpeedSlider");
+        _sprintValue = GetNode<Label>("%SprintSpeedValue");
         _crosshairLinesSlider = GetNode<HSlider>("%CrosshairLinesSlider");
         _crosshairLinesValue = GetNode<Label>("%CrosshairLinesValue");
         _keybindList = GetNode<VBoxContainer>("%KeybindList");
@@ -62,6 +66,12 @@ public partial class SettingsMenu : Control
         _perfStatsCheck.Toggled += on => { if (Svc != null) Svc.ShowPerfStats = on; };
         _volumeSlider.ValueChanged += v => { if (Svc != null) Svc.MasterVolume = (float)v; };
         _sensitivitySlider.ValueChanged += v => { if (Svc != null) Svc.MouseSensitivity = (float)v; };
+        _sprintSlider.ValueChanged += v =>
+        {
+            if (Svc != null)
+                Svc.SprintSpeed = (float)v;
+            _sprintValue.Text = ((int)v).ToString();
+        };
         _crosshairLinesSlider.ValueChanged += v =>
         {
             if (Svc != null)
@@ -202,6 +212,8 @@ public partial class SettingsMenu : Control
             _perfStatsCheck.SetPressedNoSignal(Svc.ShowPerfStats);
             _volumeSlider.SetValueNoSignal(Svc.MasterVolume);
             _sensitivitySlider.SetValueNoSignal(Svc.MouseSensitivity);
+            _sprintSlider.SetValueNoSignal(Svc.SprintSpeed);
+            _sprintValue.Text = ((int)Svc.SprintSpeed).ToString();
             _crosshairLinesSlider.SetValueNoSignal(Svc.CrosshairLines);
             _crosshairLinesValue.Text = Svc.CrosshairLines.ToString();
         }

@@ -36,6 +36,13 @@ uniform float ripple_stretch : hint_range(1.0, 30.0) = 8.0;
 uniform float ripples : hint_range(0.0, 1.0) = 0.3;
 uniform float ripple_sharpness : hint_range(1.0, 8.0) = 2.2;
 
+// Handing over to the far terrain: between these distances from the camera
+// the surface dissolves away, pixel by pixel, on the same pattern the far
+// terrain dissolves in on (and the raw nodes' material fades by). Off while
+// handover_end is 0.
+uniform float handover_start = 0.0;
+uniform float handover_end = 0.0;
+
 varying vec3 world_pos;
 
 void vertex() {
@@ -93,6 +100,16 @@ float fbm(vec3 at, int octaves) {
 }
 
 void fragment() {
+    if (handover_end > 0.0) {
+        // The engine's own distance-fade test (interleaved gradient noise),
+        // reversed: whole near, gone past handover_end.
+        float fade = clamp(smoothstep(handover_end, handover_start, length(VERTEX)), 0.0, 1.0);
+        float threshold = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))));
+        if (fade < 0.001 || fade < threshold) {
+            discard;
+        }
+    }
+
     // The planet is centred on the world origin, so up is simply outward.
     vec3 up = normalize(world_pos);
 

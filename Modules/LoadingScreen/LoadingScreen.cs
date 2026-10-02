@@ -26,7 +26,7 @@ public partial class LoadingScreen : CanvasLayer
     /// real milestones so it moves from the first frame; release always waits
     /// on the level itself.
     /// </summary>
-    [Export(PropertyHint.Range, "0.5,20,0.5")] public float ExpectedSeconds { get; set; } = 3f;
+    [Export(PropertyHint.Range, "0.5,60,0.5")] public float ExpectedSeconds { get; set; } = 15f;
 
     private ILoadProgress _load;
     private PauseMenu _pauseMenu;

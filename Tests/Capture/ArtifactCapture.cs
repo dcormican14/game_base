@@ -35,7 +35,11 @@ public partial class ArtifactCapture : Node
     {
         try
         {
-            AddChild(GD.Load<PackedScene>("res://Game/PlanetLevel.tscn").Instantiate());
+            // Staged on the plain round planet: the shots and the tool
+            // choreography assume level ground under the spawn.
+            Node level = GD.Load<PackedScene>("res://Game/PlanetLevel.tscn").Instantiate();
+            level.GetNode<Planet>("Planet").FlatWorld = true;
+            AddChild(level);
             await Shots();
         }
         catch (Exception error)

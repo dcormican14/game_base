@@ -33,6 +33,47 @@ public static class NodeMaterials
         CullMode = BaseMaterial3D.CullModeEnum.Disabled,
     };
 
+    private static float _handoverStart, _handoverEnd;
+
+    /// <summary>
+    /// Dissolves every node surface away with distance from the camera,
+    /// whole nearer than <paramref name="start"/> and gone past
+    /// <paramref name="end"/>, where something else draws the ground (the
+    /// far terrain dissolves in on the same pixels). Raw nodes use the
+    /// engine's pixel-dither distance fade, reversed; particle surfaces the
+    /// same test in their shader. An end of 0 turns it off.
+    /// </summary>
+    public static void SetHandover(float start, float end)
+    {
+        _handoverStart = start;
+        _handoverEnd = end;
+
+        StandardMaterial3D raw = Raw;
+        if (end > 0f)
+        {
+            raw.DistanceFadeMode = BaseMaterial3D.DistanceFadeModeEnum.PixelDither;
+            // Min past max reverses the fade: gone at min, whole at max.
+            raw.DistanceFadeMinDistance = end;
+            raw.DistanceFadeMaxDistance = start;
+        }
+        else
+        {
+            raw.DistanceFadeMode = BaseMaterial3D.DistanceFadeModeEnum.Disabled;
+        }
+
+        foreach (Material material in Particles.Values)
+            ApplyHandover(material);
+    }
+
+    private static void ApplyHandover(Material material)
+    {
+        if (material is not ShaderMaterial shaded)
+            return;
+
+        shaded.SetShaderParameter("handover_start", _handoverStart);
+        shaded.SetShaderParameter("handover_end", _handoverEnd);
+    }
+
     /// <summary>The surface material for one kind of particle.</summary>
     public static Material Particle(ParticleNode kind)
     {
@@ -55,6 +96,7 @@ public static class NodeMaterials
             material = shaded;
         }
 
+        ApplyHandover(material);
         Particles[kind.Material] = material;
         return material;
     }

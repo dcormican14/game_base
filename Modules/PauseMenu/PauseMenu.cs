@@ -1,5 +1,6 @@
 using Godot;
 using GameBase.Core;
+using GameBase.Terrain;
 
 namespace GameBase.UI;
 
@@ -8,6 +9,9 @@ namespace GameBase.UI;
 /// it pauses/unpauses the whole scene tree on the "pause" action (rebindable,
 /// and the action name itself is exported). The CanvasLayer root uses
 /// ProcessMode.Always so the menu keeps working while the tree is paused.
+///
+/// It shows the world's seed (see <see cref="WorldSeed"/>), so a world worth
+/// keeping can be noted and typed back in on the main menu.
 /// </summary>
 public partial class PauseMenu : CanvasLayer
 {
@@ -60,6 +64,7 @@ public partial class PauseMenu : CanvasLayer
         _root = GetNode<Control>("%Root");
         _menuPanel = GetNode<Control>("%MenuPanel");
         _settings = GetNode<SettingsMenu>("%SettingsMenu");
+        GetNode<Label>("%SeedLabel").Text = $"Seed {WorldSeed.Current}";
 
         GetNode<Button>("%ResumeButton").Pressed += Resume;
         GetNode<Button>("%SettingsButton").Pressed += OpenSettings;

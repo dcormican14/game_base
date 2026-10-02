@@ -38,6 +38,7 @@ public partial class SettingsService : Node
     [Export] public bool DefaultDitherFilter { get; set; }
     [Export] public bool DefaultShowPerfStats { get; set; }
     [Export(PropertyHint.Range, "0,4,1")] public int DefaultCrosshairLines { get; set; } = 2;
+    [Export(PropertyHint.Range, "1,1000,1")] public float DefaultSprintSpeed { get; set; } = 18f;
 
     private readonly ConfigFile _config = new();
     private readonly Dictionary<StringName, InputEvent[]> _defaultBindings = new();
@@ -52,6 +53,21 @@ public partial class SettingsService : Node
     private bool _ditherFilter;
     private bool _showPerfStats;
     private int _crosshairLines;
+    private float _sprintSpeed;
+
+    /// <summary>
+    /// How fast sprinting goes, in units a second, on foot and in sandbox
+    /// flight. Up to <see cref="MaxSprintSpeed"/>: far past what streaming can
+    /// keep up with, for touring the planet while developing it.
+    /// </summary>
+    public float SprintSpeed
+    {
+        get => _sprintSpeed;
+        set { _sprintSpeed = Mathf.Clamp(value, MinSprintSpeed, MaxSprintSpeed); SaveAndNotify(); }
+    }
+
+    public const float MinSprintSpeed = 1f;
+    public const float MaxSprintSpeed = 1000f;
 
     /// <summary>Degrees of camera rotation per pixel of mouse movement.</summary>
     public float MouseSensitivity
@@ -294,11 +310,14 @@ public partial class SettingsService : Node
         _ditherFilter = DefaultDitherFilter;
         _showPerfStats = DefaultShowPerfStats;
         _crosshairLines = Mathf.Clamp(DefaultCrosshairLines, 0, 4);
+        _sprintSpeed = DefaultSprintSpeed;
 
         if (_config.Load(SettingsFilePath) != Error.Ok)
             return;
 
         _mouseSensitivity = _config.GetValue("controls", "mouse_sensitivity", DefaultMouseSensitivity).AsSingle();
+        _sprintSpeed = Mathf.Clamp(_config.GetValue("controls", "sprint_speed", DefaultSprintSpeed).AsSingle(),
+            MinSprintSpeed, MaxSprintSpeed);
         _masterVolume = _config.GetValue("audio", "master_volume", DefaultMasterVolume).AsSingle();
         _fullscreen = _config.GetValue("video", "fullscreen", DefaultFullscreen).AsBool();
         _vsync = _config.GetValue("video", "vsync", DefaultVSync).AsBool();
@@ -332,6 +351,7 @@ public partial class SettingsService : Node
     public void SaveToDisk()
     {
         _config.SetValue("controls", "mouse_sensitivity", _mouseSensitivity);
+        _config.SetValue("controls", "sprint_speed", _sprintSpeed);
         _config.SetValue("audio", "master_volume", _masterVolume);
         _config.SetValue("video", "fullscreen", _fullscreen);
         _config.SetValue("video", "vsync", _vsync);

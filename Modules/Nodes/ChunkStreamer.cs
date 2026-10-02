@@ -64,9 +64,19 @@ public partial class ChunkStreamer : Node, ILoadProgress
     public int PendingChunks => _queue.Count + _inFlight.Count;
 
     private readonly List<Vector3I> _queue = new();
+
+    /// <summary>
+    /// Chunks past the unload radius, waiting to be dropped a few a frame.
+    /// Crossing into a new chunk puts a whole slab of them out of range at
+    /// once, and dropping a slab of dense rock -- every section's mesh and
+    /// collision -- in one frame was a hitch of a tenth of a second.
+    /// </summary>
+    private readonly Queue<Vector3I> _unloads = new();
+
+    /// <summary>Chunks dropped per frame, at most.</summary>
+    private const int UnloadsPerFrame = 6;
     private readonly HashSet<Vector3I> _inFlight = new();
     private readonly ConcurrentQueue<Generated> _finished = new();
-    private readonly List<Vector3I> _scratch = new();
 
     private Vector3I _centre;
     private bool _scanned;
@@ -87,6 +97,7 @@ public partial class ChunkStreamer : Node, ILoadProgress
         _queue.Clear();
         _inFlight.Clear();
         _finished.Clear();
+        _unloads.Clear();
         _scanned = false;
         IsReady = false;
         Progress = 0f;
@@ -107,6 +118,7 @@ public partial class ChunkStreamer : Node, ILoadProgress
             Rescan();
         }
 
+        Unload();
         Collect();
         Dispatch();
 
@@ -142,15 +154,12 @@ public partial class ChunkStreamer : Node, ILoadProgress
     {
         int unload = Math.Max(UnloadRadius, LoadRadius + 1);
 
-        _scratch.Clear();
+        _unloads.Clear();
         foreach (var pair in World.Store.Chunks)
         {
             if (DistanceSquared(pair.Key, _centre) > unload * unload)
-                _scratch.Add(pair.Key);
+                _unloads.Enqueue(pair.Key);
         }
-
-        foreach (Vector3I chunk in _scratch)
-            World.UnloadChunk(chunk);
 
         _queue.Clear();
 
@@ -173,6 +182,19 @@ public partial class ChunkStreamer : Node, ILoadProgress
         // before the scenery at the edge of view. Sorted descending so the
         // nearest is taken from the end of the list.
         _queue.Sort((a, b) => DistanceSquared(b, _centre).CompareTo(DistanceSquared(a, _centre)));
+    }
+
+    /// <summary>Drops a few of the chunks out of range, skipping any the target has come back to.</summary>
+    private void Unload()
+    {
+        int unload = Math.Max(UnloadRadius, LoadRadius + 1);
+
+        for (int n = 0; n < UnloadsPerFrame && _unloads.Count > 0; n++)
+        {
+            Vector3I chunk = _unloads.Dequeue();
+            if (DistanceSquared(chunk, _centre) > unload * unload && World.IsChunkLoaded(chunk))
+                World.UnloadChunk(chunk);
+        }
     }
 
     private static int DistanceSquared(Vector3I a, Vector3I b)

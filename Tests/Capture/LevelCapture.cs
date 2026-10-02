@@ -41,7 +41,11 @@ public partial class LevelCapture : Node
         {
             await MenuShot();
 
-            AddChild(GD.Load<PackedScene>(LevelPath).Instantiate());
+            // Staged on the plain round planet: the shots and the tool
+            // choreography assume level ground under the spawn.
+            Node level = GD.Load<PackedScene>(LevelPath).Instantiate();
+            level.GetNode<Planet>("Planet").FlatWorld = true;
+            AddChild(level);
             await Shots();
         }
         catch (Exception error)

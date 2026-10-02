@@ -219,6 +219,39 @@ max_value = 0.5
 step = 0.01
 value = 0.15
 
+[node name="SprintRow" type="HBoxContainer" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content"]
+layout_mode = 2
+
+[node name="SprintLabel" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content/SprintRow"]
+layout_mode = 2
+custom_minimum_size = Vector2(200, 0)
+size_flags_horizontal = 3
+text = "Sprint Speed"
+
+[node name="SprintSpeedSlider" type="HSlider" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content/SprintRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(200, 0)
+size_flags_vertical = 4
+min_value = 6.0
+max_value = 600.0
+step = 1.0
+value = 18.0
+exp_edit = true
+
+[node name="SprintSpeedValue" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content/SprintRow"]
+unique_name_in_owner = true
+layout_mode = 2
+custom_minimum_size = Vector2(40, 0)
+horizontal_alignment = 1
+text = "18"
+
+[node name="SprintHint" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 13
+modulate = Color(1, 1, 1, 0.6)
+text = "Units a second, on foot and in sandbox flight. Past about 30 the ground cannot load as fast as you run: fly (double-tap Jump) to tour."
+
 [node name="KeybindHint" type="Label" parent="CenterContainer/PanelContainer/MarginContainer/VBoxContainer/Tabs/Controls/Content"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 13

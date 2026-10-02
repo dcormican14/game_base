@@ -439,6 +439,15 @@ public static class ParticleSculpt
                 if (faster <= 1e-7f)
                     continue;
 
+                // A neighbour clamped deep in the ground only says "at least
+                // this deep": its surface is higher still, so a raise beside
+                // it cannot make a slope toward it. Taken at its word, it
+                // reads as a cliff wherever the lattice leans against gravity
+                // -- away from the planet's axes a lattice step "down" is
+                // partly sideways -- and stopped every raise there dead.
+                if (!rising && field.LevelOf(beside) >= NodeFill.Range - 0.02f)
+                    continue;
+
                 // On a flat surface the neighbour's fill is this cell's less
                 // the lift; a slope of Repose lets this cell stand that much
                 // more. How much of that is left is how far the step may go.

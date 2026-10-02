@@ -70,6 +70,9 @@ public partial class NodeWorld : Node3D
         _backlog.Clear();
         _backlogOrder.Clear();
         _tickets.Clear();
+        _awaiting.Clear();
+        _unbuilt.Clear();
+        _meshed.Clear();
         Store.Clear();
 
         // Anything still building describes the world just dropped; its
@@ -220,6 +223,20 @@ public partial class NodeWorld : Node3D
     {
         Store.Install(chunk, materials, fills);
 
+        // Every section of the chunk is built below; until each has been
+        // uploaded once, the chunk's ground is not all there to be seen.
+        int count = 1 << SectionsPerChunkShift;
+        Vector3I first = new(chunk.X << SectionsPerChunkShift, chunk.Y << SectionsPerChunkShift,
+            chunk.Z << SectionsPerChunkShift);
+
+        for (int x = 0; x < count; x++)
+        for (int y = 0; y < count; y++)
+        for (int z = 0; z < count; z++)
+            _awaiting.Add(first + new Vector3I(x, y, z));
+
+        _meshed.Remove(chunk);
+        _unbuilt[chunk] = count * count * count;
+
         Vector3I origin = NodeChunkStore.OriginOf(chunk);
         Vector3I low = SectionOf(origin - Vector3I.One);
         Vector3I high = SectionOf(origin + Vector3I.One * NodeChunkStore.ChunkSize);
@@ -256,7 +273,58 @@ public partial class NodeWorld : Node3D
             _urgent.Remove(section);
             _backlog.Remove(section);
             _tickets.Remove(section);
+            _awaiting.Remove(section);
         }
+
+        _unbuilt.Remove(chunk);
+        _meshed.Remove(chunk);
+        ChunkUnloaded?.Invoke(chunk);
+    }
+
+    // ------------------------------------------------------------- coverage
+
+    /// <summary>Sections installed but not yet uploaded once.</summary>
+    private readonly HashSet<Vector3I> _awaiting = new();
+
+    /// <summary>How many of each installed chunk's sections are still awaited.</summary>
+    private readonly Dictionary<Vector3I, int> _unbuilt = new();
+
+    /// <summary>Chunks whose every section has been uploaded at least once.</summary>
+    private readonly HashSet<Vector3I> _meshed = new();
+
+    /// <summary>
+    /// Raised when every section of a newly installed chunk has been drawn
+    /// once: from then on its ground is on screen, and anything standing in
+    /// for it (the far terrain) can step aside. Later rebuilds -- an edit, a
+    /// neighbour arriving -- keep the old geometry up until the new is ready,
+    /// so a meshed chunk stays covered until it is unloaded.
+    /// </summary>
+    public event Action<Vector3I> ChunkMeshed;
+
+    /// <summary>Raised when a chunk is dropped, after its geometry is gone.</summary>
+    public event Action<Vector3I> ChunkUnloaded;
+
+    /// <summary>Is a chunk loaded and all of it drawn? See <see cref="ChunkMeshed"/>.</summary>
+    public bool IsChunkMeshed(Vector3I chunk) => _meshed.Contains(chunk);
+
+    private void SectionDrawn(Vector3I section)
+    {
+        if (!_awaiting.Remove(section))
+            return;
+
+        Vector3I chunk = ChunkOfSection(section);
+        if (!_unbuilt.TryGetValue(chunk, out int left))
+            return;
+
+        if (left > 1)
+        {
+            _unbuilt[chunk] = left - 1;
+            return;
+        }
+
+        _unbuilt.Remove(chunk);
+        _meshed.Add(chunk);
+        ChunkMeshed?.Invoke(chunk);
     }
 
     // --------------------------------------------------------------- meshing
@@ -545,6 +613,7 @@ public partial class NodeWorld : Node3D
             _tickets[section] = geometry.Ticket;
             Upload(section, geometry);
             BuiltSections++;
+            SectionDrawn(section);
         }
 
         _spare.Add(geometry);

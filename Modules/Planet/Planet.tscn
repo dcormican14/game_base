@@ -1,14 +1,18 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene load_steps=5 format=3]
 
 [ext_resource type="Script" path="res://Modules/Planet/Planet.cs" id="1_planet"]
 [ext_resource type="Script" path="res://Modules/Nodes/NodeWorld.cs" id="2_world"]
 [ext_resource type="Script" path="res://Modules/Nodes/ChunkStreamer.cs" id="3_streamer"]
+[ext_resource type="Resource" path="res://Modules/Terrain/DefaultTerrain.tres" id="4_terrain"]
 
 [node name="Planet" type="Node3D"]
 script = ExtResource("1_planet")
+Terrain = ExtResource("4_terrain")
 
 [node name="NodeWorld" type="Node3D" parent="."]
 script = ExtResource("2_world")
 
 [node name="Streamer" type="Node" parent="."]
 script = ExtResource("3_streamer")
+LoadRadius = 5
+UnloadRadius = 7

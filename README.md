@@ -1,8 +1,9 @@
 # Game Base
 
-A Godot 4.6 (.NET / C#) game: a large, flat-looking planet of raw nodes
-under a shell of particle nodes, lit by a still moon in a night sky, which the
-player digs, piles and builds with a pickaxe and a shovel. Every feature lives in its own folder under `Modules/` (scene
+A Godot 4.6 (.NET / C#) game: a large planet of plains, hill country and
+mountain ranges, built of raw nodes under a skin of particle nodes, lit by a
+still moon in a night sky, which the player digs, piles and builds with a
+pickaxe and a shovel. Every feature lives in its own folder under `Modules/` (scene
 and script side by side) so it can be ported into another project by copying
 that folder.
 
@@ -10,7 +11,10 @@ that folder.
 
 1. Open the project in Godot 4.6 (.NET edition), or build from the command
    line with `dotnet build`.
-2. Run. Main menu -> **Play** loads `Game/PlanetLevel.tscn`.
+2. Run. Main menu -> **Play** loads `Game/PlanetLevel.tscn`, building the
+   world from the **seed** in the box above it (random at launch, editable,
+   **New** picks another; any number or word works). The pause menu shows
+   the seed of the world being played.
 
 | Input | Action |
 |---|---|
@@ -22,6 +26,7 @@ that folder.
 | 1-9, mouse wheel | pick a hotbar slot |
 | Tab | inventory |
 | Esc | pause |
+| F3 | terrain readout: region, heights, slope, sand depth, seed, far terrain |
 
 Every action is rebindable in **Settings -> Controls**.
 
@@ -33,6 +38,7 @@ Every action is rebindable in **Settings -> Controls**.
 | `Modules/Core/` | `Palette` (every colour), `PaletteTheme`, the `SettingsService` and `UiStateService` autoloads, `ILoadProgress`, `NodeSearch` |
 | `Modules/Nodes/` | The node world: types, storage, the Voronoi grid, meshing, streaming, physics picking |
 | `Modules/Planet/` | The planet: its numbers, its generator, and the spawn that stands the player on it |
+| `Modules/Terrain/` | The terrain's shape (regions, heights, overhangs, arches), its noise, its settings, the seed, and the far terrain |
 | `Modules/Tools/` | The tool interface, the pickaxe and shovel, the controller that drives them, and the highlight |
 | `Modules/Player/` | `CharacterBody3D` player rig with radial gravity, first or third person, animated model |
 | `Modules/Inventory/` | Hotbar and backpack, item resources, rendered item icons |
@@ -66,7 +72,7 @@ hierarchy splits on **form**:
 
 **Terminology.** *Raw nodes* and *particle nodes* are the two forms; *stone*
 and *sand* are materials, one of each form, the way a type names what a node
-is made of. The planet is a ball of raw nodes under a shell of particle nodes.
+is made of. The planet is a body of raw nodes under a skin of particle nodes.
 
 The particle nodes are their own **shell**, not a coat of paint on the rock.
 Their surface is a closed "cloud" around them that sinks part of the way into
@@ -105,19 +111,115 @@ rays into dug pits to prove no seam between the two lets the sky through.
 
 ### The planet
 
-`Planet` holds the numbers (radius 6000, node size 2, a 6-unit shell of
-particle nodes) and hands a `PlanetGenerator` to the world and a
-`ChunkStreamer`. The shell's surface is a perfect sphere; the raw nodes beneath
-are every node whose site lies below the shell. At this radius the horizon dips about 1.3 degrees below level for a
-standing player, so the ground reads as flat while still being a planet anyone
-flying high enough can see curve.
+`Planet` holds the numbers (radius 6000, node size 2) and builds, from them,
+the terrain settings and the world seed, a terrain SHAPE and a
+`PlanetGenerator`, which it hands to the world, the `ChunkStreamer` and the
+`FarTerrain`. At this radius the horizon dips about 1.3 degrees below level
+for a standing player, so plains read as flat while the planet still curves
+for anyone who climbs high enough to look.
+
+### The terrain
+
+The shape and the material are separate questions. The **shape**
+(`ITerrainShape`) is a signed distance field -- positive in the ground -- so it
+can hold anything a height map cannot: overhangs, arches, caprock lips. The
+**material** is the generator's: a node is stone when its site lies deeper
+below the surface than the sand there, and sand fills the rest up to the
+surface, each sand cell storing its true distance to it (the shape sampled
+every other node and divided by its gradient -- `DistanceBlock`).
+
+`PlanetTerrain` lays the planet out in about 100 large **regions**
+(`RegionMap`), 1-3 km across: exactly 15% flat, 30% hills, 25% mountains and
+30% basins, dealt along a large ridged noise so ranges run in chains with
+foothills round them. **Basins** gather into 2-4 **oceans**, each grown out
+from a seed far from the ranges into one connected body 5-15 km across: a
+shelf sloping to 60-120 below the plains near the coast, falling to 250-400
+further out -- dry for now, waiting for water. Borders wander, and any two regions blend over about 300 units. Each
+mountain range has a **character**: jagged ridges, rounded domes, stepped
+mesas with caprock lips (peaks 150-300 units), or towering ranges -- a craggy
+massif under a few horn peaks that reach 350-500, over everything else. Small hollows in
+flats and hills dip below **sea level** (8 units under flat ground) too.
+
+A handful of **canyons** (`Canyons`) wind inland from an ocean's coast across
+plains and hills -- never mountains or sky islands -- as old riverbeds would:
+a sandy floor between stepped rock walls, as deep as the shelf where they
+meet the sea and closing at the head. They count as their own terrain: the
+readouts say "Canyon" between a canyon's rims.
+
+Three to five **sky-island zones** (`SkyIslands`), a kilometre or two across,
+sit anywhere: land shattering and floating off.
+- **Crater.** A steep-walled crater about 250 deep with a rubble floor.
+- **Cracking.** The ground round the rim is split into plates by deep
+  crevices, barely lifted, and the floor is cracked into plates still resting.
+- **Heap.** The crater is filled with around ten thousand pieces of broken
+  ground, frozen mid-drift, in a heap that narrows to a point about 1,000 over
+  the rim at the middle. Floes at the rim are close enough to hop across, and
+  the heap thins and shrinks as it climbs, until only small pieces drift at
+  the top.
+- **Pieces.** Each is a sand-topped slab, a bare rock chunk too steep for
+  sand, or a leaning shard.
+
+How the terrain looks them up:
+- A zone's pieces are laid out the first time anything asks about it, and
+  filed in 32-unit buckets, so a point only measures the few near it.
+- The distance is kept exact down to -12 near them (`SkyIslands.Plateau`).
+- Culling asks the shape whether any piece can reach a block
+  (`ITerrainShape.Within`) instead of trusting a slope bound near them.
+Overhangs come from warping the point sideways by 3D noise; **arches** are
+tubes carved from mountain rock that break through only where a ridge is thin.
+
+**Sand** lies 6 units deep on gentle ground, thins between 40 and 50 degrees,
+and is gone past that: cliffs, crags and the undersides of overhangs are bare
+rock (`SandRules`). Raised ground is rock through and through.
+
+Every number is in `Modules/Terrain/DefaultTerrain.tres` (`TerrainSettings`),
+to tune in the inspector. `Planet.FlatWorld` swaps in the plain round planet
+(`FlatTerrain`), which the tests and the older captures use. All the noise is
+seeded, pure C# in doubles (`Noise`), so any thread builds any chunk the same
+way on any machine.
+
+### Streaming and the far terrain
 
 `ChunkStreamer` keeps a ball of chunks around the player resident -- open sky
 included, as uniform air, so there is no ceiling on building (generation on
-worker threads, nearest first) and reports `ILoadProgress` to the loading
-screen. `PlanetSpawn` holds the player frozen until the streamer confirms real
-collision underfoot — without that hold the player falls through a planet
-that has not been built yet.
+worker threads, nearest first). Chunks that are all sky or all buried rock are
+recognised from a coarse look at the shape, using its bound on how fast the
+distance can change, and skipped.
+
+`FarTerrain` draws everything beyond, out to 4 km: the same 3D shape, arches
+and overhangs included, meshed with surface nets in cubic blocks whose cells
+double in size with distance (4, 8, 16... units), and finer over sky-island
+zones. Level-1 blocks sample the very lattice the chunks do. The far terrain
+is drawn a little further from the camera than it really is, along each line
+of sight, so it always sits just behind the real ground: wherever the real
+ground is drawn it wins, and any gap in it shows far ground, not sky. Between
+110 and 210 units from the camera the real chunks dissolve away over it, so
+the two grounds have no edge -- wide, because real rock is whole faceted
+nodes standing up to a node proud of the smooth shape the far terrain draws,
+and over a narrow band that read as a ledge (the streamer loads 5 chunks round
+the player to cover it). Nearer than 110, over drawn chunks, the far terrain
+is cut away, so it never covers a pit; over chunks not drawn yet it shows
+whole, so streaming never opens a hole. Between levels, each block's ground
+slides onto the next coarser level's (geomorphing, `FarMesher` MORPH) as it
+nears the distance that level takes over at, so neighbouring levels meet at
+one height instead of a ledge; a skirt hanging straight down from every
+block's rim, only as far as the ground below goes, closes whatever crack is
+left. Blocks swap level only when their replacement is ready.
+Space found to be all air or rock is never visited again, stale work is
+skipped, and blocks under drawn chunks are built last: at a sprint the far
+terrain keeps up with nothing waiting. Sand carries the real sand's grain up
+close, rock a mosaic of node-sized cells each lit and shaded on its own as
+real nodes are, both fading to their average further out, with haze toward
+the horizon.
+
+The `Planet` is what the loading screen waits on: ready when the ground under
+the player is built and the far terrain has drawn the horizon (25-50 s on most
+spots; up to about 75 s in the middle of a sky-island zone, with its thousands
+of pieces). `PlanetSpawn` puts the player on top of whatever
+is there -- found by probing the shape from the sky down, so never under an
+arch -- and holds them frozen until the streamer confirms real collision
+underfoot; without that hold the player falls through a planet that has not
+been built yet.
 
 ## Tools
 
@@ -285,7 +387,14 @@ The skybox only draws the background; ambient light is the rig's to set.
 ## Tests
 
 A small headless suite: grid geometry, the store and fill encoding, the
-planet generator, both meshers (flatness, winding, closed solids, watertight
+planet generator, the terrain (cost, determinism, thread safety, the slope
+bound, over sky-island zones too, skipped chunks matching their cells, the
+region mix, sky-island craters filled and heaped to a point, peak heights, sand
+on the flat and none on cliffs, spawn points on top of the ground, seeds), the
+far terrain (arches kept at three levels, the first ring on the chunks'
+ground, each level morphing onto the next, no holes while streaming), the shovel on generated ground (raising on
+a hillside and where the lattice leans, levelling a hillside, smoothing where
+sand meets rock), both meshers (flatness, winding, closed solids, watertight
 seams, the buried shell drawing nothing, the shell staying put when
 undermined), the tools against real collision (targeting, raising and
 lowering, nothing moving outside the brush, a held raise growing without a
@@ -314,6 +423,25 @@ player never sinks into the ground or falls through it.
 
 ```sh
 godot --path . res://Tests/Capture/LevelCapture.tscn -- --out=C:/some/folder
+```
+
+For the terrain:
+
+- `Tests/Capture/PlanetMap.tscn` draws a seed's whole planet as a flat map --
+  regions, mountain characters, basins, height shading -- for judging a layout
+  at a glance (headless is fine).
+- `Tests/Capture/TerrainCapture.tscn` plays the level at a flat, hills, each
+  kind of range and a border, times each load (failing past 60 s) and saves
+  shots from the eye and the air.
+- `Tests/Capture/StressCapture.tscn` holds the shovel's Raise for a long time,
+  walking and turning, logging frame times and memory every second; with
+  `--fly=SPEED` it instead carries the player across the planet, logging the
+  far terrain and streaming (and `--shots=DIR` saves a picture every 5 s).
+
+```sh
+godot --headless --path . res://Tests/Capture/PlanetMap.tscn -- --seed=1 --out=C:/maps/one.png
+godot --path . res://Tests/Capture/TerrainCapture.tscn -- --seed=1 --out=C:/shots [--spots=flat,jagged]
+godot --path . res://Tests/Capture/StressCapture.tscn -- --seconds=90 [--seed=1] [--spot=jagged]
 ```
 
 ## Painting your own skybox

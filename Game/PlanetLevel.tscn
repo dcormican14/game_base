@@ -1,4 +1,4 @@
-[gd_scene load_steps=13 format=3]
+[gd_scene load_steps=14 format=3]
 
 [ext_resource type="PackedScene" path="res://Modules/Skybox/Skybox.tscn" id="1_skybox"]
 [ext_resource type="PackedScene" path="res://Modules/Planet/Planet.tscn" id="2_planet"]
@@ -12,6 +12,7 @@
 [ext_resource type="PackedScene" path="res://Modules/Inventory/InventoryHud.tscn" id="10_inventory"]
 [ext_resource type="PackedScene" path="res://Modules/Lighting/LightingRig.tscn" id="11_lighting"]
 [ext_resource type="PackedScene" path="res://Modules/Tools/ModeBar/ToolModeBar.tscn" id="12_modebar"]
+[ext_resource type="Script" path="res://Modules/Terrain/TerrainReadout.cs" id="13_readout"]
 
 [node name="PlanetLevel" type="Node3D"]
 
@@ -42,3 +43,6 @@ PlayerPath = NodePath("../Player")
 [node name="InventoryHud" parent="." instance=ExtResource("10_inventory")]
 
 [node name="ToolModeBar" parent="." instance=ExtResource("12_modebar")]
+
+[node name="TerrainReadout" type="CanvasLayer" parent="."]
+script = ExtResource("13_readout")
