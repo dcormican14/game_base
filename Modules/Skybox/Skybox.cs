@@ -88,6 +88,61 @@ public partial class Skybox : Node
     // layer's full, calibrated luminosity), so the night can be dimmed layer
     // by layer without touching the colours.
 
+    [ExportGroup("Bloom")]
+
+    private bool _bloomEnabled;
+    /// <summary>
+    /// The engine's bloom: light bleeding past the over-bright, which here is
+    /// only the sun's disc. Off by default -- it is a smooth screen-space blur,
+    /// the one thing that would not be pixel art; the sky shader draws the
+    /// sun's glare itself, on its pixel grid.
+    /// </summary>
+    [Export]
+    public bool BloomEnabled
+    {
+        get => _bloomEnabled;
+        set { _bloomEnabled = value; ApplyBloom(); }
+    }
+
+    private float _bloomIntensity = 0.8f;
+    [Export(PropertyHint.Range, "0,4,0.05")]
+    public float BloomIntensity
+    {
+        get => _bloomIntensity;
+        set { _bloomIntensity = value; ApplyBloom(); }
+    }
+
+    private float _bloomThreshold = 4f;
+    /// <summary>
+    /// How bright a pixel must be, before tonemapping, to bloom. Above lit
+    /// sand at noon (about 2), below the sun's disc (its energy times its
+    /// colour, about 10).
+    /// </summary>
+    [Export(PropertyHint.Range, "0.5,32,0.1")]
+    public float BloomThreshold
+    {
+        get => _bloomThreshold;
+        set { _bloomThreshold = value; ApplyBloom(); }
+    }
+
+    /// <summary>Puts the bloom settings on the environment.</summary>
+    private void ApplyBloom()
+    {
+        if (_environment == null)
+            return;
+
+        _environment.GlowEnabled = BloomEnabled;
+        _environment.GlowIntensity = BloomIntensity;
+        _environment.GlowBloom = 0f;
+        _environment.GlowHdrThreshold = BloomThreshold;
+        _environment.GlowBlendMode = Godot.Environment.GlowBlendModeEnum.Screen;
+
+        // The nearer levels only: a tight bloom round the disc, not a haze
+        // across the screen (the sky's own glow is the wide part).
+        for (int level = 0; level < 7; level++)
+            _environment.SetGlowLevel(level, level is >= 1 and <= 4 ? 1f : 0f);
+    }
+
     [ExportGroup("Pixel Grid")]
     private float _pixelGrid = 300f;
     /// <summary>
@@ -525,6 +580,9 @@ public partial class Skybox : Node
     private Sky _sky;
     private ShaderMaterial _proceduralMaterial;
 
+    /// <summary>The procedural sky's material, for a <see cref="DayCycle"/> to drive; null for other sources.</summary>
+    public ShaderMaterial ProceduralMaterial => Source == SkySource.Procedural ? _proceduralMaterial : null;
+
     public override void _Ready()
     {
         Rebuild();
@@ -603,6 +661,8 @@ public partial class Skybox : Node
             AmbientLightSource = Godot.Environment.AmbientSource.Sky,
             TonemapMode = Godot.Environment.ToneMapper.Filmic,
         };
+
+        ApplyBloom();
 
         _worldEnvironment = new WorldEnvironment
         {

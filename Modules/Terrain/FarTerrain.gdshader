@@ -30,7 +30,9 @@
 // the whole block (CUSTOM0.w and CUSTOM1.w). So a block meets a coarser
 // neighbour at the same height, with no ledge between levels.
 //
-// HAZE thickens with distance so the horizon sits back.
+// HAZE thickens with distance so the horizon sits back. Its colour follows
+// the sky (DayCycle sets it: the night's wine, the day's horizon), and toward
+// the sun it glows with the sun's scattered light.
 shader_type spatial;
 render_mode diffuse_lambert, specular_disabled, cull_back, skip_vertex_transform;
 
@@ -66,10 +68,21 @@ uniform float handover_end = 210.0;
 // How much deeper than itself the far terrain is drawn (see BEHIND).
 uniform float depth_push = 2.5;
 
-uniform vec3 haze_color : source_color = vec3(0.239, 0.063, 0.188);
+// Linear, before tonemapping, as the sky's own colours are (DayCycle).
+uniform vec3 haze_color = vec3(0.047, 0.005, 0.030);
 uniform float haze_start = 350.0;
 uniform float haze_end = 4000.0;
 uniform float haze_amount : hint_range(0.0, 1.0) = 0.45;
+// Toward the sun and the moon, the haze is lit exactly as the sky is (the same
+// glow, worked out the same way; DayCycle hands over both), so distant ground
+// takes the light of the sky behind it.
+uniform vec3 sun_direction = vec3(0.0, -1.0, 0.0);
+uniform vec3 sun_glow_color = vec3(0.0);
+uniform vec3 sun_haze_color = vec3(0.0);
+uniform float sun_scatter : hint_range(0.0, 0.99) = 0.76;
+uniform vec3 moon_direction = vec3(0.0, 1.0, 0.0);
+uniform vec3 moon_glow_color = vec3(0.0);
+uniform float moon_scatter : hint_range(0.0, 0.99) = 0.85;
 
 // Set on the second of the two materials FarTerrain draws with, the one for
 // blocks standing in for drawn chunks (see HANDOVER). No per-instance values:
@@ -80,6 +93,13 @@ uniform bool handover = false;
 
 varying vec3 world_pos;
 varying float rock;
+
+// Cornette-Shanks phase function, as the sky's.
+float phase_cs(float c, float g) {
+    float g2 = g * g;
+    return 3.0 / (8.0 * 3.14159265) * ((1.0 - g2) * (1.0 + c * c))
+        / ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * c, 1.5));
+}
 
 float hash(ivec3 cell) {
     uvec3 v = uvec3(cell) * uvec3(1664525u) + uvec3(1013904223u);
@@ -223,5 +243,13 @@ void fragment() {
     SPECULAR = 0.0;
 
     float haze = smoothstep(haze_start, haze_end, distance) * haze_amount;
-    FOG = vec4(haze_color, haze);
+
+    // The sky's glows, toward the sun and the moon.
+    vec3 looking = normalize(world_pos - CAMERA_POSITION_WORLD);
+    vec3 to_sun = normalize(sun_direction);
+    float sun_angle = 2.0 * asin(clamp(length(looking - to_sun) * 0.5, 0.0, 1.0));
+    vec3 glow = sun_glow_color * phase_cs(dot(looking, to_sun), sun_scatter)
+        + sun_haze_color / (1.0 + pow(sun_angle / 0.12, 2.0))
+        + moon_glow_color * phase_cs(dot(looking, normalize(moon_direction)), moon_scatter);
+    FOG = vec4(haze_color + glow, haze);
 }

@@ -253,6 +253,33 @@ public partial class FarTerrain : Node3D
         NodeMaterials.SetHandover(HandoverStart, HandoverEnd);
     }
 
+    /// <summary>The sky's light on the far terrain's haze: its colour and its glows (see FarTerrain.gdshader, HAZE).</summary>
+    public readonly record struct SkyLight(
+        Vector3 Haze, Vector3 SunDirection, Vector3 SunGlow, Vector3 SunHaze, float SunScatter,
+        Vector3 MoonDirection, Vector3 MoonGlow, float MoonScatter);
+
+    /// <summary>
+    /// The sky's hold on the far terrain: the haze's colour, and the glow of
+    /// the sun and moon through it. Colours are linear, before tonemapping.
+    /// </summary>
+    public void SetSky(SkyLight light)
+    {
+        foreach (ShaderMaterial material in new[] { _material, _handoverMaterial })
+        {
+            if (material == null)
+                continue;
+
+            material.SetShaderParameter("haze_color", light.Haze);
+            material.SetShaderParameter("sun_direction", light.SunDirection);
+            material.SetShaderParameter("sun_glow_color", light.SunGlow);
+            material.SetShaderParameter("sun_haze_color", light.SunHaze);
+            material.SetShaderParameter("sun_scatter", light.SunScatter);
+            material.SetShaderParameter("moon_direction", light.MoonDirection);
+            material.SetShaderParameter("moon_glow_color", light.MoonGlow);
+            material.SetShaderParameter("moon_scatter", light.MoonScatter);
+        }
+    }
+
     /// <summary>Drops every block, built or building.</summary>
     public void Clear()
     {
@@ -295,7 +322,8 @@ public partial class FarTerrain : Node3D
         material.SetShaderParameter("sand_shade", new Vector3(shade.R, shade.G, shade.B));
         material.SetShaderParameter("rock_light", Palette.StoneLight);
         material.SetShaderParameter("rock_dark", Palette.StoneDark);
-        material.SetShaderParameter("haze_color", Palette.Wine);
+        Color wine = Palette.Wine.SrgbToLinear();
+        material.SetShaderParameter("haze_color", new Vector3(wine.R, wine.G, wine.B));
 
         return material;
     }

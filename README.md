@@ -1,9 +1,9 @@
 # Game Base
 
-A Godot 4.6 (.NET / C#) game: a large planet of plains, hill country and
-mountain ranges, built of raw nodes under a skin of particle nodes, lit by a
-still moon in a night sky, which the player digs, piles and builds with a
-pickaxe and a shovel. Every feature lives in its own folder under `Modules/` (scene
+A Godot 4.6 (.NET / C#) game: a large turning planet of plains, hill country
+and mountain ranges, built of raw nodes under a skin of particle nodes, under a
+pixel-art sky that runs from day to night, which the player digs, piles and
+builds with a pickaxe and a shovel. Every feature lives in its own folder under `Modules/` (scene
 and script side by side) so it can be ported into another project by copying
 that folder.
 
@@ -26,7 +26,8 @@ that folder.
 | 1-9, mouse wheel | pick a hotbar slot |
 | Tab | inventory |
 | Esc | pause |
-| F3 | terrain readout: region, heights, slope, sand depth, seed, far terrain |
+| F3 | terrain readout: region, heights, slope, sand depth, seed, far terrain, time of day |
+| [ / ] | an hour back / forward |
 
 Every action is rebindable in **Settings -> Controls**.
 
@@ -42,8 +43,8 @@ Every action is rebindable in **Settings -> Controls**.
 | `Modules/Tools/` | The tool interface, the pickaxe and shovel, the controller that drives them, and the highlight |
 | `Modules/Player/` | `CharacterBody3D` player rig with radial gravity, first or third person, animated model |
 | `Modules/Inventory/` | Hotbar and backpack, item resources, rendered item icons |
-| `Modules/Skybox/` | Pixel-art night sky and its moon: the source of the palette |
-| `Modules/Lighting/` | `LightingRig`: the moonlight and the ambient that fills its shadows |
+| `Modules/Skybox/` | Pixel-art sky, day and night, its sun and moon (the source of the palette); `DayCycle`, the turning planet's clock |
+| `Modules/Lighting/` | `LightingRig`: sunlight, moonlight, and the ambient that fills their shadows |
 | `Modules/Filters/` | Screen-space stylisation: outlines, pixelation, dither |
 | `Modules/Crosshair/`, `LoadingScreen/`, `MainMenu/`, `PauseMenu/`, `SettingsMenu/`, `Stats/` | HUD and menus |
 | `Tests/` | The test runner and suites; `Tests/Capture/` renders screenshots of the level |
@@ -369,18 +370,82 @@ Particle colours in the palette are what the player should *see*;
 lightness under the level's moonlight (`LitExposure`), with the moonlight's
 warm cast. Re-measure it with the capture tool if the lighting changes.
 
+## Day and night
+
+The planet turns (`DayCycle`, in the level beside the skybox). The sun circles
+the planet's axis once every 20 minutes (`DayLengthMinutes`), with the moon
+opposite it, so the time of day is local:
+- one side of the planet is in daylight while the far side is at night;
+- travelling far enough changes the time;
+- near the poles the sun stays low.
+
+The first frame sets 9:00 where the player stands (`StartHour`). `[` and `]`
+move the clock an hour, and F3 shows the local time, the sun's elevation and
+the stage of the day.
+
+The sky follows the Day-Night Sky Cycle spec (`Day–Night Sky Cycle
+Implementation Spec.md`; the decisions and the adapted palette are in
+`SKY_TODO.md`):
+- **Driven by elevation.** The spec's stages are set by the sun's elevation,
+  so the sky is too. The elevation over the local horizon is mapped onto the
+  spec's hour axis (`SkyPalette.HourFromElevation`), and its keyframes and
+  curves run as written.
+- **Colours adapted to our plum.** The spec's cool sky colours are turned
+  +36 degrees onto our plum, its pinks are placed on our rose ramp, and its
+  warm accents are kept. The day comes out lavender, the blue hour violet.
+- **Night is the backdrop.** Twilight ends on the night sky's own space
+  backdrop as it appears on screen, worked out from the skybox's settings,
+  so the gradient lands exactly on it. The last stop is blue hour carried half
+  way there in OKLab (equal steps look equal). The nebulae come through as the
+  sun sinks from 6 to 18 degrees down, so dusk falls steadily into the night,
+  with no drop at its end.
+- **Display colours.** The colours are what should appear on screen. The
+  shader is handed the values that land there through the Filmic tonemapper
+  (`SkyPalette.BeforeTonemap`).
+
+The day's layers are seamless: each is a smooth curve, with no bands, steps,
+corners or edges at the horizon. They are worked out from the exact view
+direction, not the pixel grid, and project-wide debanding dithers the final
+image so no gradient shows 8-bit steps (`SkyCapture` shots measure a largest
+step of one colour level between neighbouring pixels).
+- **Gradient:** overhead to horizon through the spec's stops, joined by a
+  smooth curve that levels off at the horizon.
+- **Twilight:** a warm glow along the horizon on the sun's side (apricot at
+  dawn, coral at dusk), purple light after sunset and before sunrise, and the
+  Belt of Venus over the Earth's shadow opposite the sun. Each fades as a
+  smooth bell and eases between the spec's stops.
+- **Stars:** they fade by day, and turn with the planet.
+- **The night:** unchanged, nebulae, stars and all.
+
+The sun is worked out as a real one is seen:
+- a disc far brighter than anything lit, darker at its limb, flattened as it
+  sets, and peach low but cream high;
+- the disc goes through the pixel filter, worked out on the sky's pixel grid
+  and hidden below the planet's real horizon;
+- around it, smooth: a forward-scattering glow (Cornette-Shanks), a haze
+  that widens near the horizon, and a glare round the disc.
+
+The moon glows the same way, far fainter. The far terrain's haze carries the
+same sun and moon glow as the sky behind it, so distant land takes the sky's
+light. The engine's bloom (`Skybox`, `BloomEnabled`) is off by default; the
+sky draws its own glare.
+
 ## Lighting
 
 `LightingRig` (drop `Modules/Lighting/LightingRig.tscn` into a level beside a
 `Skybox`) is the scene's light:
 
-- **Moonlight** is the key light: a warm, off-white gold directional light cast
-  from exactly where the skybox's moon hangs (`Skybox.MoonDirection`), so the
-  light and the moon can never disagree -- move the moon and the light follows.
-- **Ambient** is what fills its shadows: the backdrop's plum
+- **Sunlight and moonlight.** With a `DayCycle`, the sunlight comes from the
+  cycle's sun in the sun's own colour, and the moonlight from the moon
+  opposite, a warm off-white gold. Each fades as the day's light comes and
+  goes, and as it sinks below the local horizon; only the brighter casts
+  shadows. Without a cycle the moonlight comes from where the skybox's moon
+  hangs (`Skybox.MoonDirection`).
+- **Ambient** is what fills the shadows. By night it is the backdrop's plum
   (`AmbientColor`), leaned a little toward the moonlight's warmth
-  (`AmbientWarmth`), so the shadows stay plum while the scene sits in warm
-  light.
+  (`AmbientWarmth`). By day it moves toward the sky's own colours.
+- **Haze.** The far terrain's haze takes the sky's colour (the night's wine,
+  the day's horizon), lit toward the sun.
 
 The skybox only draws the background; ambient light is the rig's to set.
 
@@ -391,7 +456,9 @@ planet generator, the terrain (cost, determinism, thread safety, the slope
 bound, over sky-island zones too, skipped chunks matching their cells, the
 region mix, sky-island craters filled and heaped to a point, peak heights, sand
 on the flat and none on cliffs, spawn points on top of the ground, seeds), the
-far terrain (arches kept at three levels, the first ring on the chunks'
+day-night sky (the spec's keyframes and curves, no jump at midnight, the
+elevation-to-hour mapping, the tonemap inverse, the sun crossing the sky and
+the time being local), the far terrain (arches kept at three levels, the first ring on the chunks'
 ground, each level morphing onto the next, no holes while streaming), the shovel on generated ground (raising on
 a hillside and where the lattice leans, levelling a hillside, smoothing where
 sand meets rock), both meshers (flatness, winding, closed solids, watertight
@@ -442,6 +509,20 @@ For the terrain:
 godot --headless --path . res://Tests/Capture/PlanetMap.tscn -- --seed=1 --out=C:/maps/one.png
 godot --path . res://Tests/Capture/TerrainCapture.tscn -- --seed=1 --out=C:/shots [--spots=flat,jagged]
 godot --path . res://Tests/Capture/StressCapture.tscn -- --seconds=90 [--seed=1] [--spot=jagged]
+```
+
+For the sky, `Tests/Capture/SkyCapture.tscn` stops the clock at the spec's
+checkpoints and photographs toward the sun, away from it and overhead:
+- 5:30, blue hour;
+- 6:30, the dawn glow with the belt opposite;
+- 12:30, midday;
+- 18:15, sunset;
+- 18:55, purple light;
+- 22:00, night;
+- and either side of midnight.
+
+```sh
+godot --path . res://Tests/Capture/SkyCapture.tscn -- --out=C:/shots [--spot=flat] [--hours=5.5,12.5]
 ```
 
 ## Painting your own skybox
@@ -611,8 +692,9 @@ same stepped falloff and colour ramp as a twinkle arm.
 an angular radius in degrees) on its own pixel grid as fine as the sky's:
 off-white gold highlands (`MoonLight`) with grey maria (`MoonShade`) from a
 stepped noise, round craters (`MoonCraters`) each with a lit and a shadowed
-rim, two hard steps of limb darkening, and a faint stepped halo in the sky's
-dusty rose (`MoonHaloColor`). It keeps its place while the stars and clouds
+rim, two hard steps of limb darkening, and a smooth glow round it, forward
+scattering like the sun's, in its light and the sky's dusty rose
+(`MoonHalo`, `MoonHaloColor`). It keeps its place while the stars and clouds
 turn, and it hides whatever is behind it. Its colours are kept below the
 tonemapper's shoulder, or the Filmic curve flattens highlands and maria into
 one pale disc.

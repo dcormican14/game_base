@@ -1,12 +1,27 @@
-// Procedural night sky in the style of the reference pixel art, built as four
-// layers that composite in order:
+// Procedural day-and-night sky in the style of the reference pixel art,
+// built as layers that composite in order:
 //
 //   1. SPACE    flat plum ground (#28061e halved toward black)
 //   2. NEBULAE  clouds quantized into a few flat tones with hard stepped
 //               edges, orbiting one axis like a very slow hurricane
-//   3. STARS    three sizes with drawn twinkle arms, plus rare shooting stars
-//   4. MOON     a still, pixel-drawn moon with maria and craters -- the
-//               light the scene is lit by (see LightingRig)
+//   3. DAY      the Day-Night spec's sky: overhead-to-horizon gradient, the
+//               warm glow on the sun's side, purple light, and the Belt of
+//               Venus over the Earth's shadow (see DayCycle, which hands over
+//               every colour and strength ready to draw). SEAMLESS: every
+//               layer is a smooth curve -- no bands, no steps, no corners,
+//               nothing stopping at the horizon -- worked out from the exact
+//               direction, not the pixel grid
+//   4. STARS    three sizes with drawn twinkle arms, plus rare shooting
+//               stars, fading out by day
+//   5. SUN      a realistic sun -- an over-bright disc, darker at its limb,
+//               flattened near the horizon, in a forward-scattering glow.
+//               The disc is put through the pixel filter (worked out on the
+//               sky's pixel grid); its glow is smooth, like the day's layers
+//   6. MOON     a pixel-drawn moon with maria and craters, opposite the sun,
+//               shining the same way
+//
+// The night is unchanged: with the day's layers at zero, what is drawn is the
+// night sky as it always was. The stars and nebulae turn with the planet.
 //
 // Each of the first three has a BRIGHTNESS from 0 (black) to 1 (the layer's
 // full, calibrated luminosity), so the night can be dimmed layer by layer.
@@ -132,8 +147,64 @@ uniform vec3 moon_shade : source_color = vec3(0.34, 0.31, 0.30);
 uniform float moon_brightness : hint_range(0.0, 2.0) = 1.0;
 // A faint stepped halo around the disc, in the sky's own dusty rose.
 uniform vec3 moon_halo_color : source_color = vec3(0.30, 0.12, 0.15);
+// The moon's glow: forward scattering like the sun's, far fainter.
 uniform float moon_halo : hint_range(0.0, 1.0) = 0.3;
+uniform float moon_scatter : hint_range(0.0, 0.99) = 0.85;
 uniform int moon_craters : hint_range(0, 24) = 11;
+
+// --- The day (DayCycle sets all of these every frame) -----------------------
+// Colours are pre-tonemap values that land on screen as the spec's display
+// colours (SkyPalette.BeforeTonemap).
+uniform vec3 local_up = vec3(0.0, 1.0, 0.0);
+uniform vec3 sun_direction = vec3(0.0, -1.0, 0.0);
+// The sine of the planet's horizon below the level: the planet hides the sun,
+// the moon and their glow below it.
+uniform float horizon_sine = 0.0;
+// The planet's axis and how far it has turned: the stars and nebulae turn
+// with it.
+uniform vec3 sky_axis = vec3(0.0, 1.0, 0.0);
+uniform float sky_turn = 0.0;
+
+// How much of the night's layers the day's gradient covers.
+uniform float day_amount = 0.0;
+uniform vec3 day_zenith = vec3(0.0);
+uniform vec3 day_horizon = vec3(0.0);
+uniform float star_visibility = 1.0;
+
+uniform vec3 glow_color = vec3(1.0, 0.6, 0.4);
+uniform float glow_strength = 0.0;
+uniform vec3 purple_color = vec3(0.5, 0.3, 0.35);
+uniform float purple_strength = 0.0;
+uniform vec3 belt_color = vec3(0.8, 0.4, 0.4);
+uniform vec3 shadow_color = vec3(0.2, 0.1, 0.25);
+uniform float belt_strength = 0.0;
+
+// --- The sun -------------------------------------------------------------------
+uniform bool sun_enabled = true;
+uniform vec3 sun_color = vec3(1.0, 0.9, 0.75);
+// Angular radius in degrees. Larger than the real sun's quarter degree, as
+// the moon is: a drawn sun, a few dozen pixels across.
+uniform float sun_size : hint_range(0.2, 10.0) = 2.2;
+// How bright the disc is, against the sky: well past the glow threshold, so
+// the bloom picks it up and the tonemapper rolls it to a cream-white core.
+uniform float sun_energy : hint_range(1.0, 100.0) = 14.0;
+// The share of the radius over which the disc's edge softens.
+uniform float sun_edge : hint_range(0.01, 0.5) = 0.15;
+// Limb darkening, per channel: the edge is dimmer than the centre, a little
+// more so in blue (measured solar values are about 0.6).
+uniform vec3 sun_limb = vec3(0.55, 0.6, 0.68);
+// Height over width: 0.83 setting, 1 overhead (DayCycle).
+uniform float sun_flatten = 1.0;
+// The glow: forward scattering (Cornette-Shanks), how peaked and how strong,
+// and a wide haze that grows as the sun nears the horizon.
+uniform float sun_scatter : hint_range(0.0, 0.99) = 0.76;
+uniform float sun_glow : hint_range(0.0, 2.0) = 0.08;
+uniform float sun_haze : hint_range(0.0, 2.0) = 0.35;
+// The glare round the disc -- what a bloom would do, but worked out here so
+// it lands on the pixel grid with everything else. Its brightness at the
+// disc's edge (1 is the sky's own white), and its reach in sun radii.
+uniform float sun_glare : hint_range(0.0, 4.0) = 0.9;
+uniform float sun_glare_radius : hint_range(1.0, 8.0) = 1.8;
 
 // ---------------------------------------------------------------------------
 // Hashes: cheap deterministic pseudo-random, no texture lookups.
@@ -673,12 +744,167 @@ vec3 moon_surface(vec2 q) {
 }
 
 // ---------------------------------------------------------------------------
-// Composite the four layers, in order.
+// LAYER 3 — the day.
+//
+// Everything from DayCycle is ready to draw: colours and strengths for the
+// current hour. What is worked out here is only WHERE: by the direction's
+// elevation over the local horizon and its bearing from the sun, where the
+// spec works by screen position.
+
+// How far from the overhead colour to the horizon colour, for a height from
+// 0 (overhead) to 1 (the horizon): the spec's stops (0 at 0, 0.38 at 0.55, 1
+// at 1), joined by a smooth curve with no corner at any stop. It flattens out
+// at the horizon, so holding it there below the horizon leaves no line.
+float horizon_weight(float s) {
+    s = clamp(s, 0.0, 1.0);
+    // Hermite segments: level at the zenith, 1.5 steep through the middle stop,
+    // level again at the horizon.
+    const float steep = 1.5;
+    if (s <= 0.55) {
+        float t = s / 0.55;
+        return 0.38 * (3.0 * t * t - 2.0 * t * t * t) + 0.55 * steep * (t * t * t - t * t);
+    }
+    float t = (s - 0.55) / 0.45;
+    return 0.38 * (2.0 * t * t * t - 3.0 * t * t + 1.0)
+        + 0.45 * steep * (t * t * t - 2.0 * t * t + t)
+        + (3.0 * t * t - 2.0 * t * t * t);
+}
+
+// A smooth step between two values, flat at both ends.
+float ease(float from, float to, float t) {
+    return mix(from, to, smoothstep(0.0, 1.0, t));
+}
+
+// The point on the horizon beneath the sun.
+vec3 under_sun(vec3 up) {
+    vec3 level = sun_direction - up * dot(sun_direction, up);
+    float length_level = length(level);
+    return length_level > 1e-4 ? level / length_level : vec3(0.0);
+}
+
+vec3 day(vec3 view, vec3 night) {
+    vec3 up = local_up;
+    float up_sine = dot(view, up);
+    float elevation = asin(clamp(up_sine, -1.0, 1.0));
+
+    // The gradient: overhead colour at the zenith, horizon colour at the
+    // horizon, deep for most of the sky and paling fast near the horizon.
+    float w = horizon_weight(1.0 - elevation / 1.5707963);
+    vec3 color = mix(night, mix(day_zenith, day_horizon, w), day_amount);
+
+    vec3 beneath = under_sun(up);
+    if (dot(beneath, beneath) < 0.5) {
+        return color;
+    }
+
+    // Bearing from the sun, round the horizon (-pi..pi). It is undefined only
+    // straight up and down, where every glow below has died away.
+    vec3 side = cross(up, beneath);
+    float bearing = atan(dot(view, side), dot(view, beneath));
+
+    // The warm glow round the sun's side of the horizon: 75 degrees along it
+    // and 35 up, hugging the horizon as a real one does. The spec's stops
+    // (0.6 at the centre, 0.22 a third of the way out, nothing at the edge)
+    // as one smooth bell.
+    if (glow_strength > 0.001) {
+        float a = length(vec2(bearing / radians(75.0), elevation / radians(35.0)));
+        float alpha = 0.6 * exp(-pow(a / 0.34, 2.0));
+        color = mix(color, glow_color, alpha * glow_strength);
+    }
+
+    // Purple light: a rosy disc 16 degrees up on the sun's side, fading
+    // smoothly to nothing at 45 degrees out and below the horizon.
+    if (purple_strength > 0.001) {
+        vec3 centre = normalize(beneath * cos(radians(16.0)) + up * sin(radians(16.0)));
+        float a = acos(clamp(dot(view, centre), -1.0, 1.0)) / radians(45.0);
+        float alpha = 0.5 * purple_strength * (1.0 - smoothstep(0.0, 1.0, a))
+            * smoothstep(radians(-4.0), radians(4.0), elevation);
+        color = mix(color, purple_color, alpha);
+    }
+
+    // The Belt of Venus over the Earth's shadow: a band from the horizon to
+    // 15 degrees up, opposite the sun, fading toward the sun's side. The
+    // spec's stops, eased from one to the next so none shows as a line; past
+    // the horizon it holds as it is there.
+    if (belt_strength > 0.001) {
+        float v = clamp(1.0 - degrees(elevation) / 15.0, 0.0, 1.0);
+        vec3 tint = mix(belt_color, shadow_color, smoothstep(0.6, 0.85, v));
+        float alpha = v < 0.35 ? ease(0.0, 0.50, v / 0.35)
+            : v < 0.60 ? ease(0.50, 0.30, (v - 0.35) / 0.25)
+            : v < 0.85 ? ease(0.30, 0.45, (v - 0.60) / 0.25)
+            : ease(0.45, 0.60, (v - 0.85) / 0.15);
+        alpha *= belt_strength * smoothstep(60.0, 120.0, degrees(abs(bearing)));
+        color = mix(color, tint, alpha);
+    }
+
+    return color;
+}
+
+// ---------------------------------------------------------------------------
+// LAYER 5 — the sun.
+//
+// Worked out as a real sun is seen -- then sampled on the sky's pixel grid,
+// like everything else, which is the pixel filter.
+
+// Cornette-Shanks phase function: how much light scatters toward the eye at
+// an angle (cosine c) from a light, for haze with forward peak g.
+float phase_cs(float c, float g) {
+    float g2 = g * g;
+    return 3.0 / (8.0 * 3.14159265) * ((1.0 - g2) * (1.0 + c * c))
+        / ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * c, 1.5));
+}
+
+// Below the planet's horizon, the planet is in the way.
+float above_horizon(vec3 view) {
+    return smoothstep(horizon_sine - 0.004, horizon_sine + 0.002, dot(view, local_up));
+}
+
+// `view` is the direction on the pixel grid, for the disc; `exact` the true
+// direction, for the glow, so it stays one smooth curve.
+vec3 sun(vec3 view, vec3 exact, bool cubemap) {
+    vec3 to_sun = normalize(sun_direction);
+    float sun_up = dot(to_sun, local_up);
+    float cosine = dot(view, to_sun);
+
+    // The disc, in its own frame: flattened upright as it nears the horizon.
+    vec3 upright = local_up - to_sun * sun_up;
+    upright = dot(upright, upright) > 1e-6 ? normalize(upright) : normalize(cross(to_sun, vec3(1.0, 0.0, 0.0)));
+    vec3 side = cross(to_sun, upright);
+    vec3 offset = view - to_sun * cosine;
+    vec2 q = vec2(dot(offset, side), dot(offset, upright) / sun_flatten) / tan(radians(sun_size));
+    float r = length(q);
+
+    float disc = cosine > 0.0 ? 1.0 - smoothstep(1.0 - sun_edge, 1.0, r) : 0.0;
+    float mu = sqrt(max(0.0, 1.0 - min(r * r, 1.0)));
+    vec3 limb = 1.0 - sun_limb * (1.0 - mu);
+
+    // The glow: tight forward scattering, plus a wide haze that grows as the
+    // sun gets low; it lingers a little after the disc has set. Not cut off
+    // at the horizon: below it, the ground is in front of it anyway.
+    float exact_cosine = dot(exact, to_sun);
+    float angle = 2.0 * asin(clamp(length(exact - to_sun) * 0.5, 0.0, 1.0));
+    float low = 1.0 - smoothstep(0.0, 0.35, sun_up);
+    float glow = phase_cs(exact_cosine, sun_scatter) * sun_glow
+        + sun_haze * low / (1.0 + pow(angle / 0.12, 2.0));
+    glow *= smoothstep(-0.1, 0.02, sun_up);
+
+    // Over-bright only for what is seen: in the ambient cubemap a blazing
+    // disc would bleed into every shadow. The glare is a smooth bell from
+    // the middle of the disc.
+    float energy = cubemap ? 1.0 : sun_energy;
+    float glare = cubemap ? 0.0 : sun_glare * exp(-pow(r / sun_glare_radius, 2.0) + pow(1.0 / sun_glare_radius, 2.0));
+    return sun_color * (glow + glare) + sun_color * disc * energy * limb * above_horizon(view);
+}
+
+// ---------------------------------------------------------------------------
+// Composite the layers, in order.
 vec3 space(vec3 dir, float time, bool with_stars) {
     // Stars rotate with the sky, far slower than the gas. The direction is
     // spun BEFORE snapping, so the pixel grid and the star cells turn together
-    // as one rigid field rather than stars sliding across a fixed grid.
-    vec3 star_dir = rotate_about(dir, normalize(nebula_axis), -time * star_spin);
+    // as one rigid field rather than stars sliding across a fixed grid. The
+    // whole field also turns with the planet, as the sun does.
+    vec3 turned = rotate_about(dir, normalize(sky_axis), sky_turn);
+    vec3 star_dir = rotate_about(turned, normalize(nebula_axis), -time * star_spin);
 
     vec3 snapped;
     vec2 cell;
@@ -696,25 +922,45 @@ vec3 space(vec3 dir, float time, bool with_stars) {
         color = mix(color, gas.rgb * nebula_brightness, clamp(gas.a, 0.0, 1.0));
     }
 
-    // The moon, from the unturned direction: it stays put while the rest of
-    // the sky wheels past it.
+    // LAYER 3 — the day, from the exact direction (unturned: the day's light
+    // belongs to the sun, not to the stars). The discs below use the sky's
+    // pixel grid.
+    vec3 view;
+    vec2 view_cell;
+    float view_face;
+    to_pixel(dir, view, view_cell, view_face);
+    color = day(dir, color);
+
+    // The moon, from the unturned direction: it stays opposite the sun while
+    // the rest of the sky wheels past it. Hidden below the planet's horizon.
+    float moon_seen = above_horizon(view);
     vec2 disc = moon_enabled ? moon_disc(dir) : vec2(1e3);
     float from_centre = length(disc);
 
-    if (from_centre < 1.0) {
+    if (from_centre < 1.0 && moon_seen > 0.5) {
         return moon_surface(disc);
     }
 
-    // Its halo: two faint stepped rings over the gas, under the stars.
-    float halo = moon_halo * (0.5 * step(from_centre, 1.3) + 0.25 * step(from_centre, 1.7));
-    color += moon_halo_color * moon_brightness * halo;
+    // Its glow: forward scattering like the sun's, far fainter, over the gas
+    // and under the stars. Smooth, and not cut off at the horizon.
+    if (moon_enabled) {
+        float toward = dot(dir, normalize(moon_direction));
+        color += (moon_light * 0.6 + moon_halo_color) * moon_brightness * moon_halo
+            * phase_cs(toward, moon_scatter) * 0.25;
+    }
 
-    // LAYER 3 — stars, in front of the gas.
-    if (with_stars) {
-        color += stars(snapped, time);
+    // LAYER 4 — stars, in front of the gas, fading by day.
+    if (with_stars && star_visibility > 0.001) {
+        vec3 shine = stars(snapped, time);
         if (shooting_enabled) {
-            color += shooting_star(snapped, time);
+            shine += shooting_star(snapped, time);
         }
+        color += shine * star_visibility;
+    }
+
+    // LAYER 5 — the sun.
+    if (sun_enabled) {
+        color += sun(view, dir, !with_stars);
     }
 
     return color;

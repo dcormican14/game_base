@@ -1,6 +1,7 @@
 using Godot;
 using GameBase.Core;
 using GameBase.Planets;
+using GameBase.World;
 
 namespace GameBase.Terrain;
 
@@ -24,6 +25,7 @@ public partial class TerrainReadout : CanvasLayer
     private Control _panel;
     private Planet _planet;
     private Node3D _player;
+    private DayCycle _cycle;
     private double _since;
 
     public override void _Ready()
@@ -81,6 +83,7 @@ public partial class TerrainReadout : CanvasLayer
         Node scene = GetTree().CurrentScene ?? GetParent();
         _planet ??= NodeSearch.FindByType<Planet>(scene);
         _player ??= GetTree().GetFirstNodeInGroup(Groups.Player) as Node3D;
+        _cycle ??= NodeSearch.FindByType<DayCycle>(scene);
 
         if (_planet?.Shape == null || _player == null)
         {
@@ -115,7 +118,14 @@ public partial class TerrainReadout : CanvasLayer
             (far == null
                 ? "Far terrain off"
                 : $"Far {far.DrawnBlocks} drawn, {far.WantedBlocks} wanted ({far.LevelCounts}), {far.PendingBlocks} pending") +
-            $"\nChunks {_planet.World.Store.ChunkCount}, sections pending {_planet.World.PendingSections}";
+            $"\nChunks {_planet.World.Store.ChunkCount}, sections pending {_planet.World.PendingSections}" +
+            (_cycle == null ? "" : $"\n{Clock(_cycle.LocalHour)} local, sun {_cycle.SunElevation:0.0} deg, {_cycle.Phase} ([ and ] change the time)");
+    }
+
+    private static string Clock(float hour)
+    {
+        int minutes = (int)(SkyPalette.Wrap(hour) * 60) % (24 * 60);
+        return $"{minutes / 60:00}:{minutes % 60:00}";
     }
 
     private float Difference(Vector3 at, Vector3 step)
